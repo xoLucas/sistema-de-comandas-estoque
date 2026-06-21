@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block content %}
+<header>
+    <h1>ESTOQUE</h1>
+    <p class="subtitle">Painel de Controle</p>
+</header>
+
+<div class="stock-summary" id="stock-summary">
+    <div class="summary-card status-em_falta">
+        <span class="summary-count" id="count-em_falta">0</span>
+        <span class="summary-label">Em Falta</span>
+    </div>
+    <div class="summary-card status-em_risco">
+        <span class="summary-count" id="count-em_risco">0</span>
+        <span class="summary-label">Em Risco</span>
+    </div>
+    <div class="summary-card status-em_conformidade">
+        <span class="summary-count" id="count-em_conformidade">0</span>
+        <span class="summary-label">Em Conformidade</span>
+    </div>
+</div>
+
+<div class="filter-bar">
+    <select id="filter-category" onchange="loadStock()" class="select-field">
+        <option value="">Todas Categorias</option>
+    </select>
+    <select id="filter-status" onchange="loadStock()" class="select-field">
+        <option value="">Todos Status</option>
+        <option value="em_falta">Em Falta</option>
+        <option value="em_risco">Em Risco</option>
+        <option value="em_conformidade">Em Conformidade</option>
+    </select>
+    <select id="sort-by" onchange="loadStock()" class="select-field">
+        <option value="name">A-Z</option>
+        <option value="stock">Qtd</option>
+        <option value="pct">% do Mínimo</option>
+    </select>
+</div>
+
+<div id="stock-items" class="stock-items">
+    <div class="loading">Carregando...</div>
+</div>
+
+<div class="actions-stack">
+    <button onclick="showBatchLoad()" class="btn-secondary-full">Adicionar Carregamento</button>
+</div>
+
+<div id="batch-modal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <h3>Carregamento de Estoque</h3>
+        <div id="batch-items"></div>
+        <button onclick="submitBatchLoad()" class="btn-primary-full">Confirmar Carregamento</button>
+        <button onclick="closeBatchLoad()" class="btn-secondary-full">Cancelar</button>
+        <p id="batch-error" class="error-msg" style="display:none;"></p>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    checkAuth((user) => {
+        document.getElementById('bottom-nav').style.display = 'flex';
+        highlightNav('estoque');
+        loadStock();
+    });
+});
+</script>
+{% endblock %}

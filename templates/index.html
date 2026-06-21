@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}
+<header>
+    <h1>LADS BEER</h1>
+    <p class="subtitle" id="user-greeting"></p>
+</header>
+
+<div id="table-grid" class="table-grid">
+    <div class="loading">Carregando mesas...</div>
+</div>
+
+<button id="refresh-btn" class="btn-secondary-full" style="margin-top:4px;">Atualizar</button>
+{% endblock %}
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    checkAuth(async (user) => {
+        document.getElementById('user-greeting').textContent = 'Olá, ' + user.name;
+        document.getElementById('bottom-nav').style.display = 'flex';
+        highlightNav('mesas');
+        loadTables();
+    });
+    document.getElementById('refresh-btn').addEventListener('click', loadTables);
+});
+</script>
+{% endblock %}

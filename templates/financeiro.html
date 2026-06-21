@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block content %}
+<header>
+    <h1>FINANCEIRO</h1>
+    <p class="subtitle">Relatórios e Vendas</p>
+</header>
+
+<div class="dashboard" id="dashboard">
+    <div class="dashboard-card">
+        <span class="dash-label">Hoje</span>
+        <span class="dash-value" id="dash-today-total">R$ 0,00</span>
+        <span class="dash-sub" id="dash-today-count">0 comandas</span>
+    </div>
+    <div class="dashboard-card">
+        <span class="dash-label">Semana</span>
+        <span class="dash-value" id="dash-week-total">R$ 0,00</span>
+        <span class="dash-sub" id="dash-week-count">0 comandas</span>
+    </div>
+    <div class="dashboard-card">
+        <span class="dash-label">Mês</span>
+        <span class="dash-value" id="dash-month-total">R$ 0,00</span>
+        <span class="dash-sub" id="dash-month-count">0 comandas</span>
+    </div>
+</div>
+
+<div class="filter-bar">
+    <input type="date" id="sale-date-filter" onchange="loadSales()" class="select-field">
+    <button onclick="loadSales()" class="btn-small">Filtrar</button>
+    <button onclick="dailyCloseReport()" class="btn-small">Fechamento Diário</button>
+</div>
+
+<div id="sales-list" class="sales-list">
+    <div class="loading">Carregando...</div>
+</div>
+
+<div id="report-modal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <h3>Relatório de Fechamento</h3>
+        <div id="report-content"></div>
+        <button onclick="closeReport()" class="btn-secondary-full">Fechar</button>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    checkAuth((user) => {
+        document.getElementById('bottom-nav').style.display = 'flex';
+        highlightNav('financeiro');
+        document.getElementById('sale-date-filter').value = new Date().toISOString().split('T')[0];
+        loadDashboard();
+        loadSales();
+    });
+});
+</script>
+{% endblock %}

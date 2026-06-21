@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="theme-color" content="#0d1117">
+    <title>Lads Beer</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        {% block content %}{% endblock %}
+    </div>
+
+    <nav class="bottom-nav" id="bottom-nav" style="display:none;">
+        <a href="/" class="nav-item" data-page="mesas">
+            <span class="nav-icon">&#9632;</span>
+            <span class="nav-label">Mesas</span>
+        </a>
+        <a href="/estoque" class="nav-item" data-page="estoque">
+            <span class="nav-icon">&#9776;</span>
+            <span class="nav-label">Estoque</span>
+        </a>
+        <a href="/financeiro" class="nav-item" data-page="financeiro">
+            <span class="nav-icon">&#9679;</span>
+            <span class="nav-label">Financeiro</span>
+        </a>
+        <a href="#" class="nav-item" onclick="logout()">
+            <span class="nav-icon">&#10149;</span>
+            <span class="nav-label">Sair</span>
+        </a>
+    </nav>
+
+    <div id="name-modal" class="modal" style="display:none;">
+        <div class="modal-content">
+            <h3>Registro de Garçom</h3>
+            <p>Identifique-se para continuar:</p>
+            <input type="text" id="register-name-input" placeholder="Seu nome completo" class="input-field" autocomplete="name">
+            <button onclick="registerName()" class="btn-primary-full">Confirmar</button>
+            <p id="name-modal-error" class="error-msg" style="display:none;"></p>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

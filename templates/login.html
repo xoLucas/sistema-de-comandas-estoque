@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="login-container">
+    <div class="login-card">
+        <span class="logo-icon">&#127866;</span>
+        <h1>LADS BEER</h1>
+        <p class="subtitle">Sistema de Comandas</p>
+
+        <form id="login-form" onsubmit="doLogin(event)" autocomplete="on">
+            <input type="text" id="username" placeholder="Usuário" class="input-field" required autocomplete="username" autocapitalize="none">
+            <input type="password" id="password" placeholder="Senha" class="input-field" required autocomplete="current-password">
+            <p id="login-error" class="error-msg" style="display:none;"></p>
+            <button type="submit" class="btn-primary-full">Entrar</button>
+        </form>
+
+        <p class="login-hint">Usuário default: sem_nome / 123456</p>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+function doLogin(e) {
+    e.preventDefault();
+    const username = document.getElementById('username').value;
+    const password = document.getElementById('password').value;
+    const errorEl = document.getElementById('login-error');
+
+    fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+    })
+    .then(r => r.json().then(data => ({ status: r.status, data })))
+    .then(({ status, data }) => {
+        if (status === 401 || data.detail) {
+            errorEl.textContent = data.detail || 'Erro ao fazer login';
+            errorEl.style.display = 'block';
+            return;
+        }
+        localStorage.setItem('lads_token', data.access_token);
+        localStorage.setItem('lads_user', JSON.stringify(data.user));
+        window.location.href = '/';
+    })
+    .catch(() => {
+        errorEl.textContent = 'Erro de conexão';
+        errorEl.style.display = 'block';
+    });
+}
+</script>
+{% endblock %}

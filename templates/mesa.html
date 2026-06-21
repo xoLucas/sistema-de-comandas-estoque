@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block content %}
+<header class="table-header">
+    <a href="/" class="back-btn">&larr; Mesas</a>
+    <div style="min-width:0;">
+        <h1 id="table-title">MESA</h1>
+        <p id="table-status" class="subtitle">Carregando...</p>
+    </div>
+</header>
+
+<div id="customer-section" style="display:none;margin-bottom:12px;">
+    <div class="form-row">
+        <input type="text" id="customer-name-input" placeholder="Nome do cliente (opcional)" class="input-field">
+        <button onclick="setCustomerName()" class="btn-small">OK</button>
+    </div>
+</div>
+
+<div class="order-total" id="order-total">
+    <span>Total</span>
+    <span id="total-value">R$ 0,00</span>
+    <div id="partial-info" style="display:none;">
+        <span class="partial-label">Pago </span>
+        <span id="partial-value">R$ 0,00</span>
+    </div>
+</div>
+
+<div id="open-actions" style="display:none;">
+    <button onclick="openOrder()" class="btn-open-full">Abrir Comanda</button>
+</div>
+
+<div id="active-actions" style="display:none;">
+    <div id="pedidos-section"></div>
+
+    <button onclick="showAddPedidoModal()" class="btn-pedido-full">+ Novo Pedido</button>
+
+    <div class="actions-stack" id="close-actions">
+        <div class="form-row">
+            <input type="number" id="partial-payment-input" placeholder="Pagamento parcial R$" class="input-field" step="0.01" min="0">
+            <button onclick="registerPartialPayment()" class="btn-small">Pagar</button>
+        </div>
+        <button onclick="closeOrder(false)" class="btn-close-full">Fechar Mesa</button>
+        <button onclick="closeOrder(true)" class="btn-close-service">Fechar Mesa com 10%</button>
+    </div>
+</div>
+
+<div id="add-pedido-modal" class="modal" style="display:none;">
+    <div class="modal-content modal-large">
+        <h3>Novo Pedido</h3>
+        <div id="pedido-product-list" class="pedido-product-list"></div>
+        <div style="display:flex;gap:8px;margin-top:12px;">
+            <button onclick="submitPedido()" class="btn-primary-full" style="flex:1;">Confirmar</button>
+            <button onclick="closeAddPedidoModal()" class="btn-secondary-full" style="flex:1;">Cancelar</button>
+        </div>
+        <p id="pedido-error" class="error-msg" style="display:none;"></p>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const TABLE_ID = {{ table_id }};
+document.addEventListener('DOMContentLoaded', () => {
+    checkAuth((user) => {
+        document.getElementById('bottom-nav').style.display = 'flex';
+        loadTableDetail(user);
+    });
+});
+</script>
+{% endblock %}

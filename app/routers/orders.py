@@ -39,6 +39,7 @@ class PartialPaymentRequest(BaseModel):
     table_id: int
     amount: float
     payment_method: str | None = None
+    apply_service_charge: bool = False
 
 
 class PedidoItem(BaseModel):
@@ -356,19 +357,35 @@ async def partial_payment(
     if not order:
         return {"error": "Nenhuma comanda aberta para esta mesa"}
 
-    order.partial_payment += req.amount
+    if req.apply_service_charge:
+        product_portion = round(req.amount / 1.10, 2)
+        service_portion = round(req.amount - product_portion, 2)
+    else:
+        product_portion = req.amount
+        service_portion = 0.0
+
+    order.partial_payment += product_portion
+    order.partial_service_charge += service_portion
 
     detail = order.partial_payments_detail or []
-    detail.append({"amount": req.amount, "method": req.payment_method or "nao_informado"})
+    detail.append({
+        "amount": req.amount,
+        "product_portion": product_portion,
+        "service_portion": service_portion,
+        "method": req.payment_method or "nao_informado",
+        "apply_service_charge": req.apply_service_charge,
+    })
     order.partial_payments_detail = detail
 
     await db.commit()
 
+    remaining_product = max(0.0, order.total - order.partial_payment)
     return {
         "order_id": order.id,
         "partial_payment": float(order.partial_payment),
+        "partial_service_charge": float(order.partial_service_charge),
         "total": float(order.total),
-        "remaining": float(order.total - order.partial_payment),
+        "remaining": float(remaining_product),
     }
 
 
@@ -399,7 +416,9 @@ async def close_order(
         order.service_charge_applied = False
 
     service_charge_amount = order.total * (order.service_charge_pct / 100)
-    final_total = order.total + service_charge_amount - order.partial_payment
+    remaining_product = max(0.0, order.total - order.partial_payment)
+    remaining_service = max(0.0, service_charge_amount - order.partial_service_charge)
+    final_total = remaining_product + remaining_service
 
     order.status = "finalizada"
     order.closed_at = datetime.now()
@@ -414,9 +433,10 @@ async def close_order(
         "table_number": table.number,
         "total": float(order.total),
         "service_charge_pct": float(order.service_charge_pct),
-        "service_charge_amount": float(service_charge_amount),
+        "service_charge_amount": round(float(service_charge_amount), 2),
         "partial_payment": float(order.partial_payment),
-        "final_total": float(final_total),
+        "partial_service_charge": float(order.partial_service_charge),
+        "final_total": round(float(final_total), 2),
         "payment_method": order.payment_method,
         "status": "finalizada",
     }

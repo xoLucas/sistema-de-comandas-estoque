@@ -99,7 +99,7 @@ async function loadTables() {
             card.innerHTML = `
                 <span class="table-label">${t.label}</span>
                 <span class="table-status-tag">${statusLabel(t.status)}</span>
-                ${t.has_open_order ? `<span class="table-total-text">${formatCurrency(t.total - (t.partial_payment || 0))}</span>` : ''}
+                ${t.has_open_order ? `<span class="table-total-text">${formatCurrency(Math.max(0, t.total - (t.partial_payment || 0)))}</span>` : ''}
             `;
             grid.appendChild(card);
         });
@@ -132,15 +132,17 @@ async function loadTableDetail(user) {
         }
 
         document.getElementById('total-value').textContent = formatCurrency(data.total);
-        if (data.partial_payment > 0) {
-            document.getElementById('partial-info').style.display = 'block';
-            document.getElementById('partial-value').textContent = formatCurrency(data.partial_payment);
+        const partialInfo = document.getElementById('partial-info');
+        if (data.partial_payment > 0 || data.partial_service_charge > 0) {
+            partialInfo.style.display = 'block';
+            const svcPart = data.partial_service_charge > 0 ? ` (+ ${formatCurrency(data.partial_service_charge)} serviço)` : '';
+            document.getElementById('partial-value').textContent = formatCurrency(data.partial_payment) + svcPart;
             const paidCount = countPaidItems();
             const totalItems = countTotalItems();
             document.getElementById('partial-detail').textContent =
                 paidCount + ' de ' + totalItems + ' itens pagos';
         } else {
-            document.getElementById('partial-info').style.display = 'none';
+            partialInfo.style.display = 'none';
         }
 
         const openActions = document.getElementById('open-actions');
@@ -570,7 +572,7 @@ async function submitPartialPayment() {
     try {
         const res = await apiFetch(API_BASE + '/comanda/pagamento-parcial', {
             method: 'POST',
-            body: JSON.stringify({ table_id: TABLE_ID, amount: total, payment_method: pMethod })
+            body: JSON.stringify({ table_id: TABLE_ID, amount: total, payment_method: pMethod, apply_service_charge: applyService })
         });
         const data = await res.json();
         if (data.error) {
@@ -611,19 +613,23 @@ async function showCloseModal() {
 
     const total = currentTableData.total || 0;
     const paid = currentTableData.partial_payment || 0;
+    const paidService = currentTableData.partial_service_charge || 0;
     const service = total * 0.10;
-    const final = total + service - paid;
+    const remainingProduct = Math.max(0, total - paid);
+    const remainingService = Math.max(0, service - paidService);
+    const final = remainingProduct + remainingService;
 
     document.getElementById('close-summary').innerHTML = `
         <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:14px;color:var(--text-muted);">
-            <span>Total</span><span>${formatCurrency(total)}</span>
+            <span>Total Produtos</span><span>${formatCurrency(total)}</span>
         </div>
         <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:14px;color:var(--text-muted);">
             <span>10% Serviço</span><span id="close-service-display">${formatCurrency(service)}</span>
         </div>
         <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:14px;color:var(--text-muted);">
-            <span>Já Pago</span><span>- ${formatCurrency(paid)}</span>
+            <span>Já Pago (produtos)</span><span>- ${formatCurrency(paid)}</span>
         </div>
+        ${paidService > 0 ? `<div style="display:flex;justify-content:space-between;padding:6px 0;font-size:14px;color:var(--text-muted);"><span>Já Pago (serviço)</span><span>- ${formatCurrency(paidService)}</span></div>` : ''}
         <div style="display:flex;justify-content:space-between;padding:10px 0;font-size:18px;font-weight:800;border-top:1px solid var(--border-accent);margin-top:4px;">
             <span>Total Final</span><span id="close-final-display" style="color:var(--accent);">${formatCurrency(final)}</span>
         </div>
@@ -637,9 +643,12 @@ async function showCloseModal() {
 function updateCloseTotal() {
     const total = currentTableData.total || 0;
     const paid = currentTableData.partial_payment || 0;
+    const paidService = currentTableData.partial_service_charge || 0;
     const apply = document.getElementById('apply-service-charge').checked;
     const service = apply ? total * 0.10 : 0;
-    const final = total + service - paid;
+    const remainingProduct = Math.max(0, total - paid);
+    const remainingService = Math.max(0, service - paidService);
+    const final = remainingProduct + remainingService;
 
     document.getElementById('close-service-display').textContent = formatCurrency(service);
     document.getElementById('close-final-display').textContent = formatCurrency(final);
@@ -670,7 +679,8 @@ async function confirmClose() {
         }
         let alertMsg = 'Mesa fechada!\nTotal: ' + formatCurrency(data.total);
         if (data.service_charge_amount > 0) alertMsg += '\n+10% serviço: ' + formatCurrency(data.service_charge_amount);
-        if (data.partial_payment > 0) alertMsg += '\n- Pago: ' + formatCurrency(data.partial_payment);
+        if (data.partial_payment > 0) alertMsg += '\n- Pago produtos: ' + formatCurrency(data.partial_payment);
+        if (data.partial_service_charge > 0) alertMsg += '\n- Pago serviço: ' + formatCurrency(data.partial_service_charge);
         alertMsg += '\nFinal: ' + formatCurrency(data.final_total);
         alertMsg += '\nForma: ' + (data.payment_method || 'N/A');
         alert(alertMsg);

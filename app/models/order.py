@@ -15,6 +15,7 @@ class Order(Base):
     status: Mapped[str] = mapped_column(String(20), default="aberta", nullable=False)
     total: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     partial_payment: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    partial_service_charge: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     partial_payments_detail: Mapped[list | None] = mapped_column(JSON, default=list, nullable=True)
     service_charge_pct: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     service_charge_applied: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

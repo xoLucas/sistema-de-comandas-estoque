@@ -102,13 +102,15 @@ async def _build_daily_report(
 
     for o in orders:
         service_amount = _service_amount(o)
-        final = o.total + service_amount - o.partial_payment
+        product_remaining = max(0.0, o.total - o.partial_payment)
+        service_remaining = max(0.0, service_amount - o.partial_service_charge)
+        final = product_remaining + service_remaining
         close_method = o.payment_method or "nao_informado"
         close_fee = _card_fee_for_payment(final, close_method)
 
         report["summary"]["total_sales"] += o.total
         report["summary"]["total_service_charge"] += service_amount
-        report["summary"]["total_partial_payments"] += o.partial_payment
+        report["summary"]["total_partial_payments"] += o.partial_payment + o.partial_service_charge
         report["summary"]["total_card_fees"] += close_fee
         report["summary"]["gross_total"] += final
 
@@ -144,6 +146,8 @@ async def _build_daily_report(
         if o.partial_payments_detail:
             for pd in o.partial_payments_detail:
                 p_amount = float(pd.get("amount", 0))
+                p_product = float(pd.get("product_portion", p_amount))
+                p_service = float(pd.get("service_portion", 0))
                 p_method = pd.get("method", "nao_informado")
                 p_fee = _card_fee_for_payment(p_amount, p_method)
 
@@ -173,6 +177,7 @@ async def _build_daily_report(
                 "total": float(o.total),
                 "service_charge": round(service_amount, 2),
                 "partial_payment": float(o.partial_payment),
+                "partial_service_charge": float(o.partial_service_charge),
                 "final_total": round(final, 2),
                 "payment_method": close_method,
                 "closed_at": o.closed_at.strftime("%H:%M") if o.closed_at else "",
@@ -255,7 +260,9 @@ async def list_sales(
 
     for o in orders:
         service_amount = _service_amount(o)
-        final = o.total + service_amount - o.partial_payment
+        product_remaining = max(0.0, o.total - o.partial_payment)
+        service_remaining = max(0.0, service_amount - o.partial_service_charge)
+        final = product_remaining + service_remaining
         total_day += o.total
         total_service += service_amount
 
@@ -270,6 +277,7 @@ async def list_sales(
                 "service_charge_pct": float(o.service_charge_pct),
                 "service_charge_amount": round(float(service_amount), 2),
                 "partial_payment": float(o.partial_payment),
+                "partial_service_charge": float(o.partial_service_charge),
                 "final_total": float(final),
                 "payment_method": o.payment_method or "nao_informado",
                 "closed_at": o.closed_at.isoformat() if o.closed_at else None,

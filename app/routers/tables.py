@@ -42,6 +42,7 @@ async def list_tables(
                 "is_balcao": t.is_balcao,
                 "total": float(open_order.total) if open_order else 0.0,
                 "partial_payment": float(open_order.partial_payment) if open_order else 0.0,
+                "partial_service_charge": float(open_order.partial_service_charge) if open_order else 0.0,
                 "has_open_order": open_order is not None,
                 "label": "Balcão" if t.is_balcao else f"Mesa {t.number}",
             }
@@ -108,6 +109,7 @@ async def get_table_detail(
         "status": table.status,
         "total": float(order.total) if order else 0.0,
         "partial_payment": float(order.partial_payment) if order else 0.0,
+        "partial_service_charge": float(order.partial_service_charge) if order else 0.0,
         "service_charge_pct": float(order.service_charge_pct) if order else 0.0,
         "service_charge_applied": order.service_charge_applied if order else False,
         "customer_name": order.customer_name if order else None,

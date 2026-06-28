@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import select, text
 from app.core.database import async_session, engine, Base
 from app.core.security import hash_password
 
@@ -71,9 +71,20 @@ SEED_USERS = [
 ]
 
 
+async def _ensure_columns() -> None:
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS partial_service_charge FLOAT NOT NULL DEFAULT 0.0"
+            )
+        )
+
+
 async def run_seed() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    await _ensure_columns()
 
     async with async_session() as session:
         existing = await session.execute(select(User).limit(1))

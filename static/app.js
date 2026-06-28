@@ -1,4 +1,6 @@
 const API_BASE = '/api';
+const WS_BASE = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+let tableSocket = null;
 
 function getToken() {
     return localStorage.getItem('lads_token');
@@ -81,6 +83,64 @@ function highlightNav(page) {
     document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
     const nav = document.querySelector(`.nav-item[data-page="${page}"]`);
     if (nav) nav.classList.add('active');
+}
+
+function updateTableCard(t) {
+    const grid = document.getElementById('table-grid');
+    if (!grid) return;
+    let card = grid.querySelector(`.table-card[href="/mesa/${t.id}"]`);
+    const totalText = t.has_open_order ? formatCurrency(Math.max(0, t.total - (t.partial_payment || 0))) : '';
+    if (!card) {
+        card = document.createElement('a');
+        card.href = '/mesa/' + t.id;
+        grid.appendChild(card);
+    }
+    card.className = 'table-card status-' + t.status;
+    if (t.is_balcao) card.classList.add('is-balcao');
+    card.innerHTML = `
+        <span class="table-label">${t.label}</span>
+        <span class="table-status-tag">${statusLabel(t.status)}</span>
+        ${totalText ? `<span class="table-total-text">${totalText}</span>` : ''}
+    `;
+}
+
+function connectTablesWebSocket() {
+    if (tableSocket) return;
+    const token = getToken();
+    if (!token) return;
+
+    tableSocket = new WebSocket(`${WS_BASE}/mesas?token=${token}`);
+
+    tableSocket.onopen = () => {
+        console.log('WebSocket connected');
+    };
+
+    tableSocket.onmessage = (event) => {
+        try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'table_update' && msg.data) {
+                updateTableCard(msg.data);
+            }
+        } catch (err) {
+            console.error('WS message error', err);
+        }
+    };
+
+    tableSocket.onclose = () => {
+        tableSocket = null;
+        setTimeout(connectTablesWebSocket, 3000);
+    };
+
+    tableSocket.onerror = (err) => {
+        console.error('WebSocket error', err);
+    };
+}
+
+function closeTablesWebSocket() {
+    if (tableSocket) {
+        tableSocket.close();
+        tableSocket = null;
+    }
 }
 
 // ====== INDEX: TABLE GRID ======

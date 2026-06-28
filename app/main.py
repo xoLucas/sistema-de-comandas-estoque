@@ -13,6 +13,7 @@ from app.routers.products import router as products_router
 from app.routers.auth import router as auth_router
 from app.routers.stock import router as stock_router
 from app.routers.financial import router as financial_router
+from app.routers.ws import router as ws_router
 from app.routers.auth_deps import get_current_user_optional
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -36,6 +37,7 @@ app.include_router(products_router)
 app.include_router(auth_router)
 app.include_router(stock_router)
 app.include_router(financial_router)
+app.include_router(ws_router)
 
 
 @app.get("/")

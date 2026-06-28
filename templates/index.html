@@ -18,9 +18,11 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('user-greeting').textContent = 'Olá, ' + user.name;
         document.getElementById('bottom-nav').style.display = 'flex';
         highlightNav('mesas');
-        loadTables();
+        await loadTables();
+        connectTablesWebSocket();
     });
     document.getElementById('refresh-btn').addEventListener('click', loadTables);
 });
+window.addEventListener('beforeunload', closeTablesWebSocket);
 </script>
 {% endblock %}

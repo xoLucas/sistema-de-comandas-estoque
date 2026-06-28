@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
+from app.routers.ws import broadcast_table_update
 from app.models.table import Table
 from app.models.product import Product
 from app.models.order import Order
@@ -139,6 +140,8 @@ async def open_order(
     db.add(order)
     await db.commit()
     await db.refresh(order)
+
+    await broadcast_table_update(req.table_id)
 
     return {
         "order_id": order.id,
@@ -316,6 +319,7 @@ async def add_order_item(
     table = table_result.scalars().first()
 
     await db.commit()
+    await broadcast_table_update(req.table_id)
 
     if product.category in ("Carnes", "Acompanhamentos"):
         _print_kitchen_ticket(
@@ -378,6 +382,7 @@ async def partial_payment(
     order.partial_payments_detail = detail
 
     await db.commit()
+    await broadcast_table_update(req.table_id)
 
     remaining_product = max(0.0, order.total - order.partial_payment)
     return {
@@ -426,6 +431,7 @@ async def close_order(
     table.status = "vazia"
 
     await db.commit()
+    await broadcast_table_update(req.table_id)
 
     return {
         "order_id": order.id,

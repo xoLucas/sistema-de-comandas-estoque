@@ -21,6 +21,7 @@
     <div id="partial-info" style="display:none;">
         <span class="partial-label">Pago </span>
         <span id="partial-value">R$ 0,00</span>
+        <span id="partial-detail" style="font-size:11px;color:var(--text-muted);display:block;margin-top:2px;"></span>
     </div>
 </div>
 
@@ -34,24 +35,75 @@
     <button onclick="showAddPedidoModal()" class="btn-pedido-full">+ Novo Pedido</button>
 
     <div class="actions-stack" id="close-actions">
-        <div class="form-row">
-            <input type="number" id="partial-payment-input" placeholder="Pagamento parcial R$" class="input-field" step="0.01" min="0">
-            <button onclick="registerPartialPayment()" class="btn-small">Pagar</button>
-        </div>
-        <button onclick="closeOrder(false)" class="btn-close-full">Fechar Mesa</button>
-        <button onclick="closeOrder(true)" class="btn-close-service">Fechar Mesa com 10%</button>
+        <button onclick="showPartialPaymentModal()" class="btn-partial-full">
+            &#128176; Pagamento Parcial
+        </button>
+        <button onclick="showCloseModal()" class="btn-close-full">Fechar Mesa</button>
     </div>
 </div>
 
 <div id="add-pedido-modal" class="modal" style="display:none;">
+    <div class="modal-content modal-large" id="pedido-modal-content"></div>
+</div>
+
+<div id="partial-payment-modal" class="modal" style="display:none;">
     <div class="modal-content modal-large">
-        <h3>Novo Pedido</h3>
-        <div id="pedido-product-list" class="pedido-product-list"></div>
-        <div style="display:flex;gap:8px;margin-top:12px;">
-            <button onclick="submitPedido()" class="btn-primary-full" style="flex:1;">Confirmar</button>
-            <button onclick="closeAddPedidoModal()" class="btn-secondary-full" style="flex:1;">Cancelar</button>
+        <h3>Pagamento Parcial</h3>
+        <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px;">
+            Selecione os itens que o cliente deseja pagar agora.
+        </p>
+        <div id="partial-payment-items" class="partial-payment-list"></div>
+        <div class="partial-summary" id="partial-summary">
+            <span>Selecionado:</span>
+            <span id="partial-selected-total">R$ 0,00</span>
         </div>
-        <p id="pedido-error" class="error-msg" style="display:none;"></p>
+        <div style="margin-top:10px;">
+            <label style="display:flex;align-items:center;gap:10px;font-size:14px;cursor:pointer;">
+                <input type="checkbox" id="partial-service-charge" onchange="updatePartialTotal()" style="width:18px;height:18px;accent-color:var(--accent);">
+                Acrescentar 10% de serviço
+            </label>
+        </div>
+        <div style="margin-top:10px;">
+            <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">Forma de Pagamento</label>
+            <select id="partial-payment-method" class="select-field">
+                <option value="dinheiro">Dinheiro</option>
+                <option value="cartao_credito">Cartão de Crédito</option>
+                <option value="cartao_debito">Cartão de Débito</option>
+                <option value="pix">Pix</option>
+            </select>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:12px;">
+            <button onclick="submitPartialPayment()" class="btn-primary-full" style="flex:1;">Confirmar Pagamento</button>
+            <button onclick="closePartialPaymentModal()" class="btn-secondary-full" style="flex:1;">Cancelar</button>
+        </div>
+        <p id="partial-payment-error" class="error-msg" style="display:none;"></p>
+    </div>
+</div>
+
+<div id="close-modal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <h3>Fechar Mesa</h3>
+        <div id="close-summary" style="margin-bottom:14px;"></div>
+        <div style="margin-bottom:10px;">
+            <label style="display:flex;align-items:center;gap:10px;font-size:15px;cursor:pointer;">
+                <input type="checkbox" id="apply-service-charge" onchange="updateCloseTotal()" style="width:18px;height:18px;accent-color:var(--accent);">
+                Acrescentar 10% de serviço
+            </label>
+        </div>
+        <div style="margin-bottom:14px;">
+            <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">Forma de Pagamento</label>
+            <select id="close-payment-method" class="select-field">
+                <option value="dinheiro">Dinheiro</option>
+                <option value="cartao_credito">Cartão de Crédito</option>
+                <option value="cartao_debito">Cartão de Débito</option>
+                <option value="pix">Pix</option>
+            </select>
+        </div>
+        <div style="display:flex;gap:8px;">
+            <button onclick="confirmClose()" class="btn-primary-full" style="flex:1;">Confirmar Fechamento</button>
+            <button onclick="closeCloseModal()" class="btn-secondary-full" style="flex:1;">Cancelar</button>
+        </div>
+        <p id="close-error" class="error-msg" style="display:none;"></p>
     </div>
 </div>
 {% endblock %}

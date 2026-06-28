@@ -32,11 +32,13 @@ class OrderItemRequest(BaseModel):
 class CloseOrderRequest(BaseModel):
     table_id: int
     apply_service_charge: bool = False
+    payment_method: str | None = None
 
 
 class PartialPaymentRequest(BaseModel):
     table_id: int
     amount: float
+    payment_method: str | None = None
 
 
 class PedidoItem(BaseModel):
@@ -73,6 +75,33 @@ def _print_kitchen_ticket(
     print(f"HORA: {now}")
     print(f"GARÇOM: {waiter_name}")
     print("---------------------------------")
+    print()
+
+
+def _print_bar_ticket(
+    table_number: int,
+    round_number: int,
+    bar_items: list[dict],
+    waiter_name: str,
+    customer_name: str | None = None,
+) -> None:
+    if not bar_items:
+        return
+    now = datetime.now().strftime("%H:%M:%S")
+    print()
+    print("=================================")
+    print("         LADS BEER - BAR         ")
+    print("=================================")
+    print(f"MESA: {table_number}")
+    print(f"PEDIDO: {round_number}")
+    if customer_name:
+        print(f"CLIENTE: {customer_name}")
+    print("BEBIDAS:")
+    for b in bar_items:
+        print(f"  {b['quantity']}x {b['name']}")
+    print(f"HORA: {now}")
+    print(f"GARÇOM: {waiter_name}")
+    print("=================================")
     print()
 
 
@@ -145,6 +174,7 @@ async def create_pedido(
     await db.flush()
 
     prep_items = []
+    bar_items = []
     for entry in req.items:
         result = await db.execute(select(Product).where(Product.id == entry.product_id))
         product = result.scalars().first()
@@ -167,6 +197,8 @@ async def create_pedido(
 
         if product.category in ("Carnes", "Acompanhamentos"):
             prep_items.append({"name": product.name, "quantity": entry.quantity})
+        elif product.category == "Bebidas":
+            bar_items.append({"name": product.name, "quantity": entry.quantity})
 
     await db.flush()
 
@@ -184,6 +216,11 @@ async def create_pedido(
     if prep_items:
         _print_kitchen_ticket(
             table.number, round_number, prep_items, user.name, order.customer_name
+        )
+
+    if bar_items:
+        _print_bar_ticket(
+            table.number, round_number, bar_items, user.name, order.customer_name
         )
 
     items_out = []
@@ -287,6 +324,14 @@ async def add_order_item(
             user.name,
             order.customer_name,
         )
+    elif product.category == "Bebidas":
+        _print_bar_ticket(
+            table.number,
+            req.order_round_id or 0,
+            [{"name": product.name, "quantity": abs(req.quantity)}],
+            user.name,
+            order.customer_name,
+        )
 
     return {
         "order_id": order.id,
@@ -312,6 +357,11 @@ async def partial_payment(
         return {"error": "Nenhuma comanda aberta para esta mesa"}
 
     order.partial_payment += req.amount
+
+    detail = order.partial_payments_detail or []
+    detail.append({"amount": req.amount, "method": req.payment_method or "nao_informado"})
+    order.partial_payments_detail = detail
+
     await db.commit()
 
     return {
@@ -353,6 +403,7 @@ async def close_order(
 
     order.status = "finalizada"
     order.closed_at = datetime.now()
+    order.payment_method = req.payment_method
     table.status = "vazia"
 
     await db.commit()
@@ -366,5 +417,6 @@ async def close_order(
         "service_charge_amount": float(service_charge_amount),
         "partial_payment": float(order.partial_payment),
         "final_total": float(final_total),
+        "payment_method": order.payment_method,
         "status": "finalizada",
     }

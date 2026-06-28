@@ -135,6 +135,10 @@ async function loadTableDetail(user) {
         if (data.partial_payment > 0) {
             document.getElementById('partial-info').style.display = 'block';
             document.getElementById('partial-value').textContent = formatCurrency(data.partial_payment);
+            const paidCount = countPaidItems();
+            const totalItems = countTotalItems();
+            document.getElementById('partial-detail').textContent =
+                paidCount + ' de ' + totalItems + ' itens pagos';
         } else {
             document.getElementById('partial-info').style.display = 'none';
         }
@@ -174,10 +178,20 @@ function renderPedidos(data) {
     }
 
     container.innerHTML = data.pedidos.map(pedido => {
-        const itemsHtml = pedido.items.map(item => `
-            <div class="pedido-item">
+        const itemsHtml = pedido.items.map(item => {
+            const paidQty = getPaidQty(item.id);
+            const fullyPaid = paidQty >= item.quantity;
+            const paidClass = fullyPaid ? 'partial-paid' : (paidQty > 0 ? 'partial-paid' : '');
+            let paidBadge = '';
+            if (fullyPaid) {
+                paidBadge = ' <span style="color:var(--green);font-size:10px;">(PAGO)</span>';
+            } else if (paidQty > 0) {
+                paidBadge = ' <span style="color:var(--blue);font-size:10px;">(' + paidQty + '/' + item.quantity + ' pago)</span>';
+            }
+            return `
+            <div class="pedido-item ${paidClass}">
                 <div class="item-info">
-                    <div class="item-name">${item.product_name}</div>
+                    <div class="item-name">${item.product_name}${paidBadge}</div>
                     <div class="item-meta">${formatCurrency(item.unit_price)} cada | ${item.category}</div>
                 </div>
                 <div class="item-actions">
@@ -186,24 +200,7 @@ function renderPedidos(data) {
                     <button class="btn-add" onclick="addItemToRound(${item.product_id}, ${pedido.id})">+</button>
                 </div>
             </div>
-        `).join('');
-
-        let drinksHtml = '';
-        if (pedido.drinks && pedido.drinks.length > 0) {
-            drinksHtml = `
-                <div class="pedido-drinks">
-                    <div class="drinks-title">Checklist Bebidas</div>
-                    ${pedido.drinks.map(d => `
-                        <div class="drink-check">
-                            <input type="checkbox" id="drink-p${pedido.id}-${d.product_id}"
-                                   ${isDrinkChecked(pedido.id, d.product_id) ? 'checked' : ''}
-                                   onchange="toggleDrinkCheck(${pedido.id}, ${d.product_id})">
-                            <label for="drink-p${pedido.id}-${d.product_id}">${d.quantity}x ${d.product_name}</label>
-                        </div>
-                    `).join('')}
-                </div>
-            `;
-        }
+        `}).join('');
 
         return `
             <div class="pedido-group">
@@ -212,7 +209,6 @@ function renderPedidos(data) {
                     <span class="pedido-time">${pedido.created_at}</span>
                 </div>
                 ${itemsHtml}
-                ${drinksHtml}
             </div>
         `;
     }).join('');
@@ -244,91 +240,156 @@ function renderPedidosFinalizados(data) {
     }).join('');
 }
 
-// ====== CHECKLIST STATE (persisted to localStorage) ======
-function checkedDrinksKey() {
-    return 'lads_checked_drinks_' + (typeof TABLE_ID !== 'undefined' ? TABLE_ID : '0');
-}
-
-function loadCheckedDrinks() {
-    try {
-        return JSON.parse(localStorage.getItem(checkedDrinksKey()) || '{}');
-    } catch { return {}; }
-}
-
-function saveCheckedDrinks(state) {
-    localStorage.setItem(checkedDrinksKey(), JSON.stringify(state));
-}
-
-function drinkCheckKey(pedidoId, productId) {
-    return pedidoId + '-' + productId;
-}
-
-function isDrinkChecked(pedidoId, productId) {
-    const state = loadCheckedDrinks();
-    return !!state[drinkCheckKey(pedidoId, productId)];
-}
-
-function toggleDrinkCheck(pedidoId, productId) {
-    const state = loadCheckedDrinks();
-    const key = drinkCheckKey(pedidoId, productId);
-    state[key] = !state[key];
-    saveCheckedDrinks(state);
-}
-
 // ====== ADD PEDIDO MODAL ======
 let pedidoQuantities = {};
+let pedidoInitialStock = {};
+let pedidoProductsData = [];
+let pedidoSelectionHtml = '';
 
 function showAddPedidoModal() {
     apiFetch(API_BASE + '/produtos')
         .then(r => r.json())
         .then(products => {
             pedidoQuantities = {};
-            products.forEach(p => { pedidoQuantities[p.id] = 0; });
+            pedidoInitialStock = {};
+            pedidoProductsData = products;
+            products.forEach(p => {
+                pedidoQuantities[p.id] = 0;
+                pedidoInitialStock[p.id] = p.stock;
+            });
 
-            const listHtml = products.map(p => `
-                <div class="pedido-product-row">
-                    <div class="prod-info">
-                        <div class="prod-name">${p.name}</div>
-                        <div class="prod-stock">Estoque: ${p.stock} | ${p.category}</div>
-                        <div class="prod-price">${formatCurrency(p.price)}</div>
-                    </div>
-                    <div class="qty-control">
-                        <button class="btn-sm btn-sm-remove" onclick="changePedidoQty(${p.id}, -1, ${p.stock})">-</button>
-                        <input type="number" class="qty-input" id="pqty-${p.id}" value="0" min="0" max="${p.stock}" readonly>
-                        <button class="btn-sm btn-sm-add" onclick="changePedidoQty(${p.id}, 1, ${p.stock})">+</button>
-                    </div>
-                </div>
-            `).join('');
-
-            document.getElementById('pedido-product-list').innerHTML = listHtml;
+            pedidoSelectionHtml = buildPedidoSelectionView(products);
+            document.getElementById('pedido-modal-content').innerHTML = pedidoSelectionHtml;
             document.getElementById('add-pedido-modal').style.display = 'flex';
         });
 }
 
-function changePedidoQty(productId, delta, maxStock) {
+function buildPedidoSelectionView(products) {
+    const listHtml = products.map(p => `
+        <div class="pedido-product-row">
+            <div class="prod-info">
+                <div class="prod-name">${p.name}</div>
+                <div class="prod-stock" id="pstock-${p.id}" data-cat="${p.category}">
+                    Estoque: <strong>${p.stock}</strong> | ${p.category}
+                </div>
+                <div class="prod-price">${formatCurrency(p.price)}</div>
+            </div>
+            <div class="qty-control">
+                <button class="btn-sm btn-sm-remove" onclick="changePedidoQty(${p.id}, -1)">-</button>
+                <input type="number" class="qty-input" id="pqty-${p.id}" value="0" min="0" max="${p.stock}" readonly>
+                <button class="btn-sm btn-sm-add" onclick="changePedidoQty(${p.id}, 1)">+</button>
+            </div>
+        </div>
+    `).join('');
+
+    return `
+        <h3>Novo Pedido</h3>
+        <div class="pedido-product-list">${listHtml}</div>
+        <div style="display:flex;gap:8px;margin-top:12px;">
+            <button onclick="reviewPedido()" class="btn-primary-full" style="flex:1;">Revisar Pedido</button>
+            <button onclick="closeAddPedidoModal()" class="btn-secondary-full" style="flex:1;">Cancelar</button>
+        </div>
+        <p id="pedido-error" class="error-msg" style="display:none;"></p>
+    `;
+}
+
+function changePedidoQty(productId, delta) {
+    const maxStock = pedidoInitialStock[productId] || 0;
     let qty = (pedidoQuantities[productId] || 0) + delta;
     if (qty < 0) qty = 0;
     if (qty > maxStock) qty = maxStock;
     pedidoQuantities[productId] = qty;
-    document.getElementById('pqty-' + productId).value = qty;
+
+    const remaining = maxStock - qty;
+    const input = document.getElementById('pqty-' + productId);
+    const stockEl = document.getElementById('pstock-' + productId);
+    if (input) input.value = qty;
+    if (stockEl) {
+        const cat = stockEl.dataset.cat || '';
+        stockEl.innerHTML = 'Estoque: <strong>' + remaining + '</strong> | ' + cat;
+    }
 }
 
 function closeAddPedidoModal() {
     document.getElementById('add-pedido-modal').style.display = 'none';
 }
 
-async function submitPedido() {
+function reviewPedido() {
+    const selected = [];
+    let total = 0;
+    for (const [pid, qty] of Object.entries(pedidoQuantities)) {
+        if (qty > 0) {
+            const product = pedidoProductsData.find(p => p.id === parseInt(pid));
+            if (product) {
+                const subtotal = qty * product.price;
+                total += subtotal;
+                selected.push({ ...product, qty, subtotal });
+            }
+        }
+    }
+
+    if (selected.length === 0) {
+        document.getElementById('pedido-error').textContent = 'Selecione ao menos 1 item';
+        document.getElementById('pedido-error').style.display = 'block';
+        return;
+    }
+
+    const itemsHtml = selected.map(s => `
+        <div class="review-item">
+            <div class="review-info">
+                <span class="review-qty">${s.qty}x</span>
+                <span class="review-name">${s.name}</span>
+            </div>
+            <div class="review-meta">
+                <span>${formatCurrency(s.price)} cada</span>
+                <span class="review-subtotal">${formatCurrency(s.subtotal)}</span>
+            </div>
+        </div>
+    `).join('');
+
+    const reviewHtml = `
+        <h3>Revisar Pedido</h3>
+        <p style="font-size:13px;color:var(--text-muted);margin-bottom:14px;">
+            Confira os itens com o cliente antes de enviar.
+        </p>
+        <div class="review-list">${itemsHtml}</div>
+        <div class="review-total">
+            <span>Total do Pedido</span>
+            <span>${formatCurrency(total)}</span>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:14px;">
+            <button onclick="confirmPedido()" class="btn-primary-full" style="flex:1;">Confirmar e Enviar</button>
+            <button onclick="backToPedidoSelection()" class="btn-secondary-full" style="flex:1;">Voltar</button>
+        </div>
+        <p id="pedido-error" class="error-msg" style="display:none;"></p>
+    `;
+
+    document.getElementById('pedido-modal-content').innerHTML = reviewHtml;
+}
+
+function backToPedidoSelection() {
+    document.getElementById('pedido-modal-content').innerHTML = pedidoSelectionHtml;
+    for (const [pid, qty] of Object.entries(pedidoQuantities)) {
+        const input = document.getElementById('pqty-' + pid);
+        if (input) input.value = qty;
+        const stockEl = document.getElementById('pstock-' + pid);
+        if (stockEl) {
+            const maxStock = pedidoInitialStock[pid] || 0;
+            const remaining = maxStock - qty;
+            const cat = stockEl.dataset.cat || '';
+            stockEl.innerHTML = 'Estoque: <strong>' + remaining + '</strong> | ' + cat;
+        }
+    }
+}
+
+async function confirmPedido() {
     const items = [];
     for (const [pid, qty] of Object.entries(pedidoQuantities)) {
         if (qty > 0) {
             items.push({ product_id: parseInt(pid), quantity: qty });
         }
     }
-    if (items.length === 0) {
-        document.getElementById('pedido-error').textContent = 'Selecione ao menos 1 item';
-        document.getElementById('pedido-error').style.display = 'block';
-        return;
-    }
+
     try {
         const res = await apiFetch(API_BASE + '/comanda/pedido', {
             method: 'POST',
@@ -373,6 +434,159 @@ async function removeItemFromRound(productId, roundId) {
     } catch (err) { alert('Erro ao remover item'); }
 }
 
+// ====== PARTIAL PAYMENT ======
+function paidItemsKey() {
+    return 'lads_paid_items_' + (typeof TABLE_ID !== 'undefined' ? TABLE_ID : '0');
+}
+
+function loadPaidQtyMap() {
+    try { return JSON.parse(localStorage.getItem(paidItemsKey()) || '{}'); } catch { return {}; }
+}
+
+function savePaidQtyMap(state) { localStorage.setItem(paidItemsKey(), JSON.stringify(state)); }
+
+function getPaidQty(orderItemId) {
+    return loadPaidQtyMap()[String(orderItemId)] || 0;
+}
+
+function addPaidQty(orderItemId, qty) {
+    const state = loadPaidQtyMap();
+    const current = state[String(orderItemId)] || 0;
+    state[String(orderItemId)] = current + qty;
+    savePaidQtyMap(state);
+}
+
+function countPaidItems() {
+    if (!currentTableData || !currentTableData.pedidos) return 0;
+    const state = loadPaidQtyMap();
+    let count = 0;
+    currentTableData.pedidos.forEach(p => p.items.forEach(i => {
+        if ((state[String(i.id)] || 0) >= i.quantity) count++;
+    }));
+    return count;
+}
+
+function countTotalItems() {
+    if (!currentTableData || !currentTableData.pedidos) return 0;
+    let count = 0;
+    currentTableData.pedidos.forEach(p => count += p.items.length);
+    return count;
+}
+
+function showPartialPaymentModal() {
+    if (!currentTableData || !currentTableData.pedidos) return;
+
+    const state = loadPaidQtyMap();
+    let rowsHtml = '';
+    let hasUnpaid = false;
+
+    currentTableData.pedidos.forEach(pedido => {
+        pedido.items.forEach(item => {
+            const paidQty = state[String(item.id)] || 0;
+            const unpaidQty = item.quantity - paidQty;
+            if (unpaidQty > 0) hasUnpaid = true;
+
+            rowsHtml += `
+                <div class="partial-item-row">
+                    <div class="partial-info">
+                        <div class="partial-name">${item.product_name}</div>
+                        <div class="partial-meta">
+                            Total: ${item.quantity}x | Pago: ${paidQty}x | Resta: <strong>${unpaidQty}</strong>x
+                            &nbsp;|&nbsp; ${formatCurrency(item.unit_price)} cada
+                        </div>
+                    </div>
+                    ${unpaidQty > 0 ? `
+                    <div class="qty-control">
+                        <button class="btn-sm btn-sm-remove" onclick="adjustPaidQty(${item.id}, -1, ${unpaidQty}, ${item.unit_price})">-</button>
+                        <span class="qty-input" id="pp-qty-${item.id}" style="display:inline-flex;align-items:center;justify-content:center;width:48px;padding:8px 0;text-align:center;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:15px;font-weight:700;" data-unit-price="${item.unit_price}">0</span>
+                        <button class="btn-sm btn-sm-add" onclick="adjustPaidQty(${item.id}, 1, ${unpaidQty}, ${item.unit_price})">+</button>
+                    </div>
+                    ` : `
+                    <span style="color:var(--green);font-size:12px;font-weight:600;">Pago ✓</span>
+                    `}
+                </div>
+            `;
+        });
+    });
+
+    if (!hasUnpaid) {
+        rowsHtml = '<p class="empty-msg">Todos os itens já foram pagos integralmente.</p>';
+    }
+
+    document.getElementById('partial-payment-items').innerHTML = rowsHtml;
+    document.getElementById('partial-selected-total').textContent = formatCurrency(0);
+    document.getElementById('partial-payment-modal').style.display = 'flex';
+}
+
+function adjustPaidQty(itemId, delta, maxQty, unitPrice) {
+    const el = document.getElementById('pp-qty-' + itemId);
+    if (!el) return;
+    let qty = parseInt(el.textContent || '0') + delta;
+    if (qty < 0) qty = 0;
+    if (qty > maxQty) qty = maxQty;
+    el.textContent = qty;
+    updatePartialTotal();
+}
+
+function updatePartialTotal() {
+    let subtotal = 0;
+    document.querySelectorAll('#partial-payment-items .qty-input').forEach(el => {
+        const qty = parseInt(el.textContent || '0');
+        const unitPrice = parseFloat(el.dataset.unitPrice || 0);
+        subtotal += qty * unitPrice;
+    });
+    const apply = document.getElementById('partial-service-charge')?.checked || false;
+    const total = apply ? subtotal * 1.10 : subtotal;
+    document.getElementById('partial-selected-total').textContent = formatCurrency(total);
+}
+
+function closePartialPaymentModal() {
+    document.getElementById('partial-payment-modal').style.display = 'none';
+}
+
+async function submitPartialPayment() {
+    let subtotal = 0;
+    const itemsToPay = [];
+    document.querySelectorAll('#partial-payment-items .qty-input').forEach(el => {
+        const qty = parseInt(el.textContent || '0');
+        if (qty > 0) {
+            const itemId = parseInt(el.id.replace('pp-qty-', ''));
+            const unitPrice = parseFloat(el.dataset.unitPrice || 0);
+            subtotal += qty * unitPrice;
+            itemsToPay.push({ itemId, qty });
+        }
+    });
+
+    if (subtotal <= 0) {
+        document.getElementById('partial-payment-error').textContent = 'Ajuste a quantidade de ao menos um item';
+        document.getElementById('partial-payment-error').style.display = 'block';
+        return;
+    }
+
+    const applyService = document.getElementById('partial-service-charge')?.checked || false;
+    const total = applyService ? subtotal * 1.10 : subtotal;
+    const pMethod = document.getElementById('partial-payment-method')?.value || 'dinheiro';
+
+    try {
+        const res = await apiFetch(API_BASE + '/comanda/pagamento-parcial', {
+            method: 'POST',
+            body: JSON.stringify({ table_id: TABLE_ID, amount: total, payment_method: pMethod })
+        });
+        const data = await res.json();
+        if (data.error) {
+            document.getElementById('partial-payment-error').textContent = data.error;
+            document.getElementById('partial-payment-error').style.display = 'block';
+            return;
+        }
+        itemsToPay.forEach(({ itemId, qty }) => addPaidQty(itemId, qty));
+        closePartialPaymentModal();
+        loadTableDetail();
+    } catch (err) {
+        document.getElementById('partial-payment-error').textContent = 'Erro ao registrar pagamento';
+        document.getElementById('partial-payment-error').style.display = 'block';
+    }
+}
+
 // ====== OPEN / CLOSE ======
 async function setCustomerName() {
     const name = document.getElementById('customer-name-input').value.trim();
@@ -392,39 +606,80 @@ async function openOrder() {
     } catch (err) { alert('Erro ao abrir comanda'); }
 }
 
-async function registerPartialPayment() {
-    const amount = parseFloat(document.getElementById('partial-payment-input').value);
-    if (!amount || amount <= 0) { alert('Informe um valor válido'); return; }
-    try {
-        const res = await apiFetch(API_BASE + '/comanda/pagamento-parcial', {
-            method: 'POST',
-            body: JSON.stringify({ table_id: TABLE_ID, amount })
-        });
-        const data = await res.json();
-        if (data.error) { alert(data.error); return; }
-        document.getElementById('partial-payment-input').value = '';
-        loadTableDetail();
-    } catch (err) { alert('Erro ao registrar pagamento'); }
+async function showCloseModal() {
+    if (!currentTableData) return;
+
+    const total = currentTableData.total || 0;
+    const paid = currentTableData.partial_payment || 0;
+    const service = total * 0.10;
+    const final = total + service - paid;
+
+    document.getElementById('close-summary').innerHTML = `
+        <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:14px;color:var(--text-muted);">
+            <span>Total</span><span>${formatCurrency(total)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:14px;color:var(--text-muted);">
+            <span>10% Serviço</span><span id="close-service-display">${formatCurrency(service)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:14px;color:var(--text-muted);">
+            <span>Já Pago</span><span>- ${formatCurrency(paid)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;padding:10px 0;font-size:18px;font-weight:800;border-top:1px solid var(--border-accent);margin-top:4px;">
+            <span>Total Final</span><span id="close-final-display" style="color:var(--accent);">${formatCurrency(final)}</span>
+        </div>
+    `;
+
+    document.getElementById('apply-service-charge').checked = false;
+    document.getElementById('close-payment-method').value = 'dinheiro';
+    document.getElementById('close-modal').style.display = 'flex';
 }
 
-async function closeOrder(applyServiceCharge) {
-    const msg = applyServiceCharge ? 'Fechar com acréscimo de 10%?' : 'Deseja realmente fechar a mesa?';
-    if (!confirm(msg)) return;
+function updateCloseTotal() {
+    const total = currentTableData.total || 0;
+    const paid = currentTableData.partial_payment || 0;
+    const apply = document.getElementById('apply-service-charge').checked;
+    const service = apply ? total * 0.10 : 0;
+    const final = total + service - paid;
+
+    document.getElementById('close-service-display').textContent = formatCurrency(service);
+    document.getElementById('close-final-display').textContent = formatCurrency(final);
+}
+
+function closeCloseModal() {
+    document.getElementById('close-modal').style.display = 'none';
+}
+
+async function confirmClose() {
+    const applyServiceCharge = document.getElementById('apply-service-charge').checked;
+    const paymentMethod = document.getElementById('close-payment-method').value;
+
     try {
         const res = await apiFetch(API_BASE + '/comanda/fechar', {
             method: 'POST',
-            body: JSON.stringify({ table_id: TABLE_ID, apply_service_charge: applyServiceCharge })
+            body: JSON.stringify({
+                table_id: TABLE_ID,
+                apply_service_charge: applyServiceCharge,
+                payment_method: paymentMethod
+            })
         });
         const data = await res.json();
-        if (data.error) { alert(data.error); return; }
+        if (data.error) {
+            document.getElementById('close-error').textContent = data.error;
+            document.getElementById('close-error').style.display = 'block';
+            return;
+        }
         let alertMsg = 'Mesa fechada!\nTotal: ' + formatCurrency(data.total);
         if (data.service_charge_amount > 0) alertMsg += '\n+10% serviço: ' + formatCurrency(data.service_charge_amount);
         if (data.partial_payment > 0) alertMsg += '\n- Pago: ' + formatCurrency(data.partial_payment);
         alertMsg += '\nFinal: ' + formatCurrency(data.final_total);
+        alertMsg += '\nForma: ' + (data.payment_method || 'N/A');
         alert(alertMsg);
-        localStorage.removeItem(checkedDrinksKey());
+        localStorage.removeItem(paidItemsKey());
         window.location.href = '/';
-    } catch (err) { alert('Erro ao fechar comanda'); }
+    } catch (err) {
+        document.getElementById('close-error').textContent = 'Erro ao fechar comanda';
+        document.getElementById('close-error').style.display = 'block';
+    }
 }
 
 // ====== STOCK ======
@@ -541,47 +796,133 @@ async function loadSales() {
                         <span class="sale-time">${s.closed_at ? s.closed_at.split('T')[1]?.substring(0,5) : ''}</span>
                     </div>
                     <div class="sale-detail"><span>Garçom: ${s.waiter_name}</span><span>${s.items_count} itens</span></div>
-                    ${s.service_charge_amount > 0 ? `<div class="sale-detail"><span>+10% serviço</span><span>${formatCurrency(s.service_charge_amount)}</span></div>` : ''}
-                    ${s.partial_payment > 0 ? `<div class="sale-detail"><span>- Pagamento parcial</span><span>${formatCurrency(s.partial_payment)}</span></div>` : ''}
-                    <div class="sale-total">${formatCurrency(s.final_total)}</div>
+                    ${s.payment_method ? `<div class="sale-detail"><span>Pgto: ${({dinheiro:'Dinheiro',cartao_credito:'Crédito',cartao_debito:'Débito',pix:'Pix'})[s.payment_method] || s.payment_method}</span></div>` : ''}
+                    <div class="sale-total">${formatCurrency(s.total)}</div>
+                    ${s.service_charge_amount > 0 ? `<div class="sale-detail"><span>+ 10% serviço</span><span>${formatCurrency(s.service_charge_amount)}</span></div>` : ''}
                 </div>
             `).join('')}
         `;
     } catch (err) { container.innerHTML = '<div class="error-msg">Erro ao carregar vendas</div>'; }
 }
 
+let lastReportDate = null;
+
 async function dailyCloseReport() {
     const date = document.getElementById('sale-date-filter')?.value || new Date().toISOString().split('T')[0];
+    lastReportDate = date;
     try {
         const res = await apiFetch(API_BASE + '/financeiro/fechamento-diario', { method: 'POST', body: JSON.stringify({ date }) });
         const data = await res.json();
         if (data.error) { alert(data.error); return; }
-        const reportContent = document.getElementById('report-content');
-        reportContent.innerHTML = `
-            <p style="color:#888;font-size:13px;">Data: ${data.date} | Fechado por: ${data.closed_by}</p>
-            <table class="report-table">
-                <thead><tr><th>Mesa</th><th>Garçom</th><th>Total</th><th>10%</th><th>Pago</th><th>Final</th><th>Hora</th></tr></thead>
-                <tbody>${data.orders.map(o => `
-                    <tr>
-                        <td>${o.table}</td><td>${o.waiter}</td>
-                        <td>${formatCurrency(o.total)}</td><td>${formatCurrency(o.service_charge)}</td>
-                        <td>${formatCurrency(o.partial_payment)}</td>
-                        <td><strong>${formatCurrency(o.final_total)}</strong></td>
-                        <td>${o.closed_at}</td>
-                    </tr>
-                `).join('')}</tbody>
-            </table>
-            <div class="report-summary">
-                <h4>Resumo do Dia</h4>
-                <div class="summary-row"><span>Vendas Brutas:</span><span>${formatCurrency(data.summary.total_sales)}</span></div>
-                <div class="summary-row"><span>Taxa de Serviço:</span><span>${formatCurrency(data.summary.total_service_charge)}</span></div>
-                <div class="summary-row"><span>Pagamentos Parciais:</span><span>${formatCurrency(data.summary.total_partial_payments)}</span></div>
-                <div class="summary-row"><span>Total de Comandas:</span><span>${data.summary.orders_count}</span></div>
-                <div class="summary-row summary-total"><span>Total Líquido:</span><span>${formatCurrency(data.summary.net_total)}</span></div>
-            </div>
-        `;
+        renderDailyReport(data);
         document.getElementById('report-modal').style.display = 'flex';
     } catch (err) { alert('Erro ao gerar relatório'); }
+}
+
+function renderDailyReport(data) {
+    const methodLabels = {
+        dinheiro: 'Dinheiro', cartao_credito: 'Crédito',
+        cartao_debito: 'Débito', pix: 'Pix', nao_informado: 'Não Informado'
+    };
+
+    const methodRows = Object.entries(data.by_payment_method || {}).map(([method, vals]) => `
+        <div style="margin-bottom:6px;">
+            <div class="summary-row">
+                <span>${vals.label || ((methodLabels[method] || method) + (vals.count > 0 ? ' (' + vals.count + ')' : ''))}</span>
+                <span>${formatCurrency(vals.gross)}</span>
+            </div>
+            ${vals.fee > 0 ? `<div class="summary-row" style="color:var(--red);"><span>&nbsp;&nbsp;(-) Taxa ${vals.fee_pct}%</span><span>- ${formatCurrency(vals.fee)}</span></div>` : ''}
+            ${vals.fee > 0 ? `<div class="summary-row" style="font-weight:600;"><span>&nbsp;&nbsp;Líquido</span><span>${formatCurrency(vals.net)}</span></div>` : ''}
+        </div>
+    `).join('');
+
+    const waiterRows = Object.entries(data.by_waiter || {}).map(([waiter, vals]) => `
+        <div class="summary-row">
+            <span>${waiter}</span>
+            <span>${formatCurrency(vals.service_charge)}</span>
+        </div>
+    `).join('');
+
+    const tableRows = Object.entries(data.by_table || {}).map(([table, vals]) => `
+        <div class="summary-row">
+            <span>${table}</span>
+            <span>${formatCurrency(vals.total)} (${vals.orders})</span>
+        </div>
+    `).join('');
+
+    const itemRows = (data.items_ranking || []).slice(0, 10).map(item => `
+        <div class="summary-row">
+            <span>${item.name}</span>
+            <span>${item.quantity}x ${formatCurrency(item.total)}</span>
+        </div>
+    `).join('');
+
+    const hourRows = Object.entries(data.by_hour || {}).map(([hour, total]) => `
+        <div class="summary-row">
+            <span>${hour}</span>
+            <span>${formatCurrency(total)}</span>
+        </div>
+    `).join('');
+
+    document.getElementById('report-content').innerHTML = `
+        <p style="color:var(--text-muted);font-size:13px;">Data: ${data.date} | Fechado por: ${data.closed_by}</p>
+
+        <div class="report-summary">
+            <h4>Resumo Geral</h4>
+            <div class="summary-row"><span>Vendas Brutas</span><span>${formatCurrency(data.summary.total_sales)}</span></div>
+            <div class="summary-row"><span>Taxa de Serviço (10%)</span><span>${formatCurrency(data.summary.total_service_charge)}</span></div>
+            <div class="summary-row" style="color:var(--red);"><span>Taxas de Cartão</span><span>- ${formatCurrency(data.summary.total_card_fees)}</span></div>
+            <div class="summary-row" style="font-weight:600;"><span>Total Bruto Recebido</span><span>${formatCurrency(data.summary.gross_total)}</span></div>
+            <div class="summary-row summary-total"><span>Total Líquido no Caixa</span><span>${formatCurrency(data.summary.net_total)}</span></div>
+            <div style="color:var(--text-muted);font-size:11px;margin-top:8px;">${data.summary.orders_count} comandas fechadas</div>
+        </div>
+
+        <div class="report-summary">
+            <h4>Formas de Pagamento (Bruto / Líquido)</h4>
+            ${methodRows}
+        </div>
+
+        <div class="report-summary">
+            <h4>Taxa de Serviço por Garçom</h4>
+            ${waiterRows}
+        </div>
+
+        <div class="report-summary">
+            <h4>Vendas por Mesa</h4>
+            ${tableRows}
+        </div>
+
+        <div class="report-summary">
+            <h4>Top Itens Vendidos</h4>
+            ${itemRows}
+        </div>
+
+        <div class="report-summary">
+            <h4>Vendas por Hora</h4>
+            ${hourRows}
+        </div>
+    `;
+}
+
+async function downloadPdfReport() {
+    const date = lastReportDate || (document.getElementById('sale-date-filter')?.value || new Date().toISOString().split('T')[0]);
+    try {
+        const res = await apiFetch(API_BASE + '/financeiro/relatorio-pdf', { method: 'POST', body: JSON.stringify({ date }) });
+        if (!res.ok) {
+            const data = await res.json();
+            alert(data.error || 'Erro ao gerar PDF');
+            return;
+        }
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `relatorio_ladsbeer_${date}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(url);
+    } catch (err) { alert('Erro ao baixar PDF'); }
 }
 
 function closeReport() { document.getElementById('report-modal').style.display = 'none'; }

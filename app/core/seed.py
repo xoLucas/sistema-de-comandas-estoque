@@ -25,18 +25,18 @@ SEED_TABLES = [
 ]
 
 SEED_PRODUCTS = [
-    {"name": "Espetinho de Carne", "category": "Carnes", "price": 12.00, "stock": 100, "min_stock": 15},
-    {"name": "Espetinho de Frango", "category": "Carnes", "price": 12.00, "stock": 80, "min_stock": 15},
-    {"name": "Espetinho Misto", "category": "Carnes", "price": 14.00, "stock": 70, "min_stock": 10},
-    {"name": "Porção de Fritas", "category": "Acompanhamentos", "price": 18.00, "stock": 100, "min_stock": 10},
-    {"name": "Porção de Mandioca", "category": "Acompanhamentos", "price": 16.00, "stock": 90, "min_stock": 10},
-    {"name": "Cerveja Lata", "category": "Bebidas", "price": 8.00, "stock": 150, "min_stock": 20},
-    {"name": "Refrigerante Lata", "category": "Bebidas", "price": 6.00, "stock": 120, "min_stock": 15},
-    {"name": "Água Mineral", "category": "Bebidas", "price": 4.00, "stock": 80, "min_stock": 10},
-    {"name": "Suco de Laranja", "category": "Bebidas", "price": 7.00, "stock": 50, "min_stock": 5},
-    {"name": "Molho de Alho", "category": "Condimentos", "price": 3.00, "stock": 30, "min_stock": 5},
-    {"name": "Vinagrete", "category": "Condimentos", "price": 5.00, "stock": 25, "min_stock": 5},
-    {"name": "Farofa", "category": "Condimentos", "price": 4.00, "stock": 40, "min_stock": 5},
+    {"name": "Espetinho de Carne", "category": "Carnes", "price": 12.00, "stock": 20, "min_stock": 15},
+    {"name": "Espetinho de Frango", "category": "Carnes", "price": 12.00, "stock": 15, "min_stock": 15},
+    {"name": "Espetinho Misto", "category": "Carnes", "price": 14.00, "stock": 5, "min_stock": 10},
+    {"name": "Porção de Fritas", "category": "Acompanhamentos", "price": 18.00, "stock": 20, "min_stock": 10},
+    {"name": "Porção de Mandioca", "category": "Acompanhamentos", "price": 16.00, "stock": 10, "min_stock": 10},
+    {"name": "Cerveja Lata", "category": "Bebidas", "price": 8.00, "stock": 50, "min_stock": 20},
+    {"name": "Refrigerante Lata", "category": "Bebidas", "price": 6.00, "stock": 50, "min_stock": 15},
+    {"name": "Água Mineral", "category": "Bebidas", "price": 4.00, "stock": 20, "min_stock": 10},
+    {"name": "Suco de Laranja", "category": "Bebidas", "price": 7.00, "stock": 0, "min_stock": 5},
+    {"name": "Molho de Alho", "category": "Condimentos", "price": 3.00, "stock": 10, "min_stock": 5},
+    {"name": "Vinagrete", "category": "Condimentos", "price": 5.00, "stock": 0, "min_stock": 5},
+    {"name": "Farofa", "category": "Condimentos", "price": 4.00, "stock": 15, "min_stock": 5},
 ]
 
 SEED_USERS = [
@@ -73,10 +73,13 @@ SEED_USERS = [
 
 async def run_seed() -> None:
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
 
     async with async_session() as session:
+        existing = await session.execute(select(User).limit(1))
+        if existing.scalar_one_or_none() is not None:
+            return
+
         for t in SEED_TABLES:
             session.add(Table(**t))
 

@@ -458,44 +458,6 @@ header .subtitle {
     cursor: not-allowed;
 }
 
-/* ===== PEDIDO DRINKS CHECKLIST ===== */
-.pedido-drinks {
-    padding: 10px 16px;
-    background: rgba(88, 166, 255, 0.04);
-    border-top: 1px dashed var(--border);
-}
-
-.pedido-drinks .drinks-title {
-    font-size: 10px;
-    color: var(--blue);
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    margin-bottom: 6px;
-    font-weight: 600;
-}
-
-.drink-check {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 5px 0;
-    font-size: 13px;
-    cursor: pointer;
-}
-
-.drink-check input[type="checkbox"] {
-    width: 18px;
-    height: 18px;
-    accent-color: var(--green);
-    cursor: pointer;
-    flex-shrink: 0;
-}
-
-.drink-check label {
-    cursor: pointer;
-    user-select: none;
-}
-
 /* ===== BUTTONS ===== */
 .btn-open-full {
     display: block;
@@ -831,6 +793,183 @@ header .subtitle {
 
 .btn-sm-remove {
     background-color: var(--red);
+}
+
+.qty-control {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+/* ===== PEDIDO REVIEW ===== */
+.review-list {
+    margin-bottom: 8px;
+}
+
+.review-item {
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+}
+.review-item:last-child {
+    border-bottom: none;
+}
+
+.review-info {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.review-qty {
+    font-size: 18px;
+    font-weight: 800;
+    color: var(--accent);
+    min-width: 32px;
+    font-variant-numeric: tabular-nums;
+}
+
+.review-name {
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.review-meta {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--text-muted);
+    padding-left: 40px;
+}
+
+.review-subtotal {
+    font-weight: 700;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+}
+
+.review-total {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px;
+    margin-top: 12px;
+    background: var(--surface-hover);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-size: 14px;
+    color: var(--text-muted);
+}
+
+.review-total span:last-child {
+    font-size: 24px;
+    font-weight: 800;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+}
+
+.btn-partial-full {
+    display: block;
+    width: 100%;
+    padding: 14px;
+    border: 2px solid var(--border-accent);
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--blue);
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.btn-partial-full:hover {
+    border-color: var(--blue);
+    background: rgba(88, 166, 255, 0.06);
+}
+.btn-partial-full:active {
+    border-color: var(--blue);
+    background: rgba(88, 166, 255, 0.1);
+}
+
+/* ===== PARTIAL PAYMENT MODAL ===== */
+.partial-payment-list {
+    margin-bottom: 4px;
+}
+
+.partial-item-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+    gap: 10px;
+}
+.partial-item-row:last-child {
+    border-bottom: none;
+}
+
+.partial-item-row .partial-check {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--blue);
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.partial-item-row .partial-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.partial-item-row .partial-name {
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.partial-item-row .partial-meta {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.partial-item-row .partial-subtotal {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text);
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+}
+
+.partial-item-row.already-paid {
+    opacity: 0.45;
+}
+
+.partial-summary {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px;
+    background: var(--surface-hover);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-top: 12px;
+    font-size: 14px;
+    color: var(--text-muted);
+}
+
+#partial-selected-total {
+    font-size: 20px;
+    font-weight: 800;
+    color: var(--blue);
+    font-variant-numeric: tabular-nums;
+}
+
+.pedido-item.partial-paid {
+    background: rgba(88, 166, 255, 0.06);
+}
+.pedido-item.partial-paid .item-name::after {
+    content: " ✓";
+    color: var(--green);
+    font-size: 11px;
 }
 
 /* ===== ERROR ===== */

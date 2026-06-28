@@ -78,20 +78,18 @@ async def get_table_detail(
     if order:
         for rnd in sorted(order.rounds, key=lambda r: r.round_number):
             round_items = []
-            round_drinks = []
             for item in rnd.items:
-                entry = {
-                    "id": item.id,
-                    "product_id": item.product_id,
-                    "product_name": item.product.name,
-                    "quantity": item.quantity,
-                    "unit_price": float(item.unit_price),
-                    "subtotal": float(item.unit_price * item.quantity),
-                    "category": item.product.category,
-                }
-                round_items.append(entry)
-                if item.product.category == "Bebidas":
-                    round_drinks.append(entry)
+                round_items.append(
+                    {
+                        "id": item.id,
+                        "product_id": item.product_id,
+                        "product_name": item.product.name,
+                        "quantity": item.quantity,
+                        "unit_price": float(item.unit_price),
+                        "subtotal": float(item.unit_price * item.quantity),
+                        "category": item.product.category,
+                    }
+                )
 
             pedidos.append(
                 {
@@ -99,7 +97,6 @@ async def get_table_detail(
                     "round_number": rnd.round_number,
                     "created_at": rnd.created_at.strftime("%H:%M") if rnd.created_at else "",
                     "items": round_items,
-                    "drinks": round_drinks,
                 }
             )
 

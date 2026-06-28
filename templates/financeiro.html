@@ -26,7 +26,7 @@
 <div class="filter-bar">
     <input type="date" id="sale-date-filter" onchange="loadSales()" class="select-field">
     <button onclick="loadSales()" class="btn-small">Filtrar</button>
-    <button onclick="dailyCloseReport()" class="btn-small">Fechamento Diário</button>
+    <button onclick="dailyCloseReport()" class="btn-small">Fechamento</button>
 </div>
 
 <div id="sales-list" class="sales-list">
@@ -34,10 +34,13 @@
 </div>
 
 <div id="report-modal" class="modal" style="display:none;">
-    <div class="modal-content">
-        <h3>Relatório de Fechamento</h3>
+    <div class="modal-content modal-large">
+        <h3>Relatório de Fechamento Diário</h3>
         <div id="report-content"></div>
-        <button onclick="closeReport()" class="btn-secondary-full">Fechar</button>
+        <div style="display:flex;gap:8px;margin-top:12px;">
+            <button onclick="downloadPdfReport()" class="btn-primary-full" style="flex:1;">Baixar PDF</button>
+            <button onclick="closeReport()" class="btn-secondary-full" style="flex:1;">Fechar</button>
+        </div>
     </div>
 </div>
 {% endblock %}

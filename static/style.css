@@ -1284,11 +1284,27 @@ header .subtitle {
     border: 1px solid var(--border-color);
     border-radius: var(--radius);
     padding: 14px;
+    position: relative;
+    overflow: hidden;
+    transition: all 0.2s ease;
+}
+
+.supplier-card.active {
+    border-left: 4px solid var(--green);
 }
 
 .supplier-card.inactive {
-    opacity: 0.6;
     border-left: 4px solid var(--red);
+    background: rgba(239, 68, 68, 0.06);
+}
+
+.supplier-card.inactive .supplier-name {
+    text-decoration: line-through;
+    opacity: 0.7;
+}
+
+.supplier-card.inactive .supplier-product-tag {
+    opacity: 0.6;
 }
 
 .supplier-header {
@@ -1296,6 +1312,7 @@ header .subtitle {
     justify-content: space-between;
     align-items: center;
     margin-bottom: 6px;
+    gap: 8px;
 }
 
 .supplier-name {
@@ -1304,17 +1321,40 @@ header .subtitle {
 }
 
 .supplier-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
     font-size: 11px;
-    font-weight: 600;
-    padding: 3px 8px;
-    border-radius: 12px;
-    background: var(--color-accent);
-    color: #000;
+    font-weight: 700;
+    padding: 4px 10px;
+    border-radius: 20px;
+    background: rgba(34, 197, 94, 0.15);
+    color: var(--green);
+    border: 1px solid rgba(34, 197, 94, 0.3);
+    white-space: nowrap;
 }
 
 .supplier-card.inactive .supplier-status {
+    background: rgba(239, 68, 68, 0.15);
+    color: var(--red);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.status-dot.green {
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green);
+}
+
+.status-dot.red {
     background: var(--red);
-    color: #fff;
+    box-shadow: 0 0 6px var(--red);
 }
 
 .supplier-contact {
@@ -1382,4 +1422,62 @@ header .subtitle {
 .text-muted {
     color: var(--text-muted);
     font-size: 13px;
+}
+
+/* Toggle switch */
+.toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 0;
+}
+
+.toggle-label {
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.toggle-switch {
+    position: relative;
+    display: inline-block;
+    width: 48px;
+    height: 26px;
+}
+
+.toggle-switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.toggle-slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: var(--red);
+    transition: 0.3s;
+    border-radius: 26px;
+}
+
+.toggle-slider:before {
+    position: absolute;
+    content: "";
+    height: 20px;
+    width: 20px;
+    left: 3px;
+    bottom: 3px;
+    background-color: white;
+    transition: 0.3s;
+    border-radius: 50%;
+}
+
+.toggle-switch input:checked + .toggle-slider {
+    background-color: var(--green);
+}
+
+.toggle-switch input:checked + .toggle-slider:before {
+    transform: translateX(22px);
 }

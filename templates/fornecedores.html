@@ -32,10 +32,13 @@
         <input type="text" id="supplier-contact" class="input-field" placeholder="Telefone / e-mail / WhatsApp">
         <label class="input-label">Produtos</label>
         <div id="supplier-products" class="checkbox-list"></div>
-        <label class="checkbox-row" style="margin-top:12px;">
-            <input type="checkbox" id="supplier-active" checked>
-            <span>Fornecedor ativo</span>
-        </label>
+        <div class="toggle-row" style="margin-top:12px;">
+            <span class="toggle-label" id="supplier-active-label">Fornecedor ativo</span>
+            <label class="toggle-switch">
+                <input type="checkbox" id="supplier-active" checked>
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
         <p id="supplier-error" class="error-msg" style="display:none;"></p>
         <button onclick="submitSupplier()" class="btn-primary-full">Salvar</button>
         <button onclick="closeSupplierModal()" class="btn-secondary-full">Cancelar</button>

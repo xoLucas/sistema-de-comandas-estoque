@@ -1031,10 +1031,13 @@ async function loadSuppliers() {
         }
 
         container.innerHTML = suppliers.map(s => `
-            <div class="supplier-card ${s.active ? '' : 'inactive'}">
+            <div class="supplier-card ${s.active ? 'active' : 'inactive'}">
                 <div class="supplier-header">
                     <span class="supplier-name">${s.name}</span>
-                    <span class="supplier-status">${s.active ? 'Ativo' : 'Inativo'}</span>
+                    <span class="supplier-status">
+                        <span class="status-dot ${s.active ? 'green' : 'red'}"></span>
+                        ${s.active ? 'Ativo' : 'Inativo'}
+                    </span>
                 </div>
                 ${s.contact ? `<div class="supplier-contact">${s.contact}</div>` : ''}
                 <div class="supplier-products">
@@ -1074,7 +1077,13 @@ async function showSupplierModal(supplier = null) {
     document.getElementById('supplier-id').value = supplier ? supplier.id : '';
     document.getElementById('supplier-name').value = supplier ? supplier.name : '';
     document.getElementById('supplier-contact').value = supplier ? (supplier.contact || '') : '';
-    document.getElementById('supplier-active').checked = supplier ? supplier.active : true;
+    const activeCheckbox = document.getElementById('supplier-active');
+    activeCheckbox.checked = supplier ? supplier.active : true;
+    const activeLabel = document.getElementById('supplier-active-label');
+    activeLabel.textContent = activeCheckbox.checked ? 'Fornecedor ativo' : 'Fornecedor inativo';
+    activeCheckbox.onchange = () => {
+        activeLabel.textContent = activeCheckbox.checked ? 'Fornecedor ativo' : 'Fornecedor inativo';
+    };
 
     document.querySelectorAll('.supplier-product-check').forEach(cb => {
         cb.checked = supplier && supplier.products.some(p => p.id == cb.value);

@@ -1270,3 +1270,116 @@ header .subtitle {
         max-width: 640px;
     }
 }
+
+/* ====== SUPPLIERS ====== */
+.suppliers-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.supplier-card {
+    background: var(--color-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    padding: 14px;
+}
+
+.supplier-card.inactive {
+    opacity: 0.6;
+    border-left: 4px solid var(--red);
+}
+
+.supplier-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+}
+
+.supplier-name {
+    font-weight: 700;
+    font-size: 16px;
+}
+
+.supplier-status {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 12px;
+    background: var(--color-accent);
+    color: #000;
+}
+
+.supplier-card.inactive .supplier-status {
+    background: var(--red);
+    color: #fff;
+}
+
+.supplier-contact {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-bottom: 10px;
+}
+
+.supplier-products {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 12px;
+}
+
+.supplier-product-tag {
+    font-size: 11px;
+    background: rgba(255,255,255,0.08);
+    padding: 4px 8px;
+    border-radius: 8px;
+}
+
+.supplier-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.checkbox-list {
+    max-height: 200px;
+    overflow-y: auto;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    padding: 8px;
+    background: rgba(0,0,0,0.2);
+    margin-bottom: 8px;
+}
+
+.checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+    font-size: 14px;
+    cursor: pointer;
+}
+
+.checkbox-row input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--color-accent);
+}
+
+.btn-danger {
+    background: var(--red);
+    color: #fff;
+}
+
+.input-label {
+    display: block;
+    font-size: 13px;
+    color: var(--text-muted);
+    margin: 10px 0 4px;
+}
+
+.text-muted {
+    color: var(--text-muted);
+    font-size: 13px;
+}

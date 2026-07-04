@@ -8,6 +8,7 @@ from app.models.user import User
 from app.models.order import Order
 from app.models.order_item import OrderItem
 from app.models.order_round import OrderRound
+from app.models.supplier import Supplier
 
 
 SEED_TABLES = [

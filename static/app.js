@@ -996,3 +996,153 @@ async function downloadPdfReport() {
 }
 
 function closeReport() { document.getElementById('report-modal').style.display = 'none'; }
+
+// ====== SUPPLIERS ======
+let supplierProductsCache = [];
+
+async function loadSuppliers() {
+    const container = document.getElementById('suppliers-list');
+    if (!container) return;
+
+    const search = document.getElementById('supplier-search')?.value.toLowerCase() || '';
+    const activeFilter = document.getElementById('supplier-filter-active')?.value || '';
+
+    try {
+        const res = await apiFetch(API_BASE + '/fornecedores');
+        const data = await res.json();
+        if (data.error) {
+            container.innerHTML = '<div class="error-msg">' + data.error + '</div>';
+            return;
+        }
+
+        let suppliers = data;
+        if (search) {
+            suppliers = suppliers.filter(s => s.name.toLowerCase().includes(search));
+        }
+        if (activeFilter === 'true') {
+            suppliers = suppliers.filter(s => s.active);
+        } else if (activeFilter === 'false') {
+            suppliers = suppliers.filter(s => !s.active);
+        }
+
+        if (suppliers.length === 0) {
+            container.innerHTML = '<p class="empty-msg">Nenhum fornecedor encontrado</p>';
+            return;
+        }
+
+        container.innerHTML = suppliers.map(s => `
+            <div class="supplier-card ${s.active ? '' : 'inactive'}">
+                <div class="supplier-header">
+                    <span class="supplier-name">${s.name}</span>
+                    <span class="supplier-status">${s.active ? 'Ativo' : 'Inativo'}</span>
+                </div>
+                ${s.contact ? `<div class="supplier-contact">${s.contact}</div>` : ''}
+                <div class="supplier-products">
+                    ${s.products.length > 0 ? s.products.map(p => `<span class="supplier-product-tag">${p.name}</span>`).join('') : '<span class="text-muted">Nenhum produto vinculado</span>'}
+                </div>
+                <div class="supplier-actions">
+                    <button onclick="editSupplier(${s.id})" class="btn-small">Editar</button>
+                    <button onclick="deleteSupplier(${s.id})" class="btn-small btn-danger">Excluir</button>
+                </div>
+            </div>
+        `).join('');
+    } catch (err) {
+        container.innerHTML = '<div class="error-msg">Erro ao carregar fornecedores</div>';
+    }
+}
+
+async function loadSupplierProducts() {
+    try {
+        const res = await apiFetch(API_BASE + '/produtos');
+        supplierProductsCache = await res.json();
+    } catch (err) {
+        supplierProductsCache = [];
+    }
+}
+
+async function showSupplierModal(supplier = null) {
+    await loadSupplierProducts();
+    const container = document.getElementById('supplier-products');
+    container.innerHTML = supplierProductsCache.map(p => `
+        <label class="checkbox-row">
+            <input type="checkbox" value="${p.id}" class="supplier-product-check">
+            <span>${p.name} (${p.category})</span>
+        </label>
+    `).join('');
+
+    document.getElementById('supplier-modal-title').textContent = supplier ? 'Editar Fornecedor' : 'Novo Fornecedor';
+    document.getElementById('supplier-id').value = supplier ? supplier.id : '';
+    document.getElementById('supplier-name').value = supplier ? supplier.name : '';
+    document.getElementById('supplier-contact').value = supplier ? (supplier.contact || '') : '';
+    document.getElementById('supplier-active').checked = supplier ? supplier.active : true;
+
+    document.querySelectorAll('.supplier-product-check').forEach(cb => {
+        cb.checked = supplier && supplier.products.some(p => p.id == cb.value);
+    });
+
+    document.getElementById('supplier-error').style.display = 'none';
+    document.getElementById('supplier-modal').style.display = 'flex';
+}
+
+function closeSupplierModal() {
+    document.getElementById('supplier-modal').style.display = 'none';
+}
+
+async function submitSupplier() {
+    const id = document.getElementById('supplier-id').value;
+    const name = document.getElementById('supplier-name').value.trim();
+    const contact = document.getElementById('supplier-contact').value.trim();
+    const active = document.getElementById('supplier-active').checked;
+    const productIds = Array.from(document.querySelectorAll('.supplier-product-check:checked')).map(cb => parseInt(cb.value));
+
+    if (!name) {
+        document.getElementById('supplier-error').textContent = 'Informe o nome do fornecedor';
+        document.getElementById('supplier-error').style.display = 'block';
+        return;
+    }
+
+    const payload = { name, contact, active, product_ids: productIds };
+    const url = API_BASE + '/fornecedores' + (id ? '/' + id : '');
+    const method = id ? 'PUT' : 'POST';
+
+    try {
+        const res = await apiFetch(url, { method, body: JSON.stringify(payload) });
+        const data = await res.json();
+        if (data.error) {
+            document.getElementById('supplier-error').textContent = data.error;
+            document.getElementById('supplier-error').style.display = 'block';
+            return;
+        }
+        closeSupplierModal();
+        loadSuppliers();
+    } catch (err) {
+        document.getElementById('supplier-error').textContent = 'Erro ao salvar fornecedor';
+        document.getElementById('supplier-error').style.display = 'block';
+    }
+}
+
+async function editSupplier(id) {
+    try {
+        const res = await apiFetch(API_BASE + '/fornecedores');
+        const suppliers = await res.json();
+        const supplier = suppliers.find(s => s.id == id);
+        if (supplier) showSupplierModal(supplier);
+    } catch (err) {
+        alert('Erro ao carregar fornecedor');
+    }
+}
+
+async function deleteSupplier(id) {
+    if (!confirm('Deseja realmente excluir este fornecedor?')) return;
+    try {
+        const res = await apiFetch(API_BASE + '/fornecedores/' + id, { method: 'DELETE' });
+        if (!res.ok) {
+            const data = await res.json();
+            alert(data.error || 'Erro ao excluir');
+            return;
+        }
+        loadSuppliers();
+    } catch (err) {
+        alert('Erro ao excluir fornecedor');
+    }
+}

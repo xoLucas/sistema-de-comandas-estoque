@@ -1,8 +1,9 @@
 from datetime import datetime
 from sqlalchemy import Integer, String, Float, DateTime, func
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+from app.models.associations import supplier_product
 
 
 class Product(Base):
@@ -20,3 +21,5 @@ class Product(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+    suppliers = relationship("Supplier", secondary=supplier_product, back_populates="products")

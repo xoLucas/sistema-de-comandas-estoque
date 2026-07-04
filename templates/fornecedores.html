@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+<header>
+    <h1>FORNECEDORES</h1>
+    <p class="subtitle">Cadastro de Fornecedores</p>
+</header>
+
+<div class="filter-bar">
+    <input type="text" id="supplier-search" oninput="loadSuppliers()" placeholder="Buscar fornecedor..." class="input-field">
+    <select id="supplier-filter-active" onchange="loadSuppliers()" class="select-field">
+        <option value="">Todos</option>
+        <option value="true" selected>Ativos</option>
+        <option value="false">Inativos</option>
+    </select>
+</div>
+
+<div id="suppliers-list" class="suppliers-list">
+    <div class="loading">Carregando...</div>
+</div>
+
+<div class="actions-stack">
+    <button onclick="showSupplierModal()" class="btn-secondary-full">Novo Fornecedor</button>
+</div>
+
+<div id="supplier-modal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <h3 id="supplier-modal-title">Novo Fornecedor</h3>
+        <input type="hidden" id="supplier-id">
+        <label class="input-label">Nome</label>
+        <input type="text" id="supplier-name" class="input-field" placeholder="Nome do fornecedor">
+        <label class="input-label">Contato</label>
+        <input type="text" id="supplier-contact" class="input-field" placeholder="Telefone / e-mail / WhatsApp">
+        <label class="input-label">Produtos</label>
+        <div id="supplier-products" class="checkbox-list"></div>
+        <label class="checkbox-row" style="margin-top:12px;">
+            <input type="checkbox" id="supplier-active" checked>
+            <span>Fornecedor ativo</span>
+        </label>
+        <p id="supplier-error" class="error-msg" style="display:none;"></p>
+        <button onclick="submitSupplier()" class="btn-primary-full">Salvar</button>
+        <button onclick="closeSupplierModal()" class="btn-secondary-full">Cancelar</button>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    checkAuth((user) => {
+        document.getElementById('bottom-nav').style.display = 'flex';
+        highlightNav('fornecedores');
+        loadSuppliers();
+    });
+});
+</script>
+{% endblock %}

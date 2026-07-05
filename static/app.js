@@ -687,7 +687,7 @@ async function showCloseModal() {
     const total = currentTableData.total || 0;
     const paid = currentTableData.partial_payment || 0;
     const paidService = currentTableData.partial_service_charge || 0;
-    const service = total * 0.10;
+    const service = 0;
     const remainingProduct = Math.max(0, total - paid);
     const remainingService = Math.max(0, service - paidService);
     const final = remainingProduct + remainingService;

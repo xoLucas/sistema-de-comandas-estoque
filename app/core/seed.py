@@ -9,6 +9,7 @@ from app.models.order import Order
 from app.models.order_item import OrderItem
 from app.models.order_round import OrderRound
 from app.models.supplier import Supplier
+from app.models.stock_history import StockHistory
 
 
 SEED_TABLES = [
@@ -78,6 +79,18 @@ async def _ensure_columns() -> None:
             text(
                 "ALTER TABLE orders ADD COLUMN IF NOT EXISTS partial_service_charge FLOAT NOT NULL DEFAULT 0.0"
             )
+        )
+        await conn.execute(
+            text("ALTER TABLE products ADD COLUMN IF NOT EXISTS code VARCHAR(50) UNIQUE DEFAULT NULL")
+        )
+        await conn.execute(
+            text("ALTER TABLE products ADD COLUMN IF NOT EXISTS cost FLOAT NOT NULL DEFAULT 0.0")
+        )
+        await conn.execute(
+            text("ALTER TABLE products ADD COLUMN IF NOT EXISTS margin_pct FLOAT NOT NULL DEFAULT 0.0")
+        )
+        await conn.execute(
+            text("ALTER TABLE products ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE")
         )
 
 

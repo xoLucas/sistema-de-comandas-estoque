@@ -42,6 +42,7 @@
 </div>
 
 <div class="actions-stack">
+    <button onclick="showProductModal()" class="btn-primary-full">Novo Produto</button>
     <button onclick="showBatchLoad()" class="btn-secondary-full">Adicionar Carregamento</button>
 </div>
 
@@ -52,6 +53,101 @@
         <button onclick="submitBatchLoad()" class="btn-primary-full">Confirmar Carregamento</button>
         <button onclick="closeBatchLoad()" class="btn-secondary-full">Cancelar</button>
         <p id="batch-error" class="error-msg" style="display:none;"></p>
+    </div>
+</div>
+
+<div id="product-modal" class="modal" style="display:none;">
+    <div class="modal-content modal-large">
+        <h3 id="product-modal-title">Produto</h3>
+        <input type="hidden" id="product-id">
+
+        <div class="tabs">
+            <button class="tab-btn active" onclick="switchProductTab('info')">Informações</button>
+            <button class="tab-btn" onclick="switchProductTab('entries')">Entradas</button>
+            <button class="tab-btn" onclick="switchProductTab('exits')">Saídas</button>
+        </div>
+
+        <div id="tab-info" class="tab-content active">
+            <div class="form-row">
+                <div class="form-col">
+                    <label class="input-label">Código</label>
+                    <input type="text" id="product-code" class="input-field" placeholder="Código do produto">
+                </div>
+                <div class="form-col">
+                    <label class="input-label">Nome *</label>
+                    <input type="text" id="product-name" class="input-field" placeholder="Nome do produto">
+                </div>
+            </div>
+
+            <label class="input-label">Categoria *</label>
+            <input type="text" id="product-category" class="input-field" placeholder="Ex: Bebidas, Carnes">
+
+            <div class="form-row">
+                <div class="form-col">
+                    <label class="input-label">Custo (R$)</label>
+                    <input type="number" step="0.01" id="product-cost" class="input-field" placeholder="0,00" onchange="calculateProductPrice()">
+                </div>
+                <div class="form-col">
+                    <label class="input-label">Margem (%)</label>
+                    <input type="number" step="0.01" id="product-margin" class="input-field" placeholder="0,00" onchange="calculateProductPrice()">
+                </div>
+                <div class="form-col">
+                    <label class="input-label">Preço de Venda (R$)</label>
+                    <input type="number" step="0.01" id="product-price" class="input-field" placeholder="0,00" onchange="calculateProductMargin()">
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="form-col">
+                    <label class="input-label">Estoque Atual</label>
+                    <input type="number" id="product-stock" class="input-field" placeholder="0">
+                </div>
+                <div class="form-col">
+                    <label class="input-label">Estoque Mínimo</label>
+                    <input type="number" id="product-min-stock" class="input-field" placeholder="10">
+                </div>
+            </div>
+
+            <label class="input-label">Fornecedores</label>
+            <div id="product-suppliers" class="checkbox-list"></div>
+
+            <div class="toggle-row" style="margin-top:8px;">
+                <span class="toggle-label" id="product-active-label">Produto ativo</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="product-active" checked>
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+
+            <div id="product-movement" style="margin-top:16px; border-top:1px solid var(--border-color); padding-top:12px;">
+                <label class="input-label">Registrar Movimentação</label>
+                <div class="form-row">
+                    <div class="form-col">
+                        <select id="movement-type" class="select-field">
+                            <option value="entrada">Entrada</option>
+                            <option value="saida">Saída</option>
+                        </select>
+                    </div>
+                    <div class="form-col">
+                        <input type="number" id="movement-qty" class="input-field" placeholder="Qtd">
+                    </div>
+                </div>
+                <input type="text" id="movement-note" class="input-field" placeholder="Observação (opcional)">
+                <button onclick="submitProductMovement()" class="btn-secondary-full" style="margin-top:8px;">Registrar</button>
+            </div>
+        </div>
+
+        <div id="tab-entries" class="tab-content">
+            <div id="entries-list" class="history-list"></div>
+        </div>
+
+        <div id="tab-exits" class="tab-content">
+            <div id="exits-list" class="history-list"></div>
+        </div>
+
+        <p id="product-error" class="error-msg" style="display:none;"></p>
+        <button onclick="submitProduct()" class="btn-primary-full" style="margin-top:12px;">Salvar Produto</button>
+        <button onclick="closeProductModal()" class="btn-secondary-full">Fechar</button>
     </div>
 </div>
 {% endblock %}

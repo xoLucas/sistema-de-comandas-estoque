@@ -779,10 +779,10 @@ async function loadStock() {
             });
         }
         container.innerHTML = data.items.map(p => `
-            <div class="stock-item-row">
+            <div class="stock-item-row ${p.active ? '' : 'inactive'}" onclick="openProductDetail(${p.id})">
                 <div>
-                    <div class="stock-name">${p.name}</div>
-                    <div class="stock-meta">${p.category} | Mín: ${p.min_stock} | ${p.pct_of_min}%</div>
+                    <div class="stock-name">${p.code ? '[' + p.code + '] ' : ''}${p.name}</div>
+                    <div class="stock-meta">${p.category} | Mín: ${p.min_stock} | ${p.pct_of_min}% | Custo: ${formatCurrency(p.cost)} | Venda: ${formatCurrency(p.price)}</div>
                 </div>
                 <div style="text-align:right;">
                     <span style="font-size:18px;font-weight:700;">${p.stock}</span>
@@ -798,7 +798,7 @@ async function loadStock() {
 
 let batchProducts = [];
 function showBatchLoad() {
-    apiFetch(API_BASE + '/produtos')
+    apiFetch(API_BASE + '/produtos?active_only=true')
         .then(r => r.json())
         .then(products => {
             batchProducts = products.map(p => ({ ...p, loadQty: 0 }));
@@ -826,6 +826,222 @@ async function submitBatchLoad() {
         document.getElementById('batch-modal').style.display = 'none';
         loadStock();
     } catch (err) { alert('Erro ao enviar carregamento'); }
+}
+
+// ====== PRODUCT DETAIL / EDIT ======
+let currentProductId = null;
+let productSuppliersCache = [];
+
+function calculateProductPrice() {
+    const cost = parseFloat(document.getElementById('product-cost')?.value) || 0;
+    const margin = parseFloat(document.getElementById('product-margin')?.value) || 0;
+    if (cost > 0 && margin >= 0) {
+        const price = cost * (1 + margin / 100);
+        document.getElementById('product-price').value = price.toFixed(2);
+    }
+}
+
+function calculateProductMargin() {
+    const cost = parseFloat(document.getElementById('product-cost')?.value) || 0;
+    const price = parseFloat(document.getElementById('product-price')?.value) || 0;
+    if (cost > 0 && price > 0) {
+        const margin = ((price - cost) / cost) * 100;
+        document.getElementById('product-margin').value = margin.toFixed(2);
+    }
+}
+
+async function loadProductSuppliers() {
+    try {
+        const res = await apiFetch(API_BASE + '/fornecedores?active_only=true');
+        productSuppliersCache = await res.json();
+    } catch (err) {
+        productSuppliersCache = [];
+    }
+}
+
+function renderProductSuppliers(selectedIds = []) {
+    const container = document.getElementById('product-suppliers');
+    if (productSuppliersCache.length === 0) {
+        container.innerHTML = '<span class="text-muted">Nenhum fornecedor ativo cadastrado</span>';
+        return;
+    }
+    container.innerHTML = productSuppliersCache.map(s => `
+        <label class="checkbox-row">
+            <input type="checkbox" value="${s.id}" class="product-supplier-check" ${selectedIds.includes(s.id) ? 'checked' : ''}>
+            <span>${s.name}</span>
+        </label>
+    `).join('');
+}
+
+async function openProductDetail(productId) {
+    currentProductId = productId;
+    await loadProductSuppliers();
+    try {
+        const res = await apiFetch(API_BASE + '/estoque/' + productId);
+        const product = await res.json();
+        if (product.error) { alert(product.error); return; }
+
+        document.getElementById('product-modal-title').textContent = product.name;
+        document.getElementById('product-id').value = product.id;
+        document.getElementById('product-code').value = product.code || '';
+        document.getElementById('product-name').value = product.name;
+        document.getElementById('product-category').value = product.category;
+        document.getElementById('product-cost').value = product.cost ? product.cost.toFixed(2) : '0.00';
+        document.getElementById('product-margin').value = product.margin_pct ? product.margin_pct.toFixed(2) : '0.00';
+        document.getElementById('product-price').value = product.price ? product.price.toFixed(2) : '0.00';
+        document.getElementById('product-stock').value = product.stock;
+        document.getElementById('product-min-stock').value = product.min_stock;
+
+        const activeCheckbox = document.getElementById('product-active');
+        activeCheckbox.checked = product.active;
+        const activeLabel = document.getElementById('product-active-label');
+        activeLabel.textContent = product.active ? 'Produto ativo' : 'Produto inativo';
+        activeCheckbox.onchange = () => {
+            activeLabel.textContent = activeCheckbox.checked ? 'Produto ativo' : 'Produto inativo';
+        };
+
+        renderProductSuppliers((product.suppliers || []).map(s => s.id));
+
+        switchProductTab('info');
+        document.getElementById('product-error').style.display = 'none';
+        document.getElementById('product-modal').style.display = 'flex';
+        loadProductHistory(productId);
+    } catch (err) { alert('Erro ao abrir produto'); }
+}
+
+async function showProductModal() {
+    currentProductId = null;
+    await loadProductSuppliers();
+    document.getElementById('product-modal-title').textContent = 'Novo Produto';
+    document.getElementById('product-id').value = '';
+    document.getElementById('product-code').value = '';
+    document.getElementById('product-name').value = '';
+    document.getElementById('product-category').value = '';
+    document.getElementById('product-cost').value = '';
+    document.getElementById('product-margin').value = '';
+    document.getElementById('product-price').value = '';
+    document.getElementById('product-stock').value = '';
+    document.getElementById('product-min-stock').value = '10';
+
+    const activeCheckbox = document.getElementById('product-active');
+    activeCheckbox.checked = true;
+    const activeLabel = document.getElementById('product-active-label');
+    activeLabel.textContent = 'Produto ativo';
+    activeCheckbox.onchange = () => {
+        activeLabel.textContent = activeCheckbox.checked ? 'Produto ativo' : 'Produto inativo';
+    };
+
+    renderProductSuppliers([]);
+    switchProductTab('info');
+    document.getElementById('entries-list').innerHTML = '';
+    document.getElementById('exits-list').innerHTML = '';
+    document.getElementById('product-error').style.display = 'none';
+    document.getElementById('product-modal').style.display = 'flex';
+}
+
+function closeProductModal() {
+    document.getElementById('product-modal').style.display = 'none';
+    currentProductId = null;
+}
+
+async function submitProduct() {
+    const id = document.getElementById('product-id').value;
+    const payload = {
+        code: document.getElementById('product-code').value.trim() || null,
+        name: document.getElementById('product-name').value.trim(),
+        category: document.getElementById('product-category').value.trim(),
+        cost: parseFloat(document.getElementById('product-cost').value) || 0,
+        margin_pct: parseFloat(document.getElementById('product-margin').value) || 0,
+        price: parseFloat(document.getElementById('product-price').value) || 0,
+        stock: parseInt(document.getElementById('product-stock').value) || 0,
+        min_stock: parseInt(document.getElementById('product-min-stock').value) || 0,
+        active: document.getElementById('product-active').checked,
+        supplier_ids: Array.from(document.querySelectorAll('.product-supplier-check:checked')).map(cb => parseInt(cb.value)),
+    };
+
+    if (!payload.name || !payload.category) {
+        document.getElementById('product-error').textContent = 'Nome e categoria são obrigatórios';
+        document.getElementById('product-error').style.display = 'block';
+        return;
+    }
+
+    const url = API_BASE + '/estoque' + (id ? '/' + id : '');
+    const method = id ? 'PUT' : 'POST';
+
+    try {
+        const res = await apiFetch(url, { method, body: JSON.stringify(payload) });
+        const data = await res.json();
+        if (data.error) {
+            document.getElementById('product-error').textContent = data.error;
+            document.getElementById('product-error').style.display = 'block';
+            return;
+        }
+        closeProductModal();
+        loadStock();
+    } catch (err) {
+        document.getElementById('product-error').textContent = 'Erro ao salvar produto';
+        document.getElementById('product-error').style.display = 'block';
+    }
+}
+
+async function submitProductMovement() {
+    if (!currentProductId) return;
+    const type = document.getElementById('movement-type').value;
+    const quantity = parseInt(document.getElementById('movement-qty').value) || 0;
+    const note = document.getElementById('movement-note').value.trim();
+
+    if (quantity <= 0) {
+        alert('Quantidade deve ser maior que zero');
+        return;
+    }
+
+    try {
+        const res = await apiFetch(API_BASE + '/estoque/' + currentProductId + '/movimentacao', {
+            method: 'POST',
+            body: JSON.stringify({ type, quantity, note })
+        });
+        const data = await res.json();
+        if (data.error) { alert(data.error); return; }
+        document.getElementById('product-stock').value = data.product.stock;
+        document.getElementById('movement-qty').value = '';
+        document.getElementById('movement-note').value = '';
+        loadProductHistory(currentProductId);
+        loadStock();
+    } catch (err) { alert('Erro ao registrar movimentação'); }
+}
+
+async function loadProductHistory(productId) {
+    try {
+        const res = await apiFetch(API_BASE + '/estoque/' + productId + '/historico');
+        const data = await res.json();
+        if (data.error) return;
+
+        const entries = data.items.filter(h => h.type === 'entrada');
+        const exits = data.items.filter(h => h.type === 'saida');
+
+        const renderHistory = (items) => items.map(h => `
+            <div class="history-item">
+                <div class="history-main">
+                    <span class="history-qty ${h.type}">+${h.quantity}</span>
+                    <span class="history-note">${h.note || 'Sem observação'}</span>
+                </div>
+                <span class="history-date">${h.created_at ? new Date(h.created_at).toLocaleString('pt-BR') : ''}</span>
+            </div>
+        `).join('');
+
+        document.getElementById('entries-list').innerHTML = entries.length ? renderHistory(entries) : '<p class="empty-msg">Nenhuma entrada registrada</p>';
+        document.getElementById('exits-list').innerHTML = exits.length ? renderHistory(exits) : '<p class="empty-msg">Nenhuma saída registrada</p>';
+    } catch (err) {
+        document.getElementById('entries-list').innerHTML = '<div class="error-msg">Erro ao carregar histórico</div>';
+        document.getElementById('exits-list').innerHTML = '<div class="error-msg">Erro ao carregar histórico</div>';
+    }
+}
+
+function switchProductTab(tab) {
+    document.querySelectorAll('#product-modal .tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('#product-modal .tab-content').forEach(c => c.classList.remove('active'));
+    document.querySelector(`#product-modal .tab-btn[onclick="switchProductTab('${tab}')"]`).classList.add('active');
+    document.getElementById('tab-' + tab).classList.add('active');
 }
 
 // ====== FINANCIAL ======

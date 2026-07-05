@@ -14,21 +14,13 @@ from app.models.order import Order
 from app.models.table import Table
 from app.models.user import User
 from app.routers.auth_deps import get_current_user
+from app.services.settings_service import get_setting_as_float
 
 router = APIRouter(prefix="/api/financeiro", tags=["financeiro"])
 
 
 from app.models.order_item import OrderItem
 from app.models.product import Product
-
-
-CARD_FEE_RATES = {
-    "dinheiro": 0.0,
-    "pix": 0.0,
-    "cartao_debito": 1.5,
-    "cartao_credito": 3.5,
-    "nao_informado": 0.0,
-}
 
 
 PAYMENT_LABELS = {
@@ -48,8 +40,20 @@ def _service_amount(order: Order) -> float:
     return order.total * (order.service_charge_pct / 100)
 
 
-def _card_fee_for_payment(amount: float, method: str) -> float:
-    return amount * (CARD_FEE_RATES.get(method, 0.0) / 100)
+async def _get_card_fee_rates(db: AsyncSession) -> dict[str, float]:
+    debit = await get_setting_as_float(db, "card_fee_debit_pct", 1.5)
+    credit = await get_setting_as_float(db, "card_fee_credit_pct", 3.5)
+    return {
+        "dinheiro": 0.0,
+        "pix": 0.0,
+        "cartao_debito": debit,
+        "cartao_credito": credit,
+        "nao_informado": 0.0,
+    }
+
+
+def _card_fee_for_payment(amount: float, method: str, rates: dict[str, float]) -> float:
+    return amount * (rates.get(method, 0.0) / 100)
 
 
 async def _build_daily_report(
@@ -69,6 +73,7 @@ async def _build_daily_report(
         .order_by(Order.closed_at)
     )
     orders = result.scalars().all()
+    card_fee_rates = await _get_card_fee_rates(db)
 
     if not orders:
         return {"error": "Nenhuma venda encontrada nesta data"}
@@ -106,7 +111,7 @@ async def _build_daily_report(
         service_remaining = max(0.0, service_amount - o.partial_service_charge)
         final = product_remaining + service_remaining
         close_method = o.payment_method or "nao_informado"
-        close_fee = _card_fee_for_payment(final, close_method)
+        close_fee = _card_fee_for_payment(final, close_method, card_fee_rates)
 
         report["summary"]["total_sales"] += o.total
         report["summary"]["total_service_charge"] += service_amount
@@ -133,7 +138,7 @@ async def _build_daily_report(
         if close_method not in method_totals:
             method_totals[close_method] = {
                 "gross": 0.0,
-                "fee_pct": CARD_FEE_RATES.get(close_method, 0.0),
+                "fee_pct": card_fee_rates.get(close_method, 0.0),
                 "fee": 0.0,
                 "net": 0.0,
                 "count": 0,
@@ -149,7 +154,7 @@ async def _build_daily_report(
                 p_product = float(pd.get("product_portion", p_amount))
                 p_service = float(pd.get("service_portion", 0))
                 p_method = pd.get("method", "nao_informado")
-                p_fee = _card_fee_for_payment(p_amount, p_method)
+                p_fee = _card_fee_for_payment(p_amount, p_method, card_fee_rates)
 
                 report["summary"]["total_card_fees"] += p_fee
                 report["summary"]["gross_total"] += p_amount
@@ -158,7 +163,7 @@ async def _build_daily_report(
                 if key not in method_totals:
                     method_totals[key] = {
                         "gross": 0.0,
-                        "fee_pct": CARD_FEE_RATES.get(p_method, 0.0),
+                        "fee_pct": card_fee_rates.get(p_method, 0.0),
                         "fee": 0.0,
                         "net": 0.0,
                         "count": 0,
@@ -419,7 +424,7 @@ async def report_pdf(
     summary = report["summary"]
     rows = [
         ("Vendas Brutas", f"R$ {summary['total_sales']:.2f}"),
-        ("Taxa de Serviço (10%)", f"R$ {summary['total_service_charge']:.2f}"),
+        ("Taxa de Serviço", f"R$ {summary['total_service_charge']:.2f}"),
         ("Taxas de Cartão", f"R$ {summary['total_card_fees']:.2f}"),
         ("Total Bruto Recebido", f"R$ {summary['gross_total']:.2f}"),
         ("Total Líquido (caixa)", f"R$ {summary['net_total']:.2f}"),

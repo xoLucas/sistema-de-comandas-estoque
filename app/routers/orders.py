@@ -16,6 +16,7 @@ from app.models.stock_history import StockHistory
 from app.models.user import User
 from app.routers.auth_deps import get_current_user
 from app.services.promotion_service import get_discounted_price
+from app.services.settings_service import get_setting_as_float
 
 router = APIRouter(prefix="/api", tags=["orders"])
 
@@ -391,7 +392,9 @@ async def partial_payment(
         return {"error": "Nenhuma comanda aberta para esta mesa"}
 
     if req.apply_service_charge:
-        product_portion = round(req.amount / 1.10, 2)
+        service_charge_pct = await get_setting_as_float(db, "service_charge_pct", 10.0)
+        divisor = 1 + (service_charge_pct / 100)
+        product_portion = round(req.amount / divisor, 2)
         service_portion = round(req.amount - product_portion, 2)
     else:
         product_portion = req.amount
@@ -442,8 +445,9 @@ async def close_order(
     table_result = await db.execute(select(Table).where(Table.id == req.table_id))
     table = table_result.scalars().first()
 
+    service_charge_pct = await get_setting_as_float(db, "service_charge_pct", 10.0)
     if req.apply_service_charge:
-        order.service_charge_pct = 10.0
+        order.service_charge_pct = service_charge_pct
         order.service_charge_applied = True
     else:
         order.service_charge_pct = 0.0

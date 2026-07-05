@@ -36,13 +36,14 @@ function checkAuth(callback) {
     }
     apiFetch(API_BASE + '/auth/me')
         .then(r => r.json())
-        .then(data => {
+        .then(async (data) => {
             if (data.detail) {
                 localStorage.clear();
                 window.location.href = '/login';
                 return;
             }
             localStorage.setItem('lads_user', JSON.stringify(data));
+            await loadAppSettings();
             if (!data.is_registered && data.role === 'garcom') {
                 showNameModal();
             }
@@ -611,7 +612,8 @@ function updatePartialTotal() {
         subtotal += qty * unitPrice;
     });
     const apply = document.getElementById('partial-service-charge')?.checked || false;
-    const total = apply ? subtotal * 1.10 : subtotal;
+    const serviceChargePct = getSettingFloat('service_charge_pct', 10);
+    const total = apply ? subtotal * (1 + serviceChargePct / 100) : subtotal;
     document.getElementById('partial-selected-total').textContent = formatCurrency(total);
 }
 
@@ -639,7 +641,8 @@ async function submitPartialPayment() {
     }
 
     const applyService = document.getElementById('partial-service-charge')?.checked || false;
-    const total = applyService ? subtotal * 1.10 : subtotal;
+    const serviceChargePct = getSettingFloat('service_charge_pct', 10);
+    const total = applyService ? subtotal * (1 + serviceChargePct / 100) : subtotal;
     const pMethod = document.getElementById('partial-payment-method')?.value || 'dinheiro';
 
     try {
@@ -687,7 +690,9 @@ async function showCloseModal() {
     const total = currentTableData.total || 0;
     const paid = currentTableData.partial_payment || 0;
     const paidService = currentTableData.partial_service_charge || 0;
+    const serviceChargePct = getSettingFloat('service_charge_pct', 10);
     const service = 0;
+    const serviceLabel = serviceChargePct + '% Serviço';
     const remainingProduct = Math.max(0, total - paid);
     const remainingService = Math.max(0, service - paidService);
     const final = remainingProduct + remainingService;
@@ -697,7 +702,7 @@ async function showCloseModal() {
             <span>Total Produtos</span><span>${formatCurrency(total)}</span>
         </div>
         <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:14px;color:var(--text-muted);">
-            <span>10% Serviço</span><span id="close-service-display">${formatCurrency(service)}</span>
+            <span>${serviceLabel}</span><span id="close-service-display">${formatCurrency(service)}</span>
         </div>
         <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:14px;color:var(--text-muted);">
             <span>Já Pago (produtos)</span><span>- ${formatCurrency(paid)}</span>
@@ -718,7 +723,8 @@ function updateCloseTotal() {
     const paid = currentTableData.partial_payment || 0;
     const paidService = currentTableData.partial_service_charge || 0;
     const apply = document.getElementById('apply-service-charge').checked;
-    const service = apply ? total * 0.10 : 0;
+    const serviceChargePct = getSettingFloat('service_charge_pct', 10);
+    const service = apply ? total * (serviceChargePct / 100) : 0;
     const remainingProduct = Math.max(0, total - paid);
     const remainingService = Math.max(0, service - paidService);
     const final = remainingProduct + remainingService;
@@ -751,7 +757,7 @@ async function confirmClose() {
             return;
         }
         let alertMsg = 'Mesa fechada!\nTotal: ' + formatCurrency(data.total);
-        if (data.service_charge_amount > 0) alertMsg += '\n+10% serviço: ' + formatCurrency(data.service_charge_amount);
+        if (data.service_charge_amount > 0) alertMsg += '\n+' + data.service_charge_pct + '% serviço: ' + formatCurrency(data.service_charge_amount);
         if (data.partial_payment > 0) alertMsg += '\n- Pago produtos: ' + formatCurrency(data.partial_payment);
         if (data.partial_service_charge > 0) alertMsg += '\n- Pago serviço: ' + formatCurrency(data.partial_service_charge);
         alertMsg += '\nFinal: ' + formatCurrency(data.final_total);
@@ -1102,7 +1108,7 @@ async function loadSales() {
                     <div class="sale-detail"><span>Garçom: ${s.waiter_name}</span><span>${s.items_count} itens</span></div>
                     ${s.payment_method ? `<div class="sale-detail"><span>Pgto: ${({dinheiro:'Dinheiro',cartao_credito:'Crédito',cartao_debito:'Débito',pix:'Pix'})[s.payment_method] || s.payment_method}</span></div>` : ''}
                     <div class="sale-total">${formatCurrency(s.total)}</div>
-                    ${s.service_charge_amount > 0 ? `<div class="sale-detail"><span>+ 10% serviço</span><span>${formatCurrency(s.service_charge_amount)}</span></div>` : ''}
+                    ${s.service_charge_amount > 0 ? `<div class="sale-detail"><span>+ ${s.service_charge_pct}% serviço</span><span>${formatCurrency(s.service_charge_amount)}</span></div>` : ''}
                 </div>
             `).join('')}
         `;
@@ -1174,7 +1180,7 @@ function renderDailyReport(data) {
         <div class="report-summary">
             <h4>Resumo Geral</h4>
             <div class="summary-row"><span>Vendas Brutas</span><span>${formatCurrency(data.summary.total_sales)}</span></div>
-            <div class="summary-row"><span>Taxa de Serviço (10%)</span><span>${formatCurrency(data.summary.total_service_charge)}</span></div>
+            <div class="summary-row"><span>Taxa de Serviço</span><span>${formatCurrency(data.summary.total_service_charge)}</span></div>
             <div class="summary-row" style="color:var(--red);"><span>Taxas de Cartão</span><span>- ${formatCurrency(data.summary.total_card_fees)}</span></div>
             <div class="summary-row" style="font-weight:600;"><span>Total Bruto Recebido</span><span>${formatCurrency(data.summary.gross_total)}</span></div>
             <div class="summary-row summary-total"><span>Total Líquido no Caixa</span><span>${formatCurrency(data.summary.net_total)}</span></div>
@@ -1596,5 +1602,89 @@ async function deletePromotion(id) {
         loadPromotions();
     } catch (err) {
         alert('Erro ao excluir promoção');
+    }
+}
+
+// ====== APP SETTINGS ======
+let appSettings = null;
+
+async function loadAppSettings() {
+    try {
+        const res = await apiFetch(API_BASE + '/configuracoes');
+        const settings = await res.json();
+        appSettings = {};
+        settings.forEach(s => appSettings[s.key] = s.value);
+    } catch (err) {
+        appSettings = {};
+    }
+}
+
+function getSetting(key, defaultValue) {
+    defaultValue = defaultValue === undefined ? '' : defaultValue;
+    return appSettings && appSettings[key] !== undefined ? appSettings[key] : defaultValue;
+}
+
+function getSettingFloat(key, defaultValue) {
+    defaultValue = defaultValue === undefined ? 0 : defaultValue;
+    const v = parseFloat(getSetting(key, defaultValue));
+    return isNaN(v) ? defaultValue : v;
+}
+
+async function loadSettings() {
+    const container = document.getElementById('settings-list');
+    if (!container) return;
+    try {
+        const res = await apiFetch(API_BASE + '/configuracoes');
+        const settings = await res.json();
+        if (settings.error) {
+            container.innerHTML = '<div class="error-msg">' + settings.error + '</div>';
+            return;
+        }
+        appSettings = {};
+        settings.forEach(s => appSettings[s.key] = s.value);
+
+        container.innerHTML = settings.map(s => {
+            const inputType = s.type === 'number' ? 'number' : 'text';
+            const step = s.type === 'number' ? 'step="0.01"' : '';
+            return `
+            <div class="setting-card">
+                <label class="input-label">${s.label}</label>
+                <p class="setting-description">${s.description || ''}</p>
+                <input type="${inputType}" ${step} id="setting-${s.key}" class="input-field" value="${s.value || ''}" onchange="submitSetting('${s.key}')">
+            </div>
+            `;
+        }).join('');
+    } catch (err) {
+        container.innerHTML = '<div class="error-msg">Erro ao carregar configurações</div>';
+    }
+}
+
+async function submitSetting(key) {
+    const input = document.getElementById('setting-' + key);
+    if (!input) return;
+    const value = input.value;
+
+    const errorEl = document.getElementById('settings-error');
+    const successEl = document.getElementById('settings-success');
+    errorEl.style.display = 'none';
+    successEl.style.display = 'none';
+
+    try {
+        const res = await apiFetch(API_BASE + '/configuracoes/' + key, {
+            method: 'PUT',
+            body: JSON.stringify({ value })
+        });
+        const data = await res.json();
+        if (data.error) {
+            errorEl.textContent = data.error;
+            errorEl.style.display = 'block';
+            return;
+        }
+        appSettings[key] = value;
+        successEl.style.display = 'block';
+        setTimeout(() => { successEl.style.display = 'none'; }, 2000);
+    } catch (err) {
+        errorEl.textContent = 'Erro ao salvar configuração';
+        errorEl.style.display = 'block';
     }
 }

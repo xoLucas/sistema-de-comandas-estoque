@@ -11,6 +11,7 @@ from app.models.order_round import OrderRound
 from app.models.supplier import Supplier
 from app.models.stock_history import StockHistory
 from app.models.promotion import Promotion
+from app.models.setting import Setting
 
 
 SEED_TABLES = [
@@ -73,6 +74,18 @@ SEED_USERS = [
     },
 ]
 
+SEED_SETTINGS = [
+    {"key": "store_name", "value": "Lads Beer", "label": "Nome do Estabelecimento", "description": "Nome exibido no sistema e nos tickets", "type": "string"},
+    {"key": "store_address", "value": "", "label": "Endereço", "description": "Endereço do estabelecimento", "type": "string"},
+    {"key": "store_phone", "value": "", "label": "Telefone", "description": "Telefone de contato", "type": "string"},
+    {"key": "store_cnpj", "value": "", "label": "CNPJ", "description": "CNPJ do estabelecimento", "type": "string"},
+    {"key": "service_charge_pct", "value": "10", "label": "Taxa de Serviço (%)", "description": "Percentual sugerido no fechamento da mesa", "type": "number"},
+    {"key": "card_fee_debit_pct", "value": "1.5", "label": "Taxa Cartão de Débito (%)", "description": "Percentual de taxa para pagamento em débito", "type": "number"},
+    {"key": "card_fee_credit_pct", "value": "3.5", "label": "Taxa Cartão de Crédito (%)", "description": "Percentual de taxa para pagamento em crédito", "type": "number"},
+    {"key": "ticket_header", "value": "Lads Beer", "label": "Cabeçalho do Ticket", "description": "Texto do cabeçalho impresso nas comandas", "type": "string"},
+    {"key": "ticket_footer", "value": "Obrigado pela preferência!", "label": "Rodapé do Ticket", "description": "Texto do rodapé impresso nas comandas", "type": "string"},
+]
+
 
 async def _ensure_columns() -> None:
     async with engine.begin() as conn:
@@ -101,6 +114,13 @@ async def _ensure_columns() -> None:
         )
 
 
+async def ensure_settings(session) -> None:
+    for s in SEED_SETTINGS:
+        existing = await session.execute(select(Setting).where(Setting.key == s["key"]))
+        if existing.scalar_one_or_none() is None:
+            session.add(Setting(**s))
+
+
 async def run_seed() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -108,8 +128,11 @@ async def run_seed() -> None:
     await _ensure_columns()
 
     async with async_session() as session:
+        await ensure_settings(session)
+
         existing = await session.execute(select(User).limit(1))
         if existing.scalar_one_or_none() is not None:
+            await session.commit()
             return
 
         for t in SEED_TABLES:

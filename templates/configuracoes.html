@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<header>
+    <h1>CONFIGURAÇÕES</h1>
+    <p class="subtitle">Ajustes do estabelecimento</p>
+</header>
+
+<div id="settings-list" class="settings-list">
+    <div class="loading">Carregando...</div>
+</div>
+
+<p id="settings-error" class="error-msg" style="display:none;margin-top:12px;"></p>
+<p id="settings-success" class="success-msg" style="display:none;margin-top:12px;">Configurações salvas!</p>
+{% endblock %}
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    checkAuth((user) => {
+        document.getElementById('bottom-nav').style.display = 'flex';
+        highlightNav('configuracoes');
+        loadSettings();
+    });
+});
+</script>
+{% endblock %}

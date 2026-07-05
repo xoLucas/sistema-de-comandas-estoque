@@ -40,6 +40,14 @@ async def get_current_user(
     return user
 
 
+def require_role(*roles: str):
+    async def _require_role(user: User = Depends(get_current_user)) -> User:
+        if user.role not in roles:
+            raise HTTPException(status_code=403, detail="Acesso restrito")
+        return user
+    return _require_role
+
+
 async def get_current_user_optional(
     request: Request = None,
     credentials: HTTPAuthorizationCredentials = Depends(security_scheme),

@@ -10,6 +10,8 @@ class StockHistory(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), nullable=False)
+    order_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id"), nullable=True)
+    table_id: Mapped[int | None] = mapped_column(ForeignKey("tables.id"), nullable=True)
     type: Mapped[str] = mapped_column(String(20), nullable=False)  # entrada or saida
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     note: Mapped[str | None] = mapped_column(String(255), nullable=True)

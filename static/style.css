@@ -1589,3 +1589,11 @@ header .subtitle {
     color: var(--text-muted);
     white-space: nowrap;
 }
+
+.history-subnote {
+    font-size: 11px;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}

@@ -92,6 +92,12 @@ async def _ensure_columns() -> None:
         await conn.execute(
             text("ALTER TABLE products ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE")
         )
+        await conn.execute(
+            text("ALTER TABLE stock_history ADD COLUMN IF NOT EXISTS order_id INTEGER REFERENCES orders(id)")
+        )
+        await conn.execute(
+            text("ALTER TABLE stock_history ADD COLUMN IF NOT EXISTS table_id INTEGER REFERENCES tables(id)")
+        )
 
 
 async def run_seed() -> None:

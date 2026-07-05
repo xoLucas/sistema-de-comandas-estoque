@@ -12,6 +12,7 @@ from app.models.product import Product
 from app.models.order import Order
 from app.models.order_item import OrderItem
 from app.models.order_round import OrderRound
+from app.models.stock_history import StockHistory
 from app.models.user import User
 from app.routers.auth_deps import get_current_user
 
@@ -273,6 +274,9 @@ async def add_order_item(
     if not product:
         return {"error": "Produto não encontrado"}
 
+    table_result = await db.execute(select(Table).where(Table.id == req.table_id))
+    table = table_result.scalars().first()
+
     if req.quantity > 0 and product.stock < req.quantity:
         return {"error": f"Estoque insuficiente. Disponível: {product.stock}"}
 
@@ -295,6 +299,14 @@ async def add_order_item(
             )
             db.add(order_item)
         product.stock -= req.quantity
+        db.add(StockHistory(
+            product_id=product.id,
+            order_id=order.id,
+            table_id=req.table_id,
+            type="saida",
+            quantity=req.quantity,
+            note=f"Pedido mesa {table.number if table else req.table_id}",
+        ))
     else:
         qty_change = abs(req.quantity)
         if existing_item:
@@ -303,6 +315,14 @@ async def add_order_item(
             else:
                 existing_item.quantity -= qty_change
             product.stock += qty_change
+            db.add(StockHistory(
+                product_id=product.id,
+                order_id=order.id,
+                table_id=req.table_id,
+                type="entrada",
+                quantity=qty_change,
+                note=f"Cancelamento/ajuste mesa {table.number if table else req.table_id}",
+            ))
         else:
             return {"error": "Item não encontrado na comanda"}
 
@@ -314,9 +334,6 @@ async def add_order_item(
     )
     total = float(total_result.scalar_one())
     order.total = total
-
-    table_result = await db.execute(select(Table).where(Table.id == req.table_id))
-    table = table_result.scalars().first()
 
     await db.commit()
     await broadcast_table_update(req.table_id)

@@ -328,6 +328,8 @@ async def get_stock_history(
                 "type": h.type,
                 "quantity": h.quantity,
                 "note": h.note,
+                "table_id": h.table_id,
+                "order_id": h.order_id,
                 "created_at": h.created_at.isoformat() if h.created_at else None,
             }
             for h in history

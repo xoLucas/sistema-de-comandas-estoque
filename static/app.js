@@ -1019,15 +1019,20 @@ async function loadProductHistory(productId) {
         const entries = data.items.filter(h => h.type === 'entrada');
         const exits = data.items.filter(h => h.type === 'saida');
 
-        const renderHistory = (items) => items.map(h => `
+        const renderHistory = (items) => items.map(h => {
+            const ref = h.table_id ? `Mesa ${h.table_id}` : (h.note || 'Movimentação manual');
+            return `
             <div class="history-item">
                 <div class="history-main">
-                    <span class="history-qty ${h.type}">+${h.quantity}</span>
-                    <span class="history-note">${h.note || 'Sem observação'}</span>
+                    <span class="history-qty ${h.type}">${h.type === 'saida' ? '-' : '+'}${h.quantity}</span>
+                    <div style="min-width:0;">
+                        <div class="history-note">${ref}</div>
+                        ${h.note && h.table_id ? `<div class="history-subnote">${h.note}</div>` : ''}
+                    </div>
                 </div>
                 <span class="history-date">${h.created_at ? new Date(h.created_at).toLocaleString('pt-BR') : ''}</span>
             </div>
-        `).join('');
+        `}).join('');
 
         document.getElementById('entries-list').innerHTML = entries.length ? renderHistory(entries) : '<p class="empty-msg">Nenhuma entrada registrada</p>';
         document.getElementById('exits-list').innerHTML = exits.length ? renderHistory(exits) : '<p class="empty-msg">Nenhuma saída registrada</p>';

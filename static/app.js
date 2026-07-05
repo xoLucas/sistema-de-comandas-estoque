@@ -1230,14 +1230,31 @@ function renderDailyReport(data) {
         <p style="color:var(--text-muted);font-size:13px;">Data: ${data.date} | Fechado por: ${data.closed_by}</p>
 
         <div class="report-summary">
-            <h4>Resumo Geral</h4>
+            <h4>Resultado do Dia</h4>
+            <div class="profit-cards">
+                <div class="profit-card gross">
+                    <span class="profit-label">Lucro Bruto</span>
+                    <span class="profit-value">${formatCurrency(data.summary.gross_profit)}</span>
+                    <span class="profit-sub">Vendas - Custo dos produtos</span>
+                </div>
+                <div class="profit-card net">
+                    <span class="profit-label">Lucro Líquido</span>
+                    <span class="profit-value">${formatCurrency(data.summary.net_profit)}</span>
+                    <span class="profit-sub">Lucro bruto - Taxas e despesas</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="report-summary">
+            <h4>Resumo Financeiro</h4>
             <div class="summary-row"><span>Vendas Brutas</span><span>${formatCurrency(data.summary.total_sales)}</span></div>
-            <div class="summary-row"><span>Taxa de Serviço</span><span>${formatCurrency(data.summary.total_service_charge)}</span></div>
+            <div class="summary-row" style="color:var(--red);"><span>Custo dos Produtos Vendidos</span><span>- ${formatCurrency(data.summary.total_cogs)}</span></div>
+            <div class="summary-row" style="border-top:1px solid var(--border-color);padding-top:8px;margin-top:8px;font-weight:700;color:var(--green);"><span>Lucro Bruto</span><span>${formatCurrency(data.summary.gross_profit)}</span></div>
+            <div style="height:8px;"></div>
             <div class="summary-row" style="color:var(--red);"><span>Taxas de Cartão</span><span>- ${formatCurrency(data.summary.total_card_fees)}</span></div>
             <div class="summary-row" style="color:var(--red);"><span>Despesas / Diárias</span><span>- ${formatCurrency(data.summary.total_expenses)}</span></div>
-            <div class="summary-row" style="font-weight:600;"><span>Total Bruto Recebido</span><span>${formatCurrency(data.summary.gross_total)}</span></div>
-            <div class="summary-row summary-total"><span>Total Líquido no Caixa</span><span>${formatCurrency(data.summary.net_total)}</span></div>
-            <div style="color:var(--text-muted);font-size:11px;margin-top:8px;">${data.summary.orders_count} comandas fechadas</div>
+            <div class="summary-row" style="font-weight:700;color:var(--accent);"><span>Lucro Líquido</span><span>${formatCurrency(data.summary.net_profit)}</span></div>
+            <div style="color:var(--text-muted);font-size:11px;margin-top:12px;">${data.summary.orders_count} comandas fechadas</div>
         </div>
 
         <div class="report-summary">

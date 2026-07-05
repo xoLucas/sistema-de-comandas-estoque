@@ -92,10 +92,14 @@ async def _build_daily_report(
         "orders": [],
         "summary": {
             "total_sales": 0.0,
+            "total_cogs": 0.0,
+            "gross_profit": 0.0,
             "total_service_charge": 0.0,
             "total_partial_payments": 0.0,
             "total_card_fees": 0.0,
             "total_expenses": round(float(total_expenses), 2),
+            "operating_expenses": 0.0,
+            "net_profit": 0.0,
             "gross_total": 0.0,
             "net_total": 0.0,
             "orders_count": len(orders),
@@ -132,6 +136,9 @@ async def _build_daily_report(
         close_fee = _card_fee_for_payment(final, close_method, card_fee_rates)
 
         report["summary"]["total_sales"] += o.total
+        report["summary"]["total_cogs"] += sum(
+            (item.product.cost if item.product else 0.0) * item.quantity for item in o.items
+        )
         report["summary"]["total_service_charge"] += service_amount
         report["summary"]["total_partial_payments"] += o.partial_payment + o.partial_service_charge
         report["summary"]["total_card_fees"] += close_fee
@@ -208,9 +215,20 @@ async def _build_daily_report(
         )
 
     report["summary"]["total_sales"] = round(report["summary"]["total_sales"], 2)
+    report["summary"]["total_cogs"] = round(report["summary"]["total_cogs"], 2)
+    report["summary"]["gross_profit"] = round(
+        report["summary"]["total_sales"] - report["summary"]["total_cogs"], 2
+    )
     report["summary"]["total_service_charge"] = round(report["summary"]["total_service_charge"], 2)
     report["summary"]["total_partial_payments"] = round(report["summary"]["total_partial_payments"], 2)
     report["summary"]["total_card_fees"] = round(report["summary"]["total_card_fees"], 2)
+    report["summary"]["total_expenses"] = round(report["summary"]["total_expenses"], 2)
+    report["summary"]["operating_expenses"] = round(
+        report["summary"]["total_card_fees"] + report["summary"]["total_expenses"], 2
+    )
+    report["summary"]["net_profit"] = round(
+        report["summary"]["gross_profit"] - report["summary"]["operating_expenses"], 2
+    )
     report["summary"]["gross_total"] = round(report["summary"]["gross_total"], 2)
     report["summary"]["net_total"] = round(
         report["summary"]["gross_total"]
@@ -443,11 +461,14 @@ async def report_pdf(
     summary = report["summary"]
     rows = [
         ("Vendas Brutas", f"R$ {summary['total_sales']:.2f}"),
-        ("Taxa de Serviço", f"R$ {summary['total_service_charge']:.2f}"),
-        ("Taxas de Cartão", f"R$ {summary['total_card_fees']:.2f}"),
+        ("Custo dos Produtos", f"R$ {summary['total_cogs']:.2f}"),
+        ("Lucro Bruto", f"R$ {summary['gross_profit']:.2f}"),
+        ("Taxa de Servico", f"R$ {summary['total_service_charge']:.2f}"),
+        ("Taxas de Cartao", f"R$ {summary['total_card_fees']:.2f}"),
         ("Despesas", f"R$ {summary['total_expenses']:.2f}"),
         ("Total Bruto Recebido", f"R$ {summary['gross_total']:.2f}"),
-        ("Total Líquido (caixa)", f"R$ {summary['net_total']:.2f}"),
+        ("Total Liquido (caixa)", f"R$ {summary['net_total']:.2f}"),
+        ("Lucro Liquido", f"R$ {summary['net_profit']:.2f}"),
         ("Comandas", str(summary["orders_count"])),
     ]
     for label, value in rows:

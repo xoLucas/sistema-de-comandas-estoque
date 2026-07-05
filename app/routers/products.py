@@ -7,6 +7,7 @@ from app.core.database import get_db
 from app.models.product import Product
 from app.models.user import User
 from app.routers.auth_deps import get_current_user
+from app.services.promotion_service import get_active_promotion_map
 
 router = APIRouter(prefix="/api", tags=["products"])
 
@@ -23,8 +24,13 @@ async def list_products(
     result = await db.execute(query.order_by(Product.name))
     products = result.scalars().all()
 
-    return [
-        {
+    promo_map = await get_active_promotion_map(db)
+
+    response = []
+    for p in products:
+        discount_pct, promo_name = promo_map.get(p.id, (0, None))
+        discounted_price = round(float(p.price) * (1 - discount_pct / 100), 2) if discount_pct else float(p.price)
+        item = {
             "id": p.id,
             "code": p.code,
             "name": p.name,
@@ -32,12 +38,14 @@ async def list_products(
             "cost": float(p.cost),
             "margin_pct": float(p.margin_pct),
             "price": float(p.price),
+            "discounted_price": discounted_price,
+            "active_promotion": promo_name,
             "stock": p.stock,
             "min_stock": p.min_stock,
             "active": p.active,
         }
-        for p in products
-    ]
+        response.append(item)
+    return response
 
 
 @router.get("/produtos/{product_id}")

@@ -327,14 +327,19 @@ function showAddPedidoModal() {
 }
 
 function buildPedidoSelectionView(products) {
-    const listHtml = products.map(p => `
+    const listHtml = products.map(p => {
+        const hasDiscount = p.discounted_price !== undefined && p.discounted_price < p.price;
+        const priceHtml = hasDiscount
+            ? `<div class="prod-price"><span class="prod-original-price">${formatCurrency(p.price)}</span> ${formatCurrency(p.discounted_price)} <span class="promo-badge">${p.active_promotion || 'Promoção'}</span></div>`
+            : `<div class="prod-price">${formatCurrency(p.price)}</div>`;
+        return `
         <div class="pedido-product-row">
             <div class="prod-info">
                 <div class="prod-name">${p.name}</div>
                 <div class="prod-stock" id="pstock-${p.id}" data-cat="${p.category}">
                     Estoque: <strong>${p.stock}</strong> | ${p.category}
                 </div>
-                <div class="prod-price">${formatCurrency(p.price)}</div>
+                ${priceHtml}
             </div>
             <div class="qty-control">
                 <button class="btn-sm btn-sm-remove" onclick="changePedidoQty(${p.id}, -1)">-</button>
@@ -342,7 +347,8 @@ function buildPedidoSelectionView(products) {
                 <button class="btn-sm btn-sm-add" onclick="changePedidoQty(${p.id}, 1)">+</button>
             </div>
         </div>
-    `).join('');
+    `;
+    }).join('');
 
     return `
         <h3>Novo Pedido</h3>
@@ -383,9 +389,10 @@ function reviewPedido() {
         if (qty > 0) {
             const product = pedidoProductsData.find(p => p.id === parseInt(pid));
             if (product) {
-                const subtotal = qty * product.price;
+                const unitPrice = product.discounted_price !== undefined ? product.discounted_price : product.price;
+                const subtotal = qty * unitPrice;
                 total += subtotal;
-                selected.push({ ...product, qty, subtotal });
+                selected.push({ ...product, qty, unitPrice, subtotal });
             }
         }
     }
@@ -396,18 +403,24 @@ function reviewPedido() {
         return;
     }
 
-    const itemsHtml = selected.map(s => `
+    const itemsHtml = selected.map(s => {
+        const hasDiscount = s.unitPrice < s.price;
+        const unitPriceHtml = hasDiscount
+            ? `<span class="review-original-price">${formatCurrency(s.price)}</span> ${formatCurrency(s.unitPrice)}`
+            : `${formatCurrency(s.unitPrice)}`;
+        return `
         <div class="review-item">
             <div class="review-info">
                 <span class="review-qty">${s.qty}x</span>
                 <span class="review-name">${s.name}</span>
             </div>
             <div class="review-meta">
-                <span>${formatCurrency(s.price)} cada</span>
+                <span>${unitPriceHtml} cada</span>
                 <span class="review-subtotal">${formatCurrency(s.subtotal)}</span>
             </div>
         </div>
-    `).join('');
+    `;
+    }).join('');
 
     const reviewHtml = `
         <h3>Revisar Pedido</h3>
@@ -1455,10 +1468,17 @@ async function loadPromotionProducts() {
     }
 }
 
+function updatePromotionSelectedCount() {
+    const count = document.querySelectorAll('.promotion-product-check:checked').length;
+    const el = document.getElementById('promotion-selected-count');
+    if (el) el.textContent = `(${count} selecionados)`;
+}
+
 function renderPromotionProducts(selectedIds = []) {
     const container = document.getElementById('promotion-products');
     if (promotionProductsCache.length === 0) {
         container.innerHTML = '<span class="text-muted">Nenhum produto ativo</span>';
+        updatePromotionSelectedCount();
         return;
     }
     container.innerHTML = promotionProductsCache.map(p => `
@@ -1467,6 +1487,10 @@ function renderPromotionProducts(selectedIds = []) {
             <span>${p.name} (${formatCurrency(p.price)})</span>
         </label>
     `).join('');
+    container.querySelectorAll('.promotion-product-check').forEach(cb => {
+        cb.addEventListener('change', updatePromotionSelectedCount);
+    });
+    updatePromotionSelectedCount();
 }
 
 async function showPromotionModal(promotion = null) {
@@ -1516,6 +1540,16 @@ async function submitPromotion() {
 
     if (!payload.name) {
         document.getElementById('promotion-error').textContent = 'Informe o nome da promoção';
+        document.getElementById('promotion-error').style.display = 'block';
+        return;
+    }
+    if (payload.discount_pct <= 0 || payload.discount_pct > 100) {
+        document.getElementById('promotion-error').textContent = 'Informe um desconto entre 0,01% e 100%';
+        document.getElementById('promotion-error').style.display = 'block';
+        return;
+    }
+    if (payload.product_ids.length === 0) {
+        document.getElementById('promotion-error').textContent = 'Selecione pelo menos um produto';
         document.getElementById('promotion-error').style.display = 'block';
         return;
     }

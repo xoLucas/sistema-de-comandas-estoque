@@ -12,31 +12,16 @@ from app.models.product import Product
 from app.models.order import Order
 from app.models.order_item import OrderItem
 from app.models.order_round import OrderRound
-from app.models.promotion import Promotion
 from app.models.stock_history import StockHistory
 from app.models.user import User
 from app.routers.auth_deps import get_current_user
+from app.services.promotion_service import get_discounted_price
 
 router = APIRouter(prefix="/api", tags=["orders"])
 
 
 async def _get_promotional_price(product: Product, db: AsyncSession) -> float:
-    now = datetime.now(timezone.utc)
-    result = await db.execute(
-        select(Promotion)
-        .join(Promotion.products)
-        .where(
-            Product.id == product.id,
-            Promotion.is_active == True,
-            (Promotion.start_at == None) | (Promotion.start_at <= now),
-            (Promotion.end_at == None) | (Promotion.end_at >= now),
-        )
-    )
-    promotions = result.scalars().all()
-    if not promotions:
-        return float(product.price)
-    best_discount = max(p.discount_pct for p in promotions)
-    return round(float(product.price) * (1 - best_discount / 100), 2)
+    return await get_discounted_price(product, db)
 
 
 class OpenOrderRequest(BaseModel):

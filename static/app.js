@@ -1499,12 +1499,17 @@ function closePromotionModal() {
 
 async function submitPromotion() {
     const id = document.getElementById('promotion-id').value;
+    const toUtcIso = (localValue) => {
+        if (!localValue) return null;
+        return new Date(localValue).toISOString();
+    };
+
     const payload = {
         name: document.getElementById('promotion-name').value.trim(),
         description: document.getElementById('promotion-description').value.trim() || null,
         discount_pct: parseFloat(document.getElementById('promotion-discount').value) || 0,
-        start_at: document.getElementById('promotion-start').value || null,
-        end_at: document.getElementById('promotion-end').value || null,
+        start_at: toUtcIso(document.getElementById('promotion-start').value),
+        end_at: toUtcIso(document.getElementById('promotion-end').value),
         is_active: document.getElementById('promotion-active').checked,
         product_ids: Array.from(document.querySelectorAll('.promotion-product-check:checked')).map(cb => parseInt(cb.value)),
     };

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy import select, func
@@ -21,7 +21,7 @@ router = APIRouter(prefix="/api", tags=["orders"])
 
 
 async def _get_promotional_price(product: Product, db: AsyncSession) -> float:
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     result = await db.execute(
         select(Promotion)
         .join(Promotion.products)

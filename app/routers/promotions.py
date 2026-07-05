@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -37,7 +37,7 @@ class PromotionUpdate(BaseModel):
 def _is_promotion_active(promotion: Promotion) -> bool:
     if not promotion.is_active:
         return False
-    now = datetime.now(promotion.created_at.tzinfo if promotion.created_at else None)
+    now = datetime.now(timezone.utc)
     if promotion.start_at and now < promotion.start_at:
         return False
     if promotion.end_at and now > promotion.end_at:
@@ -48,7 +48,7 @@ def _is_promotion_active(promotion: Promotion) -> bool:
 def _promotion_status(promotion: Promotion) -> str:
     if not promotion.is_active:
         return "desativada"
-    now = datetime.now(promotion.created_at.tzinfo if promotion.created_at else None)
+    now = datetime.now(timezone.utc)
     if promotion.start_at and now < promotion.start_at:
         return "agendada"
     if promotion.end_at and now > promotion.end_at:
@@ -100,8 +100,8 @@ async def create_promotion(
         description=req.description,
         discount_pct=req.discount_pct,
         is_active=req.is_active,
-        start_at=datetime.fromisoformat(req.start_at) if req.start_at else None,
-        end_at=datetime.fromisoformat(req.end_at) if req.end_at else None,
+        start_at=datetime.fromisoformat(req.start_at).astimezone(timezone.utc) if req.start_at else None,
+        end_at=datetime.fromisoformat(req.end_at).astimezone(timezone.utc) if req.end_at else None,
     )
 
     if req.product_ids:
@@ -160,9 +160,9 @@ async def update_promotion(
     if req.is_active is not None:
         promotion.is_active = req.is_active
     if req.start_at is not None:
-        promotion.start_at = datetime.fromisoformat(req.start_at) if req.start_at else None
+        promotion.start_at = datetime.fromisoformat(req.start_at).astimezone(timezone.utc) if req.start_at else None
     if req.end_at is not None:
-        promotion.end_at = datetime.fromisoformat(req.end_at) if req.end_at else None
+        promotion.end_at = datetime.fromisoformat(req.end_at).astimezone(timezone.utc) if req.end_at else None
     if req.product_ids is not None:
         product_result = await db.execute(select(Product).where(Product.id.in_(req.product_ids)))
         promotion.products = product_result.scalars().all()

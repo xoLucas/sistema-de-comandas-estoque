@@ -57,7 +57,8 @@ function checkAuth(callback) {
 }
 
 function hasRole(...roles) {
-    return currentUser && roles.includes(currentUser.role);
+    const user = currentUser || getStoredUser();
+    return user && roles.includes(user.role);
 }
 
 function canViewFinancial() { return hasRole('gerente', 'caixa'); }
@@ -72,6 +73,8 @@ function canViewProductCost() { return hasRole('gerente', 'caixa', 'estoquista')
 function updateNavVisibility() {
     const nav = document.getElementById('bottom-nav');
     if (!nav) return;
+    const user = currentUser || getStoredUser();
+    console.log('updateNavVisibility role:', user?.role);
     nav.querySelectorAll('[data-require]').forEach(el => {
         const req = el.dataset.require;
         let visible = false;

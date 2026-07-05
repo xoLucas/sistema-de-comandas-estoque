@@ -12,6 +12,9 @@ from app.models.supplier import Supplier
 from app.models.stock_history import StockHistory
 from app.models.promotion import Promotion
 from app.models.setting import Setting
+from app.models.employee import Employee
+from app.models.daily_payment import DailyPayment
+from app.models.expense import Expense
 
 
 SEED_TABLES = [

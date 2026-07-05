@@ -1182,6 +1182,7 @@ function renderDailyReport(data) {
             <div class="summary-row"><span>Vendas Brutas</span><span>${formatCurrency(data.summary.total_sales)}</span></div>
             <div class="summary-row"><span>Taxa de Serviço</span><span>${formatCurrency(data.summary.total_service_charge)}</span></div>
             <div class="summary-row" style="color:var(--red);"><span>Taxas de Cartão</span><span>- ${formatCurrency(data.summary.total_card_fees)}</span></div>
+            <div class="summary-row" style="color:var(--red);"><span>Despesas / Diárias</span><span>- ${formatCurrency(data.summary.total_expenses)}</span></div>
             <div class="summary-row" style="font-weight:600;"><span>Total Bruto Recebido</span><span>${formatCurrency(data.summary.gross_total)}</span></div>
             <div class="summary-row summary-total"><span>Total Líquido no Caixa</span><span>${formatCurrency(data.summary.net_total)}</span></div>
             <div style="color:var(--text-muted);font-size:11px;margin-top:8px;">${data.summary.orders_count} comandas fechadas</div>
@@ -1191,6 +1192,15 @@ function renderDailyReport(data) {
             <h4>Formas de Pagamento (Bruto / Líquido)</h4>
             ${methodRows}
         </div>
+
+        ${data.expenses && data.expenses.length > 0 ? `
+        <div class="report-summary">
+            <h4>Despesas do Dia</h4>
+            ${data.expenses.map(e => `
+                <div class="summary-row" style="color:var(--red);"><span>${e.description}</span><span>- ${formatCurrency(e.amount)}</span></div>
+            `).join('')}
+        </div>
+        ` : ''}
 
         <div class="report-summary">
             <h4>Taxa de Serviço por Garçom</h4>
@@ -1686,5 +1696,263 @@ async function submitSetting(key) {
     } catch (err) {
         errorEl.textContent = 'Erro ao salvar configuração';
         errorEl.style.display = 'block';
+    }
+}
+
+// ====== EMPLOYEES ======
+let employeesCache = [];
+
+function formatDateTimeLocal(date) {
+    return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}
+
+async function loadEmployees() {
+    const container = document.getElementById('employees-list');
+    if (!container) return;
+
+    const search = document.getElementById('employee-search')?.value.toLowerCase() || '';
+    const activeFilter = document.getElementById('employee-filter-active')?.value || '';
+
+    try {
+        let url = API_BASE + '/funcionarios';
+        if (activeFilter === 'true') url += '?active_only=true';
+        const res = await apiFetch(url);
+        employeesCache = await res.json();
+
+        const filtered = employeesCache.filter(e =>
+            e.name.toLowerCase().includes(search) ||
+            (e.nickname && e.nickname.toLowerCase().includes(search)) ||
+            (e.contact && e.contact.toLowerCase().includes(search)) ||
+            e.role.toLowerCase().includes(search)
+        );
+
+        if (filtered.length === 0) {
+            container.innerHTML = '<p class="empty-msg">Nenhum funcionário encontrado</p>';
+            return;
+        }
+
+        container.innerHTML = filtered.map(e => `
+            <div class="employee-card ${e.active ? '' : 'inactive'}">
+                <div class="employee-header">
+                    <div>
+                        <div class="employee-name">${e.name} ${e.nickname ? '(' + e.nickname + ')' : ''}</div>
+                        <div class="employee-meta">${e.role} | ${e.age ? e.age + ' anos' : ''} ${e.contact ? ' | ' + e.contact : ''}</div>
+                    </div>
+                    <span class="employee-status ${e.active ? 'active' : 'inactive'}">${e.active ? 'Ativo' : 'Inativo'}</span>
+                </div>
+                <div class="employee-actions">
+                    <button onclick="showDailyPaymentModal(${e.id}, '${e.name.replace(/'/g, "\\'")}')" class="btn-small">Pagar Diária</button>
+                    <button onclick="showEmployeeHistory(${e.id})" class="btn-small">Histórico</button>
+                    <button onclick="editEmployee(${e.id})" class="btn-small">Editar</button>
+                    <button onclick="deleteEmployee(${e.id})" class="btn-small btn-danger">Excluir</button>
+                </div>
+                <div id="employee-history-${e.id}" class="employee-history" style="display:none;"></div>
+            </div>
+        `).join('');
+    } catch (err) {
+        container.innerHTML = '<div class="error-msg">Erro ao carregar funcionários</div>';
+    }
+}
+
+function showEmployeeModal(employee = null) {
+    document.getElementById('employee-modal-title').textContent = employee ? 'Editar Funcionário' : 'Novo Funcionário';
+    document.getElementById('employee-id').value = employee ? employee.id : '';
+    document.getElementById('employee-name').value = employee ? employee.name : '';
+    document.getElementById('employee-age').value = employee && employee.age ? employee.age : '';
+    document.getElementById('employee-nickname').value = employee && employee.nickname ? employee.nickname : '';
+    document.getElementById('employee-contact').value = employee && employee.contact ? employee.contact : '';
+    document.getElementById('employee-role').value = employee ? employee.role : '';
+    document.getElementById('employee-active').checked = employee ? employee.active : true;
+
+    const loginSection = document.getElementById('login-section');
+    if (employee && employee.has_login) {
+        loginSection.style.display = 'none';
+    } else {
+        loginSection.style.display = 'block';
+        document.getElementById('employee-create-login').checked = false;
+        document.getElementById('login-fields').style.display = 'none';
+        document.getElementById('employee-username').value = '';
+        document.getElementById('employee-password').value = '';
+        document.getElementById('employee-login-role').value = 'garcom';
+    }
+
+    document.getElementById('employee-error').style.display = 'none';
+    document.getElementById('employee-modal').style.display = 'flex';
+}
+
+function closeEmployeeModal() {
+    document.getElementById('employee-modal').style.display = 'none';
+}
+
+async function submitEmployee() {
+    const id = document.getElementById('employee-id').value;
+    const errorEl = document.getElementById('employee-error');
+    errorEl.style.display = 'none';
+
+    const payload = {
+        name: document.getElementById('employee-name').value.trim(),
+        age: parseInt(document.getElementById('employee-age').value) || null,
+        nickname: document.getElementById('employee-nickname').value.trim() || null,
+        contact: document.getElementById('employee-contact').value.trim() || null,
+        role: document.getElementById('employee-role').value.trim(),
+        active: document.getElementById('employee-active').checked,
+    };
+
+    if (!payload.name || !payload.role) {
+        errorEl.textContent = 'Nome e função são obrigatórios';
+        errorEl.style.display = 'block';
+        return;
+    }
+
+    if (!id && document.getElementById('employee-create-login').checked) {
+        payload.create_login = true;
+        payload.username = document.getElementById('employee-username').value.trim();
+        payload.password = document.getElementById('employee-password').value;
+        payload.login_role = document.getElementById('employee-login-role').value;
+
+        if (!payload.username || !payload.password) {
+            errorEl.textContent = 'Usuário e senha são obrigatórios para criar login';
+            errorEl.style.display = 'block';
+            return;
+        }
+    }
+
+    const url = API_BASE + '/funcionarios' + (id ? '/' + id : '');
+    const method = id ? 'PUT' : 'POST';
+
+    try {
+        const res = await apiFetch(url, { method, body: JSON.stringify(payload) });
+        const data = await res.json();
+        if (data.error) {
+            errorEl.textContent = data.error;
+            errorEl.style.display = 'block';
+            return;
+        }
+        closeEmployeeModal();
+        loadEmployees();
+    } catch (err) {
+        errorEl.textContent = 'Erro ao salvar funcionário';
+        errorEl.style.display = 'block';
+    }
+}
+
+async function editEmployee(id) {
+    const employee = employeesCache.find(e => e.id == id);
+    if (employee) showEmployeeModal(employee);
+}
+
+async function deleteEmployee(id) {
+    if (!confirm('Deseja realmente excluir este funcionário?')) return;
+    try {
+        const res = await apiFetch(API_BASE + '/funcionarios/' + id, { method: 'DELETE' });
+        if (!res.ok) {
+            const data = await res.json();
+            alert(data.error || 'Erro ao excluir');
+            return;
+        }
+        loadEmployees();
+    } catch (err) {
+        alert('Erro ao excluir funcionário');
+    }
+}
+
+function showDailyPaymentModal(employeeId, employeeName) {
+    document.getElementById('daily-payment-employee-id').value = employeeId;
+    document.getElementById('daily-payment-employee-name').textContent = employeeName;
+    document.getElementById('daily-payment-amount').value = '';
+    document.getElementById('daily-payment-date').value = formatDateTimeLocal(new Date());
+    document.getElementById('daily-payment-notes').value = '';
+    document.getElementById('daily-payment-error').style.display = 'none';
+    document.getElementById('daily-payment-modal').style.display = 'flex';
+}
+
+function closeDailyPaymentModal() {
+    document.getElementById('daily-payment-modal').style.display = 'none';
+}
+
+async function submitDailyPayment() {
+    const employeeId = document.getElementById('daily-payment-employee-id').value;
+    const amount = parseFloat(document.getElementById('daily-payment-amount').value) || 0;
+    const dateValue = document.getElementById('daily-payment-date').value;
+    const notes = document.getElementById('daily-payment-notes').value.trim() || null;
+    const errorEl = document.getElementById('daily-payment-error');
+    errorEl.style.display = 'none';
+
+    if (amount <= 0) {
+        errorEl.textContent = 'Informe um valor maior que zero';
+        errorEl.style.display = 'block';
+        return;
+    }
+    if (!dateValue) {
+        errorEl.textContent = 'Informe a data do pagamento';
+        errorEl.style.display = 'block';
+        return;
+    }
+
+    try {
+        const res = await apiFetch(API_BASE + '/funcionarios/diaria', {
+            method: 'POST',
+            body: JSON.stringify({
+                employee_id: parseInt(employeeId),
+                amount: amount,
+                payment_date: new Date(dateValue).toISOString(),
+                notes: notes,
+            })
+        });
+        const data = await res.json();
+        if (data.error) {
+            errorEl.textContent = data.error;
+            errorEl.style.display = 'block';
+            return;
+        }
+        closeDailyPaymentModal();
+        showEmployeeHistory(employeeId);
+    } catch (err) {
+        errorEl.textContent = 'Erro ao registrar diária';
+        errorEl.style.display = 'block';
+    }
+}
+
+async function showEmployeeHistory(employeeId) {
+    const historyEl = document.getElementById('employee-history-' + employeeId);
+    if (!historyEl) return;
+
+    const isVisible = historyEl.style.display === 'block';
+    if (isVisible) {
+        historyEl.style.display = 'none';
+        return;
+    }
+
+    try {
+        const res = await apiFetch(API_BASE + '/funcionarios/' + employeeId);
+        const data = await res.json();
+        if (data.error) {
+            historyEl.innerHTML = '<div class="error-msg">' + data.error + '</div>';
+            historyEl.style.display = 'block';
+            return;
+        }
+
+        const totalRes = await apiFetch(API_BASE + '/funcionarios/' + employeeId + '/total-diarias');
+        const totalData = await totalRes.json();
+
+        const payments = data.daily_payments || [];
+        const listHtml = payments.length === 0
+            ? '<p class="empty-msg" style="margin-top:8px;">Nenhuma diária paga</p>'
+            : payments.map(p => `
+                <div class="history-row">
+                    <span>${new Date(p.payment_date).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' })}</span>
+                    <span>${formatCurrency(p.amount)}</span>
+                    <span style="font-size:11px;color:var(--text-muted);">${p.notes || ''}</span>
+                </div>
+            `).join('');
+
+        historyEl.innerHTML = `
+            <div class="history-total">Total pago: ${formatCurrency(totalData.total_paid)}</div>
+            <div class="history-list">${listHtml}</div>
+        `;
+        historyEl.style.display = 'block';
+    } catch (err) {
+        historyEl.innerHTML = '<div class="error-msg">Erro ao carregar histórico</div>';
+        historyEl.style.display = 'block';
     }
 }

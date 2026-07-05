@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block content %}
+<header>
+    <h1>FUNCIONÁRIOS</h1>
+    <p class="subtitle">Cadastro, login e diárias</p>
+</header>
+
+<div class="filter-bar">
+    <input type="text" id="employee-search" oninput="loadEmployees()" placeholder="Buscar funcionário..." class="input-field">
+    <select id="employee-filter-active" onchange="loadEmployees()" class="select-field">
+        <option value="">Todos</option>
+        <option value="true" selected>Ativos</option>
+        <option value="false">Inativos</option>
+    </select>
+</div>
+
+<div id="employees-list" class="employees-list">
+    <div class="loading">Carregando...</div>
+</div>
+
+<div class="actions-stack">
+    <button onclick="showEmployeeModal()" class="btn-secondary-full">Novo Funcionário</button>
+</div>
+
+<div id="employee-modal" class="modal" style="display:none;">
+    <div class="modal-content modal-large">
+        <h3 id="employee-modal-title">Novo Funcionário</h3>
+        <input type="hidden" id="employee-id">
+
+        <label class="input-label">Nome *</label>
+        <input type="text" id="employee-name" class="input-field" placeholder="Nome completo">
+
+        <div class="form-row">
+            <div class="form-col">
+                <label class="input-label">Idade</label>
+                <input type="number" id="employee-age" class="input-field" placeholder="0">
+            </div>
+            <div class="form-col">
+                <label class="input-label">Apelido</label>
+                <input type="text" id="employee-nickname" class="input-field" placeholder="Como é chamado">
+            </div>
+        </div>
+
+        <label class="input-label">Contato</label>
+        <input type="text" id="employee-contact" class="input-field" placeholder="Telefone / WhatsApp">
+
+        <label class="input-label">Função *</label>
+        <input type="text" id="employee-role" class="input-field" placeholder="Ex: Garçom, Churrasqueiro">
+
+        <div class="toggle-row" style="margin-top:12px;">
+            <span class="toggle-label" id="employee-active-label">Funcionário ativo</span>
+            <label class="toggle-switch">
+                <input type="checkbox" id="employee-active" checked>
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
+
+        <div id="login-section" style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);">
+            <label class="input-label" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                <input type="checkbox" id="employee-create-login" style="width:18px;height:18px;accent-color:var(--accent);">
+                Criar acesso ao sistema
+            </label>
+            <div id="login-fields" style="display:none;margin-top:12px;gap:10px;flex-direction:column;">
+                <label class="input-label">Usuário *</label>
+                <input type="text" id="employee-username" class="input-field" placeholder="login">
+                <label class="input-label">Senha *</label>
+                <input type="password" id="employee-password" class="input-field" placeholder="senha">
+                <label class="input-label">Função do Sistema *</label>
+                <select id="employee-login-role" class="select-field">
+                    <option value="garcom">Garçom</option>
+                    <option value="caixa">Caixa</option>
+                    <option value="estoquista">Estoquista</option>
+                    <option value="gerente">Gerente</option>
+                </select>
+            </div>
+        </div>
+
+        <p id="employee-error" class="error-msg" style="display:none;margin-top:12px;"></p>
+        <button onclick="submitEmployee()" class="btn-primary-full" style="margin-top:12px;">Salvar</button>
+        <button onclick="closeEmployeeModal()" class="btn-secondary-full">Cancelar</button>
+    </div>
+</div>
+
+<div id="daily-payment-modal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <h3>Pagar Diária</h3>
+        <input type="hidden" id="daily-payment-employee-id">
+        <p id="daily-payment-employee-name" style="font-weight:700;margin-bottom:10px;"></p>
+
+        <label class="input-label">Valor *</label>
+        <input type="number" step="0.01" id="daily-payment-amount" class="input-field" placeholder="0,00">
+
+        <label class="input-label">Data *</label>
+        <input type="datetime-local" id="daily-payment-date" class="input-field">
+
+        <label class="input-label">Observação</label>
+        <input type="text" id="daily-payment-notes" class="input-field" placeholder="Opcional">
+
+        <p id="daily-payment-error" class="error-msg" style="display:none;margin-top:10px;"></p>
+        <button onclick="submitDailyPayment()" class="btn-primary-full" style="margin-top:12px;">Confirmar Pagamento</button>
+        <button onclick="closeDailyPaymentModal()" class="btn-secondary-full">Cancelar</button>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    checkAuth((user) => {
+        document.getElementById('bottom-nav').style.display = 'flex';
+        highlightNav('funcionarios');
+        loadEmployees();
+
+        const createLoginCheck = document.getElementById('employee-create-login');
+        if (createLoginCheck) {
+            createLoginCheck.onchange = () => {
+                document.getElementById('login-fields').style.display = createLoginCheck.checked ? 'flex' : 'none';
+            };
+        }
+    });
+});
+</script>
+{% endblock %}

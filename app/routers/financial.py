@@ -13,6 +13,7 @@ from app.core.database import get_db
 from app.models.order import Order
 from app.models.table import Table
 from app.models.user import User
+from app.models.expense import Expense
 from app.routers.auth_deps import get_current_user
 from app.services.settings_service import get_setting_as_float
 
@@ -75,8 +76,14 @@ async def _build_daily_report(
     orders = result.scalars().all()
     card_fee_rates = await _get_card_fee_rates(db)
 
-    if not orders:
-        return {"error": "Nenhuma venda encontrada nesta data"}
+    expenses_result = await db.execute(
+        select(Expense).where(cast(Expense.expense_date, Date) == close_date)
+    )
+    expenses = expenses_result.scalars().all()
+    total_expenses = sum(e.amount for e in expenses)
+
+    if not orders and not expenses:
+        return {"error": "Nenhuma venda ou despesa encontrada nesta data"}
 
     report = {
         "date": close_date.isoformat(),
@@ -88,6 +95,7 @@ async def _build_daily_report(
             "total_service_charge": 0.0,
             "total_partial_payments": 0.0,
             "total_card_fees": 0.0,
+            "total_expenses": round(float(total_expenses), 2),
             "gross_total": 0.0,
             "net_total": 0.0,
             "orders_count": len(orders),
@@ -97,6 +105,16 @@ async def _build_daily_report(
         "by_table": {},
         "by_hour": {},
         "items_ranking": [],
+        "expenses": [
+            {
+                "id": e.id,
+                "description": e.description,
+                "amount": float(e.amount),
+                "category": e.category,
+                "expense_date": e.expense_date.isoformat(),
+            }
+            for e in expenses
+        ],
     }
 
     method_totals = {}
@@ -197,7 +215,8 @@ async def _build_daily_report(
     report["summary"]["net_total"] = round(
         report["summary"]["gross_total"]
         - report["summary"]["total_service_charge"]
-        - report["summary"]["total_card_fees"],
+        - report["summary"]["total_card_fees"]
+        - report["summary"]["total_expenses"],
         2,
     )
 
@@ -426,6 +445,7 @@ async def report_pdf(
         ("Vendas Brutas", f"R$ {summary['total_sales']:.2f}"),
         ("Taxa de Serviço", f"R$ {summary['total_service_charge']:.2f}"),
         ("Taxas de Cartão", f"R$ {summary['total_card_fees']:.2f}"),
+        ("Despesas", f"R$ {summary['total_expenses']:.2f}"),
         ("Total Bruto Recebido", f"R$ {summary['gross_total']:.2f}"),
         ("Total Líquido (caixa)", f"R$ {summary['net_total']:.2f}"),
         ("Comandas", str(summary["orders_count"])),

@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request, Depends
+from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import RedirectResponse
@@ -18,15 +18,7 @@ from app.routers.suppliers import router as suppliers_router
 from app.routers.promotions import router as promotions_router
 from app.routers.settings import router as settings_router
 from app.routers.employees import router as employees_router
-from app.routers.auth_deps import (
-    get_current_user_optional,
-    get_current_user,
-    require_role,
-    can_view_financial,
-    can_view_suppliers,
-    can_view_settings,
-    can_view_employees,
-)
+from app.routers.auth_deps import get_current_user_optional
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -79,18 +71,12 @@ async def stock_page(request: Request):
 
 
 @app.get("/financeiro")
-async def financial_page(
-    request: Request,
-    user=Depends(require_role("gerente", "caixa")),
-):
+async def financial_page(request: Request):
     return templates.TemplateResponse("financeiro.html", {"request": request})
 
 
 @app.get("/fornecedores")
-async def suppliers_page(
-    request: Request,
-    user=Depends(require_role("gerente", "estoquista", "caixa")),
-):
+async def suppliers_page(request: Request):
     return templates.TemplateResponse("fornecedores.html", {"request": request})
 
 
@@ -100,16 +86,10 @@ async def promotions_page(request: Request):
 
 
 @app.get("/configuracoes")
-async def settings_page(
-    request: Request,
-    user=Depends(require_role("gerente")),
-):
+async def settings_page(request: Request):
     return templates.TemplateResponse("configuracoes.html", {"request": request})
 
 
 @app.get("/funcionarios")
-async def employees_page(
-    request: Request,
-    user=Depends(require_role("gerente")),
-):
+async def employees_page(request: Request):
     return templates.TemplateResponse("funcionarios.html", {"request": request})

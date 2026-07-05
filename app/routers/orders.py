@@ -453,9 +453,9 @@ async def close_order(
         order.service_charge_pct = 0.0
         order.service_charge_applied = False
 
-    service_charge_amount = order.total * (order.service_charge_pct / 100)
     remaining_product = max(0.0, order.total - order.partial_payment)
-    remaining_service = max(0.0, service_charge_amount - order.partial_service_charge)
+    service_charge_amount = remaining_product * (order.service_charge_pct / 100)
+    remaining_service = max(0.0, service_charge_amount)
     final_total = remaining_product + remaining_service
 
     order.status = "finalizada"

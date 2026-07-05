@@ -764,13 +764,11 @@ async function showCloseModal() {
 function updateCloseTotal() {
     const total = currentTableData.total || 0;
     const paid = currentTableData.partial_payment || 0;
-    const paidService = currentTableData.partial_service_charge || 0;
     const apply = document.getElementById('apply-service-charge').checked;
     const serviceChargePct = getSettingFloat('service_charge_pct', 10);
-    const service = apply ? total * (serviceChargePct / 100) : 0;
     const remainingProduct = Math.max(0, total - paid);
-    const remainingService = Math.max(0, service - paidService);
-    const final = remainingProduct + remainingService;
+    const service = apply ? remainingProduct * (serviceChargePct / 100) : 0;
+    const final = remainingProduct + service;
 
     document.getElementById('close-service-display').textContent = formatCurrency(service);
     document.getElementById('close-final-display').textContent = formatCurrency(final);

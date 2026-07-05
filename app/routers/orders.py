@@ -185,6 +185,7 @@ async def create_pedido(
 
     prep_items = []
     bar_items = []
+    item_price_map = {}
     for entry in req.items:
         result = await db.execute(select(Product).where(Product.id == entry.product_id))
         product = result.scalars().first()
@@ -195,12 +196,15 @@ async def create_pedido(
                 "error": f"Estoque insuficiente para {product.name}. Disponível: {product.stock}"
             }
 
+        unit_price = await _get_promotional_price(product, db)
+        item_price_map[product.id] = unit_price
+
         item = OrderItem(
             order_id=order.id,
             order_round_id=rnd.id,
             product_id=product.id,
             quantity=entry.quantity,
-            unit_price=product.price,
+            unit_price=unit_price,
         )
         db.add(item)
         product.stock -= entry.quantity
@@ -243,7 +247,7 @@ async def create_pedido(
                     "product_id": product.id,
                     "product_name": product.name,
                     "quantity": entry.quantity,
-                    "unit_price": float(product.price),
+                    "unit_price": float(item_price_map.get(product.id, product.price)),
                     "category": product.category,
                 }
             )

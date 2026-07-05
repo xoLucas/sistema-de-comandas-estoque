@@ -15,6 +15,7 @@ from app.routers.stock import router as stock_router
 from app.routers.financial import router as financial_router
 from app.routers.ws import router as ws_router
 from app.routers.suppliers import router as suppliers_router
+from app.routers.promotions import router as promotions_router
 from app.routers.auth_deps import get_current_user_optional
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -39,6 +40,7 @@ app.include_router(auth_router)
 app.include_router(stock_router)
 app.include_router(financial_router)
 app.include_router(suppliers_router)
+app.include_router(promotions_router)
 app.include_router(ws_router)
 
 
@@ -72,3 +74,8 @@ async def financial_page(request: Request):
 @app.get("/fornecedores")
 async def suppliers_page(request: Request):
     return templates.TemplateResponse("fornecedores.html", {"request": request})
+
+
+@app.get("/promocoes")
+async def promotions_page(request: Request):
+    return templates.TemplateResponse("promocoes.html", {"request": request})

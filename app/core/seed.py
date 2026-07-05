@@ -10,6 +10,7 @@ from app.models.order_item import OrderItem
 from app.models.order_round import OrderRound
 from app.models.supplier import Supplier
 from app.models.stock_history import StockHistory
+from app.models.promotion import Promotion
 
 
 SEED_TABLES = [

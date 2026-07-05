@@ -12,11 +12,31 @@ from app.models.product import Product
 from app.models.order import Order
 from app.models.order_item import OrderItem
 from app.models.order_round import OrderRound
+from app.models.promotion import Promotion
 from app.models.stock_history import StockHistory
 from app.models.user import User
 from app.routers.auth_deps import get_current_user
 
 router = APIRouter(prefix="/api", tags=["orders"])
+
+
+async def _get_promotional_price(product: Product, db: AsyncSession) -> float:
+    now = datetime.now()
+    result = await db.execute(
+        select(Promotion)
+        .join(Promotion.products)
+        .where(
+            Product.id == product.id,
+            Promotion.is_active == True,
+            (Promotion.start_at == None) | (Promotion.start_at <= now),
+            (Promotion.end_at == None) | (Promotion.end_at >= now),
+        )
+    )
+    promotions = result.scalars().all()
+    if not promotions:
+        return float(product.price)
+    best_discount = max(p.discount_pct for p in promotions)
+    return round(float(product.price) * (1 - best_discount / 100), 2)
 
 
 class OpenOrderRequest(BaseModel):
@@ -280,6 +300,8 @@ async def add_order_item(
     if req.quantity > 0 and product.stock < req.quantity:
         return {"error": f"Estoque insuficiente. Disponível: {product.stock}"}
 
+    unit_price = await _get_promotional_price(product, db)
+
     existing_item = None
     for item in order.items:
         if item.product_id == req.product_id and item.order_round_id == req.order_round_id:
@@ -289,13 +311,14 @@ async def add_order_item(
     if req.quantity > 0:
         if existing_item:
             existing_item.quantity += req.quantity
+            existing_item.unit_price = unit_price
         else:
             order_item = OrderItem(
                 order_id=order.id,
                 order_round_id=req.order_round_id,
                 product_id=product.id,
                 quantity=req.quantity,
-                unit_price=product.price,
+                unit_price=unit_price,
             )
             db.add(order_item)
         product.stock -= req.quantity

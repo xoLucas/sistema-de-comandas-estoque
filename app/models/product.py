@@ -28,3 +28,4 @@ class Product(Base):
 
     suppliers = relationship("Supplier", secondary=supplier_product, back_populates="products")
     stock_history = relationship("StockHistory", back_populates="product", cascade="all, delete-orphan", order_by="StockHistory.created_at.desc()")
+    promotions = relationship("Promotion", secondary="promotion_product", back_populates="products")

@@ -1376,3 +1376,186 @@ async function deleteSupplier(id) {
         alert('Erro ao excluir fornecedor');
     }
 }
+
+// ====== PROMOTIONS ======
+let promotionProductsCache = [];
+
+async function loadPromotions() {
+    const container = document.getElementById('promotions-list');
+    if (!container) return;
+    try {
+        const res = await apiFetch(API_BASE + '/promocoes');
+        const promotions = await res.json();
+        if (promotions.error) {
+            container.innerHTML = '<div class="error-msg">' + promotions.error + '</div>';
+            return;
+        }
+
+        const counts = { ativa: 0, agendada: 0, expirada: 0, desativada: 0 };
+        promotions.forEach(p => counts[p.status] = (counts[p.status] || 0) + 1);
+        document.getElementById('count-ativa').textContent = counts.ativa;
+        document.getElementById('count-agendada').textContent = counts.agendada;
+        document.getElementById('count-expirada').textContent = counts.expirada;
+        document.getElementById('count-desativada').textContent = counts.desativada;
+
+        if (promotions.length === 0) {
+            container.innerHTML = '<p class="empty-msg">Nenhuma promoção cadastrada</p>';
+            return;
+        }
+
+        const statusLabels = { ativa: 'Ativa', agendada: 'Agendada', expirada: 'Expirada', desativada: 'Desativada' };
+        const statusColors = { ativa: 'green', agendada: 'yellow', expirada: 'orange', desativada: 'red' };
+
+        container.innerHTML = promotions.map(p => {
+            const period = formatPromotionPeriod(p.start_at, p.end_at);
+            const discountedPrices = p.products.map(prod => {
+                const promoPrice = prod.price * (1 - p.discount_pct / 100);
+                return `<span class="promo-product">${prod.name}: ${formatCurrency(prod.price)} → <strong>${formatCurrency(promoPrice)}</strong></span>`;
+            }).join('');
+
+            return `
+            <div class="promo-card ${p.status}">
+                <div class="promo-header">
+                    <div>
+                        <div class="promo-name">${p.name}</div>
+                        <div class="promo-period">${period}</div>
+                    </div>
+                    <span class="promo-status status-${statusColors[p.status]}">${statusLabels[p.status]}</span>
+                </div>
+                ${p.description ? `<div class="promo-desc">${p.description}</div>` : ''}
+                <div class="promo-discount">${p.discount_pct}% OFF</div>
+                <div class="promo-products">
+                    ${p.products.length > 0 ? discountedPrices : '<span class="text-muted">Nenhum produto vinculado</span>'}
+                </div>
+                <div class="promo-actions">
+                    <button onclick="editPromotion(${p.id})" class="btn-small">Editar</button>
+                    <button onclick="deletePromotion(${p.id})" class="btn-small btn-danger">Excluir</button>
+                </div>
+            </div>
+        `}).join('');
+    } catch (err) {
+        container.innerHTML = '<div class="error-msg">Erro ao carregar promoções</div>';
+    }
+}
+
+function formatPromotionPeriod(start, end) {
+    if (!start && !end) return 'Sem período definido';
+    const fmt = (d) => d ? new Date(d).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
+    if (start && end) return `${fmt(start)} até ${fmt(end)}`;
+    if (start) return `A partir de ${fmt(start)}`;
+    return `Até ${fmt(end)}`;
+}
+
+async function loadPromotionProducts() {
+    try {
+        const res = await apiFetch(API_BASE + '/produtos?active_only=true');
+        promotionProductsCache = await res.json();
+    } catch (err) {
+        promotionProductsCache = [];
+    }
+}
+
+function renderPromotionProducts(selectedIds = []) {
+    const container = document.getElementById('promotion-products');
+    if (promotionProductsCache.length === 0) {
+        container.innerHTML = '<span class="text-muted">Nenhum produto ativo</span>';
+        return;
+    }
+    container.innerHTML = promotionProductsCache.map(p => `
+        <label class="checkbox-row">
+            <input type="checkbox" value="${p.id}" class="promotion-product-check" ${selectedIds.includes(p.id) ? 'checked' : ''}>
+            <span>${p.name} (${formatCurrency(p.price)})</span>
+        </label>
+    `).join('');
+}
+
+async function showPromotionModal(promotion = null) {
+    await loadPromotionProducts();
+    document.getElementById('promotion-modal-title').textContent = promotion ? 'Editar Promoção' : 'Nova Promoção';
+    document.getElementById('promotion-id').value = promotion ? promotion.id : '';
+    document.getElementById('promotion-name').value = promotion ? promotion.name : '';
+    document.getElementById('promotion-description').value = promotion ? (promotion.description || '') : '';
+    document.getElementById('promotion-discount').value = promotion ? promotion.discount_pct : '';
+    document.getElementById('promotion-start').value = promotion && promotion.start_at ? new Date(promotion.start_at).toISOString().slice(0, 16) : '';
+    document.getElementById('promotion-end').value = promotion && promotion.end_at ? new Date(promotion.end_at).toISOString().slice(0, 16) : '';
+
+    const activeCheckbox = document.getElementById('promotion-active');
+    activeCheckbox.checked = promotion ? promotion.is_active : true;
+    const activeLabel = document.getElementById('promotion-active-label');
+    activeLabel.textContent = activeCheckbox.checked ? 'Promoção ativa' : 'Promoção inativa';
+    activeCheckbox.onchange = () => {
+        activeLabel.textContent = activeCheckbox.checked ? 'Promoção ativa' : 'Promoção inativa';
+    };
+
+    renderPromotionProducts(promotion ? promotion.products.map(p => p.id) : []);
+
+    document.getElementById('promotion-error').style.display = 'none';
+    document.getElementById('promotion-modal').style.display = 'flex';
+}
+
+function closePromotionModal() {
+    document.getElementById('promotion-modal').style.display = 'none';
+}
+
+async function submitPromotion() {
+    const id = document.getElementById('promotion-id').value;
+    const payload = {
+        name: document.getElementById('promotion-name').value.trim(),
+        description: document.getElementById('promotion-description').value.trim() || null,
+        discount_pct: parseFloat(document.getElementById('promotion-discount').value) || 0,
+        start_at: document.getElementById('promotion-start').value || null,
+        end_at: document.getElementById('promotion-end').value || null,
+        is_active: document.getElementById('promotion-active').checked,
+        product_ids: Array.from(document.querySelectorAll('.promotion-product-check:checked')).map(cb => parseInt(cb.value)),
+    };
+
+    if (!payload.name) {
+        document.getElementById('promotion-error').textContent = 'Informe o nome da promoção';
+        document.getElementById('promotion-error').style.display = 'block';
+        return;
+    }
+
+    const url = API_BASE + '/promocoes' + (id ? '/' + id : '');
+    const method = id ? 'PUT' : 'POST';
+
+    try {
+        const res = await apiFetch(url, { method, body: JSON.stringify(payload) });
+        const data = await res.json();
+        if (data.error) {
+            document.getElementById('promotion-error').textContent = data.error;
+            document.getElementById('promotion-error').style.display = 'block';
+            return;
+        }
+        closePromotionModal();
+        loadPromotions();
+    } catch (err) {
+        document.getElementById('promotion-error').textContent = 'Erro ao salvar promoção';
+        document.getElementById('promotion-error').style.display = 'block';
+    }
+}
+
+async function editPromotion(id) {
+    try {
+        const res = await apiFetch(API_BASE + '/promocoes');
+        const promotions = await res.json();
+        const promotion = promotions.find(p => p.id == id);
+        if (promotion) showPromotionModal(promotion);
+    } catch (err) {
+        alert('Erro ao carregar promoção');
+    }
+}
+
+async function deletePromotion(id) {
+    if (!confirm('Deseja realmente excluir esta promoção?')) return;
+    try {
+        const res = await apiFetch(API_BASE + '/promocoes/' + id, { method: 'DELETE' });
+        if (!res.ok) {
+            const data = await res.json();
+            alert(data.error || 'Erro ao excluir');
+            return;
+        }
+        loadPromotions();
+    } catch (err) {
+        alert('Erro ao excluir promoção');
+    }
+}

@@ -6,10 +6,31 @@ from sqlalchemy.orm import selectinload
 from app.core.database import get_db
 from app.models.product import Product
 from app.models.user import User
-from app.routers.auth_deps import get_current_user
+from app.routers.auth_deps import get_current_user, can_view_product_cost
 from app.services.promotion_service import get_active_promotion_map
 
 router = APIRouter(prefix="/api", tags=["products"])
+
+
+def _serialize_product_list(p: Product, promo_map: dict, user: User) -> dict:
+    discount_pct, promo_name = promo_map.get(p.id, (0, None))
+    discounted_price = round(float(p.price) * (1 - discount_pct / 100), 2) if discount_pct else float(p.price)
+    item = {
+        "id": p.id,
+        "code": p.code,
+        "name": p.name,
+        "category": p.category,
+        "price": float(p.price),
+        "discounted_price": discounted_price,
+        "active_promotion": promo_name,
+        "stock": p.stock,
+        "min_stock": p.min_stock,
+        "active": p.active,
+    }
+    if can_view_product_cost(user):
+        item["cost"] = float(p.cost)
+        item["margin_pct"] = float(p.margin_pct)
+    return item
 
 
 @router.get("/produtos")
@@ -26,26 +47,7 @@ async def list_products(
 
     promo_map = await get_active_promotion_map(db)
 
-    response = []
-    for p in products:
-        discount_pct, promo_name = promo_map.get(p.id, (0, None))
-        discounted_price = round(float(p.price) * (1 - discount_pct / 100), 2) if discount_pct else float(p.price)
-        item = {
-            "id": p.id,
-            "code": p.code,
-            "name": p.name,
-            "category": p.category,
-            "cost": float(p.cost),
-            "margin_pct": float(p.margin_pct),
-            "price": float(p.price),
-            "discounted_price": discounted_price,
-            "active_promotion": promo_name,
-            "stock": p.stock,
-            "min_stock": p.min_stock,
-            "active": p.active,
-        }
-        response.append(item)
-    return response
+    return [_serialize_product_list(p, promo_map, user) for p in products]
 
 
 @router.get("/produtos/{product_id}")
@@ -61,19 +63,21 @@ async def get_product(
     if not product:
         return {"error": "Produto não encontrado"}
 
-    return {
+    item = {
         "id": product.id,
         "code": product.code,
         "name": product.name,
         "category": product.category,
-        "cost": float(product.cost),
-        "margin_pct": float(product.margin_pct),
         "price": float(product.price),
         "stock": product.stock,
         "min_stock": product.min_stock,
         "active": product.active,
-        "suppliers": [
+    }
+    if can_view_product_cost(user):
+        item["cost"] = float(product.cost)
+        item["margin_pct"] = float(product.margin_pct)
+        item["suppliers"] = [
             {"id": s.id, "name": s.name}
             for s in product.suppliers
-        ],
-    }
+        ]
+    return item

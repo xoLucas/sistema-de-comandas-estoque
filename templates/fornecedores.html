@@ -49,6 +49,7 @@
 <script>
 document.addEventListener('DOMContentLoaded', () => {
     checkAuth((user) => {
+        if (!requirePageAccess(['gerente', 'estoquista'])) return;
         document.getElementById('bottom-nav').style.display = 'flex';
         highlightNav('fornecedores');
         loadSuppliers();

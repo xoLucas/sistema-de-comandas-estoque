@@ -48,6 +48,38 @@ def require_role(*roles: str):
     return _require_role
 
 
+def can_view_product_cost(user: User) -> bool:
+    return user.role in ("gerente", "caixa", "estoquista")
+
+
+def can_manage_stock(user: User) -> bool:
+    return user.role in ("gerente", "estoquista", "caixa")
+
+
+def can_view_financial(user: User) -> bool:
+    return user.role in ("gerente", "caixa")
+
+
+def can_view_suppliers(user: User) -> bool:
+    return user.role in ("gerente", "estoquista", "caixa")
+
+
+def can_view_promotions(user: User) -> bool:
+    return user.role in ("gerente", "caixa", "estoquista", "garcom")
+
+
+def can_manage_promotions(user: User) -> bool:
+    return user.role in ("gerente", "caixa", "estoquista")
+
+
+def can_view_settings(user: User) -> bool:
+    return user.role == "gerente"
+
+
+def can_view_employees(user: User) -> bool:
+    return user.role == "gerente"
+
+
 async def get_current_user_optional(
     request: Request = None,
     credentials: HTTPAuthorizationCredentials = Depends(security_scheme),

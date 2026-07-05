@@ -9,7 +9,7 @@ from app.core.database import get_db
 from app.models.promotion import Promotion
 from app.models.product import Product
 from app.models.user import User
-from app.routers.auth_deps import get_current_user
+from app.routers.auth_deps import get_current_user, can_manage_promotions
 
 router = APIRouter(prefix="/api/promocoes", tags=["promocoes"])
 
@@ -92,8 +92,8 @@ async def create_promotion(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role not in ("gerente", "caixa"):
-        return {"error": "Acesso restrito ao gerente ou caixa"}
+    if not can_manage_promotions(user):
+        return {"error": "Acesso restrito ao gerente, caixa ou estoquista"}
 
     promotion = Promotion(
         name=req.name,
@@ -141,8 +141,8 @@ async def update_promotion(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role not in ("gerente", "caixa"):
-        return {"error": "Acesso restrito ao gerente ou caixa"}
+    if not can_manage_promotions(user):
+        return {"error": "Acesso restrito ao gerente, caixa ou estoquista"}
 
     result = await db.execute(
         select(Promotion).where(Promotion.id == promotion_id).options(selectinload(Promotion.products))
@@ -197,8 +197,8 @@ async def delete_promotion(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role not in ("gerente", "caixa"):
-        return {"error": "Acesso restrito ao gerente ou caixa"}
+    if not can_manage_promotions(user):
+        return {"error": "Acesso restrito ao gerente, caixa ou estoquista"}
 
     result = await db.execute(select(Promotion).where(Promotion.id == promotion_id))
     promotion = result.scalars().first()

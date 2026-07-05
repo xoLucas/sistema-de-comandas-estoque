@@ -16,6 +16,7 @@
 <script>
 document.addEventListener('DOMContentLoaded', () => {
     checkAuth((user) => {
+        if (!requirePageAccess(['gerente'])) return;
         document.getElementById('bottom-nav').style.display = 'flex';
         highlightNav('configuracoes');
         loadSettings();

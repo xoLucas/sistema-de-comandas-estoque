@@ -11,7 +11,7 @@ from app.models.employee import Employee
 from app.models.daily_payment import DailyPayment
 from app.models.expense import Expense
 from app.models.user import User
-from app.routers.auth_deps import get_current_user, require_role
+from app.routers.auth_deps import get_current_user, require_role, can_view_employees
 
 router = APIRouter(prefix="/api", tags=["employees"])
 
@@ -51,6 +51,9 @@ async def list_employees(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    if not can_view_employees(user):
+        return {"error": "Acesso restrito ao gerente"}
+
     query = select(Employee)
     if active_only:
         query = query.where(Employee.active == True)
@@ -79,6 +82,9 @@ async def get_employee(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    if not can_view_employees(user):
+        return {"error": "Acesso restrito ao gerente"}
+
     result = await db.execute(
         select(Employee)
         .where(Employee.id == employee_id)
@@ -302,6 +308,9 @@ async def employee_daily_total(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    if not can_view_employees(user):
+        return {"error": "Acesso restrito ao gerente"}
+
     result = await db.execute(
         select(func.coalesce(func.sum(DailyPayment.amount), 0.0))
         .where(DailyPayment.employee_id == employee_id)

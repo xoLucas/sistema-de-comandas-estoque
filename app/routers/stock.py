@@ -10,7 +10,7 @@ from app.models.product import Product
 from app.models.stock_history import StockHistory
 from app.models.supplier import Supplier
 from app.models.user import User
-from app.routers.auth_deps import get_current_user
+from app.routers.auth_deps import get_current_user, can_manage_stock, can_view_product_cost
 
 router = APIRouter(prefix="/api/estoque", tags=["estoque"])
 
@@ -65,14 +65,12 @@ def _stock_status(product: Product) -> str:
         return "em_conformidade"
 
 
-def _product_to_dict(p: Product, include_suppliers: bool = False) -> dict:
+def _product_to_dict(p: Product, user: User, include_suppliers: bool = False) -> dict:
     data = {
         "id": p.id,
         "code": p.code,
         "name": p.name,
         "category": p.category,
-        "cost": float(p.cost),
-        "margin_pct": float(p.margin_pct),
         "price": float(p.price),
         "stock": p.stock,
         "min_stock": p.min_stock,
@@ -80,8 +78,11 @@ def _product_to_dict(p: Product, include_suppliers: bool = False) -> dict:
         "status": _stock_status(p),
         "pct_of_min": round((p.stock / p.min_stock * 100) if p.min_stock > 0 else 100, 1),
     }
-    if include_suppliers:
-        data["suppliers"] = [{"id": s.id, "name": s.name} for s in p.suppliers]
+    if can_view_product_cost(user):
+        data["cost"] = float(p.cost)
+        data["margin_pct"] = float(p.margin_pct)
+        if include_suppliers:
+            data["suppliers"] = [{"id": s.id, "name": s.name} for s in p.suppliers]
     return data
 
 
@@ -109,7 +110,7 @@ async def list_stock(
         st = _stock_status(p)
         if status and st != status:
             continue
-        data.append(_product_to_dict(p))
+        data.append(_product_to_dict(p, user))
 
     if sort == "name":
         data.sort(key=lambda x: x["name"])
@@ -146,7 +147,7 @@ async def get_product(
     product = result.scalars().first()
     if not product:
         return {"error": "Produto não encontrado"}
-    return _product_to_dict(product)
+    return _product_to_dict(product, user, include_suppliers=True)
 
 
 @router.post("")
@@ -155,7 +156,7 @@ async def create_product(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role not in ("estoquista", "gerente"):
+    if not can_manage_stock(user):
         return {"error": "Acesso não permitido"}
 
     product = Product(
@@ -188,7 +189,7 @@ async def create_product(
         select(Product).where(Product.id == product.id).options(selectinload(Product.suppliers))
     )
     product = result.scalars().first()
-    return _product_to_dict(product, include_suppliers=True)
+    return _product_to_dict(product, user, include_suppliers=True)
 
 
 @router.put("/{product_id}")
@@ -198,7 +199,7 @@ async def update_product(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role not in ("estoquista", "gerente"):
+    if not can_manage_stock(user):
         return {"error": "Acesso não permitido"}
 
     result = await db.execute(
@@ -240,7 +241,7 @@ async def update_product(
         select(Product).where(Product.id == product.id).options(selectinload(Product.suppliers))
     )
     product = result.scalars().first()
-    return _product_to_dict(product, include_suppliers=True)
+    return _product_to_dict(product, user, include_suppliers=True)
 
 
 @router.post("/{product_id}/movimentacao")
@@ -250,7 +251,7 @@ async def add_stock_movement(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role not in ("estoquista", "gerente", "caixa"):
+    if not can_manage_stock(user):
         return {"error": "Acesso não permitido"}
 
     if req.type not in ("entrada", "saida"):
@@ -287,7 +288,7 @@ async def add_stock_movement(
     product = result.scalars().first()
 
     return {
-        "product": _product_to_dict(product, include_suppliers=True),
+        "product": _product_to_dict(product, user, include_suppliers=True),
         "movement": {
             "id": history.id,
             "type": history.type,
@@ -343,7 +344,7 @@ async def add_stock_batch(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role not in ("estoquista", "gerente", "caixa"):
+    if not can_manage_stock(user):
         return {"error": "Acesso não permitido"}
 
     updated = []
@@ -379,7 +380,7 @@ async def update_min_stock(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role not in ("estoquista", "gerente"):
+    if not can_manage_stock(user):
         return {"error": "Acesso não permitido"}
 
     result = await db.execute(select(Product).where(Product.id == product_id))

@@ -8,7 +8,7 @@ from app.core.database import get_db
 from app.models.supplier import Supplier
 from app.models.product import Product
 from app.models.user import User
-from app.routers.auth_deps import get_current_user
+from app.routers.auth_deps import get_current_user, can_view_suppliers
 
 router = APIRouter(prefix="/api/fornecedores", tags=["fornecedores"])
 
@@ -33,6 +33,9 @@ async def list_suppliers(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    if not can_view_suppliers(user):
+        return {"error": "Acesso restrito ao gerente ou estoquista"}
+
     query = select(Supplier).options(selectinload(Supplier.products))
     if active_only:
         query = query.where(Supplier.active == True)
@@ -61,7 +64,7 @@ async def create_supplier(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role not in ("gerente", "estoquista"):
+    if not can_view_suppliers(user):
         return {"error": "Acesso restrito ao gerente ou estoquista"}
 
     supplier = Supplier(
@@ -101,7 +104,7 @@ async def update_supplier(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role not in ("gerente", "estoquista"):
+    if not can_view_suppliers(user):
         return {"error": "Acesso restrito ao gerente ou estoquista"}
 
     result = await db.execute(
@@ -146,7 +149,7 @@ async def delete_supplier(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role not in ("gerente", "estoquista"):
+    if not can_view_suppliers(user):
         return {"error": "Acesso restrito ao gerente ou estoquista"}
 
     result = await db.execute(select(Supplier).where(Supplier.id == supplier_id))

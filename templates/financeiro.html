@@ -48,6 +48,7 @@
 <script>
 document.addEventListener('DOMContentLoaded', () => {
     checkAuth((user) => {
+        if (!requirePageAccess(['gerente', 'caixa'])) return;
         document.getElementById('bottom-nav').style.display = 'flex';
         highlightNav('financeiro');
         document.getElementById('sale-date-filter').value = new Date().toISOString().split('T')[0];

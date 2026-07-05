@@ -1516,8 +1516,11 @@ header .subtitle {
 
 /* ====== PRODUCT MODAL / STOCK ENHANCEMENTS ====== */
 .stock-item-row.inactive {
-    opacity: 0.55;
-    border-left: 3px solid var(--red);
+    opacity: 0.5;
+}
+
+.stock-item-row.readonly {
+    cursor: default;
 }
 
 .form-row {

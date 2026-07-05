@@ -28,6 +28,8 @@ function statusLabel(status) {
 }
 
 // ====== AUTH ======
+let currentUser = null;
+
 function checkAuth(callback) {
     const user = getStoredUser();
     if (!user || !getToken()) {
@@ -43,13 +45,51 @@ function checkAuth(callback) {
                 return;
             }
             localStorage.setItem('lads_user', JSON.stringify(data));
+            currentUser = data;
             await loadAppSettings();
+            updateNavVisibility();
             if (!data.is_registered && data.role === 'garcom') {
                 showNameModal();
             }
             if (callback) callback(data);
         })
         .catch(() => { window.location.href = '/login'; });
+}
+
+function hasRole(...roles) {
+    return currentUser && roles.includes(currentUser.role);
+}
+
+function canViewFinancial() { return hasRole('gerente', 'caixa'); }
+function canViewSuppliers() { return hasRole('gerente', 'estoquista', 'caixa'); }
+function canViewPromotions() { return hasRole('gerente', 'caixa', 'estoquista', 'garcom'); }
+function canManagePromotions() { return hasRole('gerente', 'caixa', 'estoquista'); }
+function canViewSettings() { return hasRole('gerente'); }
+function canViewEmployees() { return hasRole('gerente'); }
+function canManageStock() { return hasRole('gerente', 'estoquista', 'caixa'); }
+function canViewProductCost() { return hasRole('gerente', 'caixa', 'estoquista'); }
+
+function updateNavVisibility() {
+    const nav = document.getElementById('bottom-nav');
+    if (!nav) return;
+    nav.querySelectorAll('[data-require]').forEach(el => {
+        const req = el.dataset.require;
+        let visible = false;
+        if (req === 'financial') visible = canViewFinancial();
+        else if (req === 'suppliers') visible = canViewSuppliers();
+        else if (req === 'promotions') visible = canViewPromotions();
+        else if (req === 'settings') visible = canViewSettings();
+        else if (req === 'employees') visible = canViewEmployees();
+        el.style.display = visible ? 'flex' : 'none';
+    });
+}
+
+function requirePageAccess(allowedRoles, redirectTo = '/') {
+    if (!currentUser || !allowedRoles.includes(currentUser.role)) {
+        window.location.href = redirectTo;
+        return false;
+    }
+    return true;
 }
 
 function logout() {
@@ -797,11 +837,22 @@ async function loadStock() {
                 catSelect.appendChild(opt);
             });
         }
-        container.innerHTML = data.items.map(p => `
-            <div class="stock-item-row ${p.active ? '' : 'inactive'}" onclick="openProductDetail(${p.id})">
+
+        document.querySelectorAll('.manager-only').forEach(el => {
+            el.style.display = canManageStock() ? 'block' : 'none';
+        });
+
+        const showCost = canViewProductCost();
+        const canOpenDetail = canManageStock();
+        container.innerHTML = data.items.map(p => {
+            const costInfo = showCost ? ` | Custo: ${formatCurrency(p.cost)}` : '';
+            const clickAttr = canOpenDetail ? `onclick="openProductDetail(${p.id})"` : '';
+            const cursorClass = canOpenDetail ? '' : 'readonly';
+            return `
+            <div class="stock-item-row ${p.active ? '' : 'inactive'} ${cursorClass}" ${clickAttr}>
                 <div>
                     <div class="stock-name">${p.code ? '[' + p.code + '] ' : ''}${p.name}</div>
-                    <div class="stock-meta">${p.category} | Mín: ${p.min_stock} | ${p.pct_of_min}% | Custo: ${formatCurrency(p.cost)} | Venda: ${formatCurrency(p.price)}</div>
+                    <div class="stock-meta">${p.category} | Mín: ${p.min_stock} | ${p.pct_of_min}%${costInfo} | Venda: ${formatCurrency(p.price)}</div>
                 </div>
                 <div style="text-align:right;">
                     <span style="font-size:18px;font-weight:700;">${p.stock}</span>
@@ -809,7 +860,8 @@ async function loadStock() {
                     <span class="stock-badge badge-${p.status}">${{em_falta:'Em Falta',em_risco:'Em Risco',em_conformidade:'OK'}[p.status]}</span>
                 </div>
             </div>
-        `).join('');
+        `;
+        }).join('');
     } catch (err) {
         container.innerHTML = '<div class="error-msg">Erro ao carregar estoque</div>';
     }
@@ -1435,12 +1487,24 @@ async function loadPromotions() {
         const statusLabels = { ativa: 'Ativa', agendada: 'Agendada', expirada: 'Expirada', desativada: 'Desativada' };
         const statusColors = { ativa: 'green', agendada: 'yellow', expirada: 'orange', desativada: 'red' };
 
+        const canManage = canManagePromotions();
+        document.querySelectorAll('.promo-manager-only').forEach(el => {
+            el.style.display = canManage ? 'block' : 'none';
+        });
+
         container.innerHTML = promotions.map(p => {
             const period = formatPromotionPeriod(p.start_at, p.end_at);
             const discountedPrices = p.products.map(prod => {
                 const promoPrice = prod.price * (1 - p.discount_pct / 100);
                 return `<span class="promo-product">${prod.name}: ${formatCurrency(prod.price)} → <strong>${formatCurrency(promoPrice)}</strong></span>`;
             }).join('');
+
+            const actions = canManage ? `
+                <div class="promo-actions">
+                    <button onclick="editPromotion(${p.id})" class="btn-small">Editar</button>
+                    <button onclick="deletePromotion(${p.id})" class="btn-small btn-danger">Excluir</button>
+                </div>
+            ` : '';
 
             return `
             <div class="promo-card ${p.status}">
@@ -1456,10 +1520,7 @@ async function loadPromotions() {
                 <div class="promo-products">
                     ${p.products.length > 0 ? discountedPrices : '<span class="text-muted">Nenhum produto vinculado</span>'}
                 </div>
-                <div class="promo-actions">
-                    <button onclick="editPromotion(${p.id})" class="btn-small">Editar</button>
-                    <button onclick="deletePromotion(${p.id})" class="btn-small btn-danger">Excluir</button>
-                </div>
+                ${actions}
             </div>
         `}).join('');
     } catch (err) {

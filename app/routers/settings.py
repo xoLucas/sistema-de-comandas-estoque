@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.models.setting import Setting
 from app.models.user import User
-from app.routers.auth_deps import get_current_user, require_role
+from app.routers.auth_deps import get_current_user, require_role, can_view_settings
 
 router = APIRouter(prefix="/api", tags=["settings"])
 
@@ -18,7 +18,7 @@ class SettingUpdate(BaseModel):
 @router.get("/configuracoes")
 async def list_settings(
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_role("gerente")),
 ):
     result = await db.execute(select(Setting).order_by(Setting.label))
     settings = result.scalars().all()
@@ -39,7 +39,7 @@ async def list_settings(
 async def get_setting_by_key(
     key: str,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_role("gerente")),
 ):
     result = await db.execute(select(Setting).where(Setting.key == key))
     setting = result.scalars().first()
@@ -60,7 +60,7 @@ async def update_setting(
     key: str,
     payload: SettingUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_role("gerente", "caixa")),
+    user: User = Depends(require_role("gerente")),
 ):
     result = await db.execute(select(Setting).where(Setting.key == key))
     setting = result.scalars().first()

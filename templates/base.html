@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
     <meta name="theme-color" content="#0d1117">
     <title>Lads Beer</title>
-    <link rel="stylesheet" href="/static/style.css?v=28">
+    <link rel="stylesheet" href="/static/style.css?v=29">
 </head>
 <body>
     <div class="container">
@@ -21,23 +21,23 @@
             <span class="nav-icon">&#9776;</span>
             <span class="nav-label">Estoque</span>
         </a>
-        <a href="/financeiro" class="nav-item" data-page="financeiro">
+        <a href="/financeiro" class="nav-item" data-page="financeiro" data-require="financial">
             <span class="nav-icon">&#9679;</span>
             <span class="nav-label">Financeiro</span>
         </a>
-        <a href="/fornecedores" class="nav-item" data-page="fornecedores">
+        <a href="/fornecedores" class="nav-item" data-page="fornecedores" data-require="suppliers">
             <span class="nav-icon">&#9993;</span>
             <span class="nav-label">Fornecedores</span>
         </a>
-        <a href="/promocoes" class="nav-item" data-page="promocoes">
+        <a href="/promocoes" class="nav-item" data-page="promocoes" data-require="promotions">
             <span class="nav-icon">&#9733;</span>
             <span class="nav-label">Promoções</span>
         </a>
-        <a href="/configuracoes" class="nav-item" data-page="configuracoes">
+        <a href="/configuracoes" class="nav-item" data-page="configuracoes" data-require="settings">
             <span class="nav-icon">&#9881;</span>
             <span class="nav-label">Ajustes</span>
         </a>
-        <a href="/funcionarios" class="nav-item" data-page="funcionarios">
+        <a href="/funcionarios" class="nav-item" data-page="funcionarios" data-require="employees">
             <span class="nav-icon">&#128100;</span>
             <span class="nav-label">Funcionários</span>
         </a>
@@ -57,7 +57,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=28"></script>
+    <script src="/static/app.js?v=29"></script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

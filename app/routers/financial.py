@@ -14,7 +14,7 @@ from app.models.order import Order
 from app.models.table import Table
 from app.models.user import User
 from app.models.expense import Expense
-from app.routers.auth_deps import get_current_user
+from app.routers.auth_deps import get_current_user, can_view_financial
 from app.services.settings_service import get_setting_as_float
 
 router = APIRouter(prefix="/api/financeiro", tags=["financeiro"])
@@ -254,7 +254,7 @@ async def list_sales(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role not in ("caixa", "gerente"):
+    if not can_view_financial(user):
         return {"error": "Acesso restrito ao caixa ou gerente"}
 
     query = (
@@ -324,7 +324,7 @@ async def dashboard(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role not in ("caixa", "gerente"):
+    if not can_view_financial(user):
         return {"error": "Acesso restrito ao caixa ou gerente"}
 
     today = date.today()
@@ -392,7 +392,7 @@ async def daily_close(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role not in ("caixa", "gerente"):
+    if not can_view_financial(user):
         return {"error": "Acesso restrito ao caixa ou gerente"}
 
     try:
@@ -413,7 +413,7 @@ async def report_pdf(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role not in ("caixa", "gerente"):
+    if not can_view_financial(user):
         return {"error": "Acesso restrito ao caixa ou gerente"}
 
     try:

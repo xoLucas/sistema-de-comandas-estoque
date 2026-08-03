@@ -6,7 +6,7 @@ prints the resulting dashboard and reports.
 
 Run with: python3 scripts/simulate_usage.py
 
-Requires dev dependencies from requirements-dev.txt (requests).
+Requires requests (installed via requirements.txt).
 """
 
 import json

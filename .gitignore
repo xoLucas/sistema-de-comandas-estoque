@@ -25,3 +25,9 @@ Thumbs.db
 tmp_simulate_updates.sql
 features-lads
 .~lock.*#
+
+# Local project docs / instructions not meant for the public repo
+AGENTS.md
+01_ESCOPO_PROJETO.md
+02_SPRINTS_PROJETO.md
+requirements-dev.txt

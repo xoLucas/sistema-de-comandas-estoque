@@ -1,4 +1,0 @@
-# Dev / test dependencies for the Lads Beer project.
-# These are not required at runtime by the FastAPI app.
-
-requests>=2.32.0

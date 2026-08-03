@@ -1,25 +1,128 @@
 {% extends "base.html" %}
 {% block content %}
-<header>
-    <h1>CONFIGURAÇÕES</h1>
-    <p class="subtitle">Ajustes do estabelecimento</p>
-</header>
+<div class="settings-layout" id="settings-layout">
+    <aside class="settings-sidebar" id="settings-sidebar">
+        <div class="settings-sidebar-header">
+            <h2>Configurações</h2>
+        </div>
+        <nav class="settings-nav" id="settings-nav"></nav>
+    </aside>
 
-<div id="settings-list" class="settings-list">
-    <div class="loading">Carregando...</div>
+    <main class="settings-main" id="settings-main">
+        </header>
+
+        <div id="settings-list" class="settings-list">
+            <div class="loading">Carregando...</div>
+        </div>
+
+        <div id="settings-crud-sections" class="settings-crud-sections">
+            <div class="settings-group-card" id="settings-group-mesas">
+                <div class="settings-group-header">
+                    <span class="settings-group-icon"><i class="bi bi-table"></i></span>
+                    <div><h3 class="settings-group-title">Mesas</h3></div>
+                </div>
+                <div class="settings-group-body">
+                    <div class="setting-row">
+                        <div class="setting-info">
+                            <label class="input-label">Nova mesa</label>
+                            <p class="setting-description">Adicione uma mesa informando o número.</p>
+                        </div>
+                        <div class="setting-control setting-inline">
+                            <input type="number" id="settings-new-table-number" class="form-control small-input" placeholder="Nº">
+                            <button class="btn-primary" onclick="addTable()">Adicionar</button>
+                        </div>
+                    </div>
+                    <div id="settings-tables-list"></div>
+                </div>
+            </div>
+
+            <div class="settings-group-card" id="settings-group-usuarios">
+                <div class="settings-group-header">
+                    <span class="settings-group-icon"><i class="bi bi-person-lock"></i></span>
+                    <div><h3 class="settings-group-title">Usuários de Login</h3></div>
+                </div>
+                <div class="settings-group-body">
+                    <div class="setting-row">
+                        <div class="setting-info">
+                            <label class="input-label">Novo usuário</label>
+                            <p class="setting-description">Crie um login para acesso ao sistema.</p>
+                        </div>
+                        <div class="setting-control">
+                            <button class="btn-primary" onclick="openUserModal()">Adicionar</button>
+                        </div>
+                    </div>
+                    <div id="settings-users-list"></div>
+                </div>
+            </div>
+
+            <div class="settings-group-card" id="settings-group-backup">
+                <div class="settings-group-header">
+                    <span class="settings-group-icon"><i class="bi bi-download"></i></span>
+                    <div><h3 class="settings-group-title">Backup / Exportação</h3></div>
+                </div>
+                <div class="settings-group-body">
+                    <div class="setting-row">
+                        <div class="setting-info">
+                            <label class="input-label">Exportar dados</label>
+                            <p class="setting-description">Baixe todos os dados em CSV dentro de um arquivo ZIP.</p>
+                        </div>
+                        <div class="setting-control">
+                            <button class="btn-primary" onclick="exportBackup()">Exportar ZIP</button>
+                            <span id="backup-status" class="setting-status"></span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <p id="settings-error" class="error-msg" style="display:none;margin-top:12px;"></p>
+        <p id="settings-success" class="success-msg" style="display:none;margin-top:12px;">Configuração salva!</p>
+    </main>
 </div>
 
-<p id="settings-error" class="error-msg" style="display:none;margin-top:12px;"></p>
-<p id="settings-success" class="success-msg" style="display:none;margin-top:12px;">Configurações salvas!</p>
+<div id="settings-user-modal" class="modal" style="display:none;" onclick="if(event.target===this) closeUserModal()">
+    <div class="modal-content" onclick="event.stopPropagation()">
+        <div class="modal-header">
+            <h3 id="settings-user-modal-title">Novo Usuário</h3>
+            <button type="button" class="btn-icon" onclick="closeUserModal()"><i class="bi bi-x-lg"></i></button>
+        </div>
+        <input type="hidden" id="settings-user-id">
+        <label class="input-label">Nome</label>
+        <input type="text" id="settings-user-name" class="input-field" placeholder="Nome completo">
+        <label class="input-label">Login</label>
+        <input type="text" id="settings-user-username" class="input-field" placeholder="Usuário">
+        <label class="input-label">Senha</label>
+        <input type="password" id="settings-user-password" class="input-field" placeholder="Senha">
+        <label class="input-label">Perfil</label>
+        <select id="settings-user-role" class="input-field">
+            <option value="garcom">Garçom</option>
+            <option value="caixa">Caixa</option>
+            <option value="estoquista">Estoquista</option>
+            <option value="gerente">Gerente</option>
+        </select>
+        <label class="checkbox-label"><input type="checkbox" id="settings-user-active" checked> Ativo</label>
+        <div class="modal-actions">
+            <button class="btn-secondary" onclick="closeUserModal()">Cancelar</button>
+            <button class="btn-primary" onclick="saveUser()">Salvar</button>
+        </div>
+        <p id="settings-user-error" class="error-msg" style="display:none;"></p>
+    </div>
+</div>
+
+
 {% endblock %}
 {% block scripts %}
 <script>
+document.body.classList.add('configuracoes-page');
 document.addEventListener('DOMContentLoaded', () => {
+    setupSettingsModalKeyboard();
     checkAuth((user) => {
         if (!requirePageAccess(['gerente'])) return;
         document.getElementById('bottom-nav').style.display = 'flex';
         highlightNav('configuracoes');
         loadSettings();
+        loadSettingsTables();
+        loadSettingsUsers();
     });
 });
 </script>

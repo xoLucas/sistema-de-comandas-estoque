@@ -5,28 +5,53 @@
     <p class="subtitle">Relatórios e Vendas</p>
 </header>
 
+<div class="financeiro-layout-top">
+<div class="cash-register-card" id="cash-register-card">
+    <div class="cash-register-status">
+        <span class="status-dot" id="cash-status-dot"></span>
+        <span id="cash-status-text">Verificando caixa...</span>
+    </div>
+    <div class="cash-register-info" id="cash-register-info" style="display:none;">
+        <div><span class="label">Aberto em:</span> <span id="cash-opened-at">-</span></div>
+        <div><span class="label">Por:</span> <span id="cash-opened-by">-</span></div>
+        <div><span class="label">Dinheiro inicial:</span> <span id="cash-initial">-</span></div>
+    </div>
+    <div class="cash-register-actions" id="cash-register-actions">
+        <button onclick="openCashRegisterModal()" class="btn-primary-full" id="btn-open-cash">Abrir Caixa</button>
+        <button onclick="openSangriaModal()" class="btn-small" id="btn-sangria" style="display:none;">Sangria</button>
+        <button onclick="openSuprimentoModal()" class="btn-small" id="btn-suprimento" style="display:none;">Suprimento</button>
+        <button onclick="partialReport()" class="btn-small" id="btn-partial-report" style="display:none;">Relatório Parcial</button>
+        <button onclick="closeCashRegisterModal()" class="btn-secondary-full" id="btn-close-cash" style="display:none;">Fechar Caixa</button>
+    </div>
+    <p id="cash-register-message" class="cash-message"></p>
+</div>
+
 <div class="dashboard" id="dashboard">
     <div class="dashboard-card">
         <span class="dash-label">Hoje</span>
         <span class="dash-value" id="dash-today-total">R$ 0,00</span>
         <span class="dash-sub" id="dash-today-count">0 comandas</span>
+        <span class="dash-sub" id="dash-today-consignments" style="font-size:11px;color:var(--yellow);">0 consignados</span>
     </div>
     <div class="dashboard-card">
         <span class="dash-label">Semana</span>
         <span class="dash-value" id="dash-week-total">R$ 0,00</span>
         <span class="dash-sub" id="dash-week-count">0 comandas</span>
+        <span class="dash-sub" id="dash-week-consignments" style="font-size:11px;color:var(--yellow);">0 consignados</span>
     </div>
     <div class="dashboard-card">
         <span class="dash-label">Mês</span>
         <span class="dash-value" id="dash-month-total">R$ 0,00</span>
         <span class="dash-sub" id="dash-month-count">0 comandas</span>
+        <span class="dash-sub" id="dash-month-consignments" style="font-size:11px;color:var(--yellow);">0 consignados</span>
     </div>
+</div>
 </div>
 
 <div class="filter-bar">
     <input type="date" id="sale-date-filter" onchange="loadSales()" class="select-field">
     <button onclick="loadSales()" class="btn-small">Filtrar</button>
-    <button onclick="dailyCloseReport()" class="btn-small">Fechamento</button>
+    <button onclick="dailyCloseReport()" class="btn-small">Fechamento Diário</button>
 </div>
 
 <div id="sales-list" class="sales-list">
@@ -35,7 +60,7 @@
 
 <div id="report-modal" class="modal" style="display:none;">
     <div class="modal-content modal-large">
-        <h3>Relatório de Fechamento Diário</h3>
+        <h3 id="report-modal-title">Relatório Financeiro</h3>
         <div id="report-content"></div>
         <div style="display:flex;gap:8px;margin-top:12px;">
             <button onclick="downloadPdfReport()" class="btn-primary-full" style="flex:1;">Baixar PDF</button>
@@ -43,15 +68,89 @@
         </div>
     </div>
 </div>
+
+<div id="sale-detail-modal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <h3 id="sale-detail-title">Detalhes da Comanda</h3>
+        <div id="sale-detail-content"></div>
+        <div style="display:flex;gap:8px;margin-top:12px;">
+            <button onclick="closeSaleDetailModal()" class="btn-secondary-full" style="flex:1;">Fechar</button>
+        </div>
+    </div>
+</div>
+
+<div id="open-cash-modal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <h3>Abrir Caixa</h3>
+        <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px;">Informe o valor em dinheiro disponível no início do expediente.</p>
+        <label class="input-label">Dinheiro inicial (R$)</label>
+        <input type="number" id="open-initial-cash" step="0.01" min="0" class="input-field" placeholder="0,00">
+        <p id="open-cash-error" class="error-msg" style="display:none;"></p>
+        <div style="display:flex;gap:8px;margin-top:12px;">
+            <button onclick="submitOpenCashRegister()" class="btn-primary-full" style="flex:1;">Abrir Caixa</button>
+            <button onclick="closeOpenCashModal()" class="btn-secondary-full" style="flex:1;">Cancelar</button>
+        </div>
+    </div>
+</div>
+
+<div id="close-cash-modal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <h3>Fechar Caixa</h3>
+        <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px;">Informe o valor contado no caixa e gere o relatório final.</p>
+        <label class="input-label">Dinheiro contado (R$)</label>
+        <input type="number" id="close-final-cash" step="0.01" min="0" class="input-field" placeholder="0,00">
+        <label class="input-label" style="margin-top:10px;">Observações</label>
+        <textarea id="close-observations" class="input-field" rows="2" placeholder="Opcional"></textarea>
+        <p id="close-cash-error" class="error-msg" style="display:none;"></p>
+        <div style="display:flex;gap:8px;margin-top:12px;">
+            <button onclick="submitCloseCashRegister()" class="btn-primary-full" style="flex:1;">Fechar e Gerar Relatório</button>
+            <button onclick="closeCloseCashModal()" class="btn-secondary-full" style="flex:1;">Cancelar</button>
+        </div>
+    </div>
+</div>
+
+<div id="sangria-modal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <h3>Sangria (Retirada para o Cofre)</h3>
+        <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px;">Registre a retirada de dinheiro do caixa para o cofre.</p>
+        <label class="input-label">Valor (R$)</label>
+        <input type="number" id="sangria-amount" step="0.01" min="0" class="input-field" placeholder="0,00">
+        <label class="input-label" style="margin-top:10px;">Observação</label>
+        <input type="text" id="sangria-note" class="input-field" placeholder="Opcional">
+        <p id="sangria-error" class="error-msg" style="display:none;"></p>
+        <div style="display:flex;gap:8px;margin-top:12px;">
+            <button onclick="submitCashMovement('sangria')" class="btn-primary-full" style="flex:1;">Confirmar Sangria</button>
+            <button onclick="closeSangriaModal()" class="btn-secondary-full" style="flex:1;">Cancelar</button>
+        </div>
+    </div>
+</div>
+
+<div id="suprimento-modal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <h3>Suprimento (Adição de Troco)</h3>
+        <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px;">Registre a adição de dinheiro ao caixa para troco.</p>
+        <label class="input-label">Valor (R$)</label>
+        <input type="number" id="suprimento-amount" step="0.01" min="0" class="input-field" placeholder="0,00">
+        <label class="input-label" style="margin-top:10px;">Observação</label>
+        <input type="text" id="suprimento-note" class="input-field" placeholder="Opcional">
+        <p id="suprimento-error" class="error-msg" style="display:none;"></p>
+        <div style="display:flex;gap:8px;margin-top:12px;">
+            <button onclick="submitCashMovement('suprimento')" class="btn-primary-full" style="flex:1;">Confirmar Suprimento</button>
+            <button onclick="closeSuprimentoModal()" class="btn-secondary-full" style="flex:1;">Cancelar</button>
+        </div>
+    </div>
+</div>
 {% endblock %}
 {% block scripts %}
 <script>
+document.body.classList.add('financeiro-page');
 document.addEventListener('DOMContentLoaded', () => {
     checkAuth((user) => {
         if (!requirePageAccess(['gerente', 'caixa'])) return;
         document.getElementById('bottom-nav').style.display = 'flex';
         highlightNav('financeiro');
-        document.getElementById('sale-date-filter').value = new Date().toISOString().split('T')[0];
+        document.getElementById('sale-date-filter').value = toLocalDateString(new Date());
+        loadCashRegisterStatus();
         loadDashboard();
         loadSales();
     });

@@ -78,6 +78,7 @@
 {% endblock %}
 {% block scripts %}
 <script>
+document.body.classList.add('promocoes-page');
 document.addEventListener('DOMContentLoaded', () => {
     checkAuth((user) => {
         document.getElementById('bottom-nav').style.display = 'flex';

@@ -7,6 +7,11 @@ from app.core.database import get_db
 from app.models.setting import Setting
 from app.models.user import User
 from app.routers.auth_deps import get_current_user, require_role, can_view_settings
+from app.services.printer_service import (
+    EscPosBuilder,
+    _load_printer_config,
+    _send_to_printer_backend,
+)
 
 router = APIRouter(prefix="/api", tags=["settings"])
 
@@ -78,3 +83,54 @@ async def update_setting(
         "description": setting.description,
         "type": setting.type,
     }
+
+
+def _build_test_ticket(width: int = 48) -> bytes:
+    """Build a simple ESC/POS test ticket for a configured printer."""
+    b = EscPosBuilder(width=width)
+    b.align_center()
+    b.bold_on()
+    b.line("LADS BEER")
+    b.bold_off()
+    b.line("Teste de Impressora")
+    b.separator()
+
+    b.align_left()
+    b.line("Esta e uma impressao de teste.")
+    b.line("Se voce esta lendo isso, a")
+    b.line("impressora esta configurada")
+    b.line("corretamente na rede.")
+    b.separator()
+
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    now = datetime.now(ZoneInfo("America/Sao_Paulo"))
+    b.line(f"Data: {now.strftime('%d/%m/%Y %H:%M')}")
+    b.line("Porta: 9100 (raw ESC/POS)")
+    b.separator()
+
+    b.align_center()
+    b.line("Sistema Lads Beer")
+    b.line("OK")
+    b.cut()
+    return b.build()
+
+
+@router.post("/impressoras/{printer_id}/teste")
+async def test_printer(
+    printer_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_role("gerente")),
+):
+    """Send a test ticket to a configured printer (1 or 2)."""
+    config = await _load_printer_config(printer_id)
+    if not config:
+        return {"success": False, "error": f"Impressora {printer_id} nao configurada"}
+
+    data = _build_test_ticket(width=config.get("width", 48))
+    try:
+        await _send_to_printer_backend(data, config)
+        return {"success": True, "printer": printer_id}
+    except Exception as e:
+        return {"success": False, "error": str(e), "printer": printer_id}

@@ -5,44 +5,78 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
     <meta name="theme-color" content="#0d1117">
     <title>Lads Beer</title>
-    <link rel="stylesheet" href="/static/style.css?v=32">
+    <link rel="stylesheet" href="/static/icons/bootstrap-icons/bootstrap-icons.css">
+    <link rel="stylesheet" href="/static/style.css?v=125">
 </head>
 <body>
+    <div class="notification-bell" id="notification-bell" onclick="toggleNotificationPanel(event)" style="display:none;">
+        <span class="bell-icon"><i class="bi bi-bell-fill"></i></span>
+        <span class="badge" id="notification-badge" style="display:none;">0</span>
+    </div>
+
+    <div class="notification-panel" id="notification-panel" style="display:none;">
+        <div class="notification-panel-header">
+            <h3>Notificações</h3>
+            <button class="btn-icon" onclick="closeNotificationPanel(event)"><i class="bi bi-x-lg"></i></button>
+        </div>
+        <div class="notification-filter-tabs" id="notification-filter-tabs" style="display:none;">
+            <div class="tab active" onclick="setNotificationFilter('active')">Ativas</div>
+            <div class="tab" onclick="setNotificationFilter('resolved')">Resolvidas</div>
+        </div>
+        <div class="notification-list" id="notification-list">
+            <div class="notification-empty">Carregando...</div>
+        </div>
+    </div>
+
+    <div class="notification-panel-overlay" id="notification-panel-overlay" style="display:none;" onclick="closeNotificationPanel(event)"></div>
+
     <div class="container">
         {% block content %}{% endblock %}
     </div>
 
     <nav class="bottom-nav" id="bottom-nav" style="display:none;">
         <a href="/" class="nav-item" data-page="mesas">
-            <span class="nav-icon">&#9632;</span>
+            <span class="nav-icon"><i class="bi bi-table"></i></span>
             <span class="nav-label">Mesas</span>
         </a>
         <a href="/estoque" class="nav-item" data-page="estoque">
-            <span class="nav-icon">&#9776;</span>
+            <span class="nav-icon"><i class="bi bi-box-seam"></i></span>
             <span class="nav-label">Estoque</span>
         </a>
-        <a href="/financeiro" class="nav-item" data-page="financeiro" data-require="financial">
-            <span class="nav-icon">&#9679;</span>
-            <span class="nav-label">Financeiro</span>
-        </a>
-        <a href="/fornecedores" class="nav-item" data-page="fornecedores" data-require="suppliers">
-            <span class="nav-icon">&#9993;</span>
-            <span class="nav-label">Fornecedores</span>
-        </a>
         <a href="/promocoes" class="nav-item" data-page="promocoes" data-require="promotions">
-            <span class="nav-icon">&#9733;</span>
+            <span class="nav-icon"><i class="bi bi-tag"></i></span>
             <span class="nav-label">Promoções</span>
         </a>
-        <a href="/configuracoes" class="nav-item" data-page="configuracoes" data-require="settings">
-            <span class="nav-icon">&#9881;</span>
-            <span class="nav-label">Ajustes</span>
+        <a href="/fornecedores" class="nav-item" data-page="fornecedores" data-require="suppliers">
+            <span class="nav-icon"><i class="bi bi-truck"></i></span>
+            <span class="nav-label">Fornecedores</span>
+        </a>
+        <a href="/clientes" class="nav-item" data-page="clientes" data-require="customers">
+            <span class="nav-icon"><i class="bi bi-people"></i></span>
+            <span class="nav-label">Clientes</span>
+        </a>
+        <a href="/consignados" class="nav-item" data-page="consignados" data-require="consignments">
+            <span class="nav-icon"><i class="bi bi-clipboard-check"></i></span>
+            <span class="nav-label">Consignados</span>
         </a>
         <a href="/funcionarios" class="nav-item" data-page="funcionarios" data-require="employees">
-            <span class="nav-icon">&#9786;</span>
+            <span class="nav-icon"><i class="bi bi-person-badge"></i></span>
             <span class="nav-label">Funcionários</span>
         </a>
+        <a href="/configuracoes" class="nav-item" data-page="configuracoes" data-require="settings">
+            <span class="nav-icon"><i class="bi bi-gear"></i></span>
+            <span class="nav-label">Ajustes</span>
+        </a>
+        <a href="/financeiro" class="nav-item" data-page="financeiro" data-require="financial">
+            <span class="nav-icon"><i class="bi bi-cash-coin"></i></span>
+            <span class="nav-label">Financeiro</span>
+        </a>
+        <a href="/dashboards" class="nav-item" data-page="dashboards" data-require="dashboards">
+            <span class="nav-icon"><i class="bi bi-graph-up-arrow"></i></span>
+            <span class="nav-label">Dashboards</span>
+        </a>
         <a href="#" class="nav-item" onclick="logout()">
-            <span class="nav-icon">&#10149;</span>
+            <span class="nav-icon"><i class="bi bi-box-arrow-right"></i></span>
             <span class="nav-label">Sair</span>
         </a>
     </nav>
@@ -57,7 +91,24 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=33"></script>
+    <div id="scroll-helper" class="scroll-helper" aria-label="Atalhos de rolagem">
+        <button type="button" onclick="scrollToTop()" title="Ir ao topo">↑</button>
+        <button type="button" onclick="scrollToBottom()" title="Ir ao final">↓</button>
+    </div>
+
+    <script src="/static/chart.min.js?v=115"></script>
+    <script src="/static/app.js?v=115"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const token = getToken();
+            if (token) {
+                document.getElementById('notification-bell').style.display = 'flex';
+                connectNotificationsWebSocket();
+                loadNotifications();
+            }
+            initScrollHelper();
+        });
+    </script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

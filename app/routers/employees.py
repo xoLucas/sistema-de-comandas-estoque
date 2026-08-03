@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy import select, cast, Date, func
@@ -7,6 +7,12 @@ from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
 from app.core.security import hash_password
+from app.core.timezone import (
+    ensure_utc,
+    local_day_to_utc_range,
+    parse_local_date,
+    parse_local_datetime,
+)
 from app.models.employee import Employee
 from app.models.daily_payment import DailyPayment
 from app.models.expense import Expense
@@ -220,7 +226,7 @@ async def delete_employee(
 async def pay_daily(
     req: DailyPaymentCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_role("gerente", "caixa")),
+    user: User = Depends(require_role("gerente")),
 ):
     if req.amount <= 0:
         return {"error": "Valor deve ser maior que zero"}
@@ -230,9 +236,8 @@ async def pay_daily(
     if not employee:
         return {"error": "Funcionário não encontrado"}
 
-    try:
-        payment_date = datetime.fromisoformat(req.payment_date)
-    except ValueError:
+    payment_date = parse_local_datetime(req.payment_date)
+    if payment_date is None:
         return {"error": "Data inválida"}
 
     daily = DailyPayment(
@@ -249,7 +254,7 @@ async def pay_daily(
         description=f"Diária - {employee.name}",
         amount=req.amount,
         category="diaria",
-        expense_date=payment_date,
+        expense_date=ensure_utc(payment_date),
         reference_id=daily.id,
         reference_type="daily_payment",
         created_by_id=user.id,
@@ -278,11 +283,11 @@ async def list_expenses(
 ):
     query = select(Expense)
     if date:
-        try:
-            target = datetime.fromisoformat(date).date()
-            query = query.where(cast(Expense.expense_date, Date) == target)
-        except ValueError:
+        target = parse_local_date(date)
+        if target is None:
             return {"error": "Data inválida"}
+        day_start, day_end = local_day_to_utc_range(target)
+        query = query.where(Expense.expense_date >= day_start, Expense.expense_date <= day_end)
     if category:
         query = query.where(Expense.category == category)
 

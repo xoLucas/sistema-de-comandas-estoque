@@ -11,6 +11,7 @@ class Order(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     table_id: Mapped[int] = mapped_column(ForeignKey("tables.id"), nullable=False)
     waiter_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    customer_id: Mapped[int | None] = mapped_column(ForeignKey("customers.id"), nullable=True)
     customer_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="aberta", nullable=False)
     total: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
@@ -20,6 +21,7 @@ class Order(Base):
     service_charge_pct: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     service_charge_applied: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     payment_method: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    card_machine: Mapped[str | None] = mapped_column(String(30), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -27,5 +29,7 @@ class Order(Base):
 
     table = relationship("Table", back_populates="orders")
     waiter = relationship("User")
+    customer = relationship("Customer", back_populates="orders")
     items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
     rounds = relationship("OrderRound", back_populates="order", cascade="all, delete-orphan")
+    consignment_order = relationship("ConsignmentOrder", back_populates="source_order")

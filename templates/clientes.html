@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block content %}
+<header>
+    <h1>CLIENTES</h1>
+    <p class="subtitle">Cadastro e histórico de consumo</p>
+</header>
+
+<div class="filter-bar">
+    <input type="text" id="customer-search" oninput="loadCustomers()" placeholder="Buscar cliente..." class="input-field">
+    <span class="filter-label">Status:</span>
+    <select id="customer-filter-active" onchange="loadCustomers()" class="select-field">
+        <option value="">Todos</option>
+        <option value="active" selected>Ativos</option>
+        <option value="inactive">Inativos</option>
+    </select>
+    <span class="filter-label">Tipo:</span>
+    <select id="customer-filter-type" onchange="loadCustomers()" class="select-field">
+        <option value="" selected>Todos</option>
+        <option value="pf">Pessoa Física</option>
+        <option value="pj">Pessoa Jurídica</option>
+    </select>
+    <span class="filter-label">Ordenar:</span>
+    <select id="customer-sort" onchange="loadCustomers()" class="select-field" title="Ordenar por">
+        <option value="name">Nome</option>
+        <option value="total_spent">Maior faturamento</option>
+        <option value="last_visit">Última visita</option>
+        <option value="visit_count">Número de visitas</option>
+    </select>
+    <button onclick="showCustomerModal()" class="btn-primary">Novo Cliente</button>
+</div>
+
+<div id="customers-list" class="sales-list">
+    <div class="loading">Carregando...</div>
+</div>
+
+<div id="customer-modal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <h3 id="customer-modal-title">Novo Cliente</h3>
+        <input type="hidden" id="customer-id">
+        <label class="input-label">Nome *</label>
+        <input type="text" id="customer-name" class="input-field" placeholder="Nome completo">
+        <label class="input-label">Telefone</label>
+        <input type="text" id="customer-phone" class="input-field" placeholder="(00) 00000-0000">
+        <label class="input-label">E-mail</label>
+        <input type="email" id="customer-email" class="input-field" placeholder="email@exemplo.com">
+        <label class="input-label">CPF/CNPJ</label>
+        <input type="text" id="customer-document" class="input-field" placeholder="000.000.000-00">
+        <label class="input-label">Data de nascimento</label>
+        <input type="date" id="customer-birth-date" class="input-field">
+        <label class="input-label">Tipo</label>
+        <select id="customer-type" class="select-field">
+            <option value="pf">Pessoa Física</option>
+            <option value="pj">Pessoa Jurídica</option>
+        </select>
+        <label class="input-label">Observações</label>
+        <textarea id="customer-notes" class="input-field" rows="2"></textarea>
+        <label class="input-label">
+            <input type="checkbox" id="customer-active" checked> Ativo
+        </label>
+        <p id="customer-error" class="error-msg" style="display:none;"></p>
+        <div style="display:flex;gap:8px;margin-top:12px;">
+            <button onclick="submitCustomer()" class="btn-primary-full" style="flex:1;">Salvar</button>
+            <button onclick="closeCustomerModal()" class="btn-secondary-full" style="flex:1;">Cancelar</button>
+        </div>
+    </div>
+</div>
+
+<div id="customer-dashboard-modal" class="modal" style="display:none;">
+    <div class="modal-content customer-dashboard-content">
+        <h3 id="dashboard-customer-name">Dashboard do Cliente</h3>
+
+        <div class="customer-summary-cards">
+            <div class="customer-summary-card">
+                <span class="customer-summary-label">Consumo Total</span>
+                <span class="customer-summary-value" id="dash-total-spent">R$ 0,00</span>
+            </div>
+            <div class="customer-summary-card">
+                <span class="customer-summary-label">Visitas</span>
+                <span class="customer-summary-value" id="dash-visit-count">0</span>
+            </div>
+            <div class="customer-summary-card">
+                <span class="customer-summary-label">Última Visita</span>
+                <span class="customer-summary-value" id="dash-last-visit">-</span>
+            </div>
+        </div>
+
+        <div class="customer-dashboard-filter">
+            <label class="input-label">Ano</label>
+            <select id="dashboard-year" onchange="loadCustomerDashboard()" class="select-field"></select>
+        </div>
+
+        <div class="customer-chart-block">
+            <h4>Visitas por Mês</h4>
+            <div id="month-chart" class="customer-chart-container"></div>
+        </div>
+
+        <div class="customer-chart-block">
+            <h4>Visitas por Dia da Semana</h4>
+            <div id="weekday-chart" class="customer-chart-container"></div>
+        </div>
+
+        <button onclick="closeCustomerDashboardModal()" class="btn-secondary-full">Fechar</button>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+document.body.classList.add('clientes-page');
+document.addEventListener('DOMContentLoaded', () => {
+    checkAuth((user) => {
+        if (!requirePageAccess(['gerente', 'caixa'])) return;
+        document.getElementById('bottom-nav').style.display = 'flex';
+        highlightNav('clientes');
+        loadCustomers();
+    });
+});
+</script>
+{% endblock %}

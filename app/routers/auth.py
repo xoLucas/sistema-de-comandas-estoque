@@ -28,6 +28,9 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     if not user or not verify_password(req.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
 
+    if not user.is_active:
+        raise HTTPException(status_code=401, detail="Usuário inativo")
+
     token = create_access_token(data={"sub": str(user.id), "role": user.role})
 
     return {
@@ -38,6 +41,7 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
             "name": user.name,
             "role": user.role,
             "is_registered": user.is_registered,
+            "is_active": user.is_active,
         },
     }
 
@@ -50,6 +54,7 @@ async def get_me(user: User = Depends(get_current_user)):
         "name": user.name,
         "role": user.role,
         "is_registered": user.is_registered,
+        "is_active": user.is_active,
     }
 
 
@@ -92,6 +97,7 @@ async def list_users(
             "name": u.name,
             "role": u.role,
             "is_registered": u.is_registered,
+            "is_active": u.is_active,
         }
         for u in users
     ]
@@ -102,6 +108,7 @@ class CreateUserRequest(BaseModel):
     password: str
     name: str
     role: str
+    is_active: bool = True
 
 
 @router.post("/users")
@@ -126,6 +133,7 @@ async def create_user(
         name=req.name,
         role=req.role,
         is_registered=True,
+        is_active=req.is_active,
     )
     db.add(new_user)
     await db.commit()
@@ -136,4 +144,57 @@ async def create_user(
         "username": new_user.username,
         "name": new_user.name,
         "role": new_user.role,
+        "is_active": new_user.is_active,
     }
+
+
+@router.patch("/users/{user_id}/ativo")
+async def toggle_user_active(
+    user_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if current_user.role != "gerente":
+        raise HTTPException(status_code=403, detail="Acesso restrito ao gerente")
+
+    if current_user.id == user_id:
+        raise HTTPException(status_code=400, detail="Não pode desativar a si mesmo")
+
+    result = await db.execute(select(User).where(User.id == user_id))
+    target = result.scalars().first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+
+    target.is_active = not target.is_active
+    await db.commit()
+    await db.refresh(target)
+
+    return {
+        "id": target.id,
+        "username": target.username,
+        "name": target.name,
+        "role": target.role,
+        "is_active": target.is_active,
+    }
+
+
+@router.delete("/users/{user_id}")
+async def delete_user(
+    user_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if current_user.role != "gerente":
+        raise HTTPException(status_code=403, detail="Acesso restrito ao gerente")
+
+    if current_user.id == user_id:
+        raise HTTPException(status_code=400, detail="Não pode excluir a si mesmo")
+
+    result = await db.execute(select(User).where(User.id == user_id))
+    target = result.scalars().first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+
+    await db.delete(target)
+    await db.commit()
+    return {"message": "Usuário excluído com sucesso"}

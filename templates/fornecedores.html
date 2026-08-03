@@ -7,6 +7,7 @@
 
 <div class="filter-bar">
     <input type="text" id="supplier-search" oninput="loadSuppliers()" placeholder="Buscar fornecedor..." class="input-field">
+    <span class="filter-label">Status:</span>
     <select id="supplier-filter-active" onchange="loadSuppliers()" class="select-field">
         <option value="">Todos</option>
         <option value="true" selected>Ativos</option>
@@ -47,6 +48,7 @@
 {% endblock %}
 {% block scripts %}
 <script>
+document.body.classList.add('fornecedores-page');
 document.addEventListener('DOMContentLoaded', () => {
     checkAuth((user) => {
         if (!requirePageAccess(['gerente', 'estoquista'])) return;

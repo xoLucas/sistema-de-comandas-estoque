@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div id="dashboards-page" class="dashboards-layout">
+    <aside class="dashboards-sidebar" id="dashboards-sidebar">
+        <div class="dashboards-sidebar-header">
+            <h2>Dashboards</h2>
+        </div>
+        <nav class="dashboards-nav">
+            <button class="dashboards-nav-btn active" data-tab="geral" onclick="switchDashboardTab('geral')">
+                <i class="bi bi-speedometer2"></i>
+                <span>Visão Geral</span>
+            </button>
+            <button class="dashboards-nav-btn" data-tab="vendas" onclick="switchDashboardTab('vendas')">
+                <i class="bi bi-graph-up-arrow"></i>
+                <span>Vendas</span>
+            </button>
+            <button class="dashboards-nav-btn" data-tab="estoque" onclick="switchDashboardTab('estoque')">
+                <i class="bi bi-box-seam"></i>
+                <span>Estoque</span>
+            </button>
+            <button class="dashboards-nav-btn" data-tab="clientes" onclick="switchDashboardTab('clientes')">
+                <i class="bi bi-people"></i>
+                <span>Clientes</span>
+            </button>
+            <button class="dashboards-nav-btn" data-tab="funcionarios" onclick="switchDashboardTab('funcionarios')">
+                <i class="bi bi-person-badge"></i>
+                <span>Funcionários</span>
+            </button>
+        </nav>
+    </aside>
+
+    <main class="dashboards-main">
+        <div class="dashboards-topbar">
+            <div class="dashboards-filters">
+                <label class="input-label">Início</label>
+                <input type="date" id="dashboard-start-date" class="input-field">
+                <label class="input-label">Fim</label>
+                <input type="date" id="dashboard-end-date" class="input-field">
+                <button class="btn-primary" onclick="applyDashboardDateFilter()">Atualizar</button>
+            </div>
+            <button class="btn-secondary" onclick="exportDashboardCSV()">Exportar CSV</button>
+        </div>
+        <div class="dashboards-period-chips">
+            <button class="period-chip active" data-period="today" onclick="setDashboardPeriod('today')">Hoje</button>
+            <button class="period-chip" data-period="7d" onclick="setDashboardPeriod('7d')">7D</button>
+            <button class="period-chip" data-period="30d" onclick="setDashboardPeriod('30d')">30D</button>
+            <button class="period-chip" data-period="90d" onclick="setDashboardPeriod('90d')">90D</button>
+            <button class="period-chip" data-period="12m" onclick="setDashboardPeriod('12m')">12M</button>
+            <button class="period-chip" data-period="last_year" onclick="setDashboardPeriod('last_year')">Ano Passado</button>
+            <select id="dashboard-year-select" class="period-year-select" onchange="setDashboardYear(this.value)">
+                <option value="">Ano...</option>
+            </select>
+        </div>
+
+        <div id="dashboards-content" class="dashboards-content">
+            <div class="loading-msg">Carregando dashboard...</div>
+        </div>
+    </main>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+document.body.classList.add('dashboards-page');
+document.addEventListener('DOMContentLoaded', () => {
+    checkAuth((user) => {
+        if (!requirePageAccess(['gerente'])) return;
+        document.getElementById('bottom-nav').style.display = 'flex';
+        highlightNav('dashboards');
+        initDashboards();
+    });
+});
+</script>
+{% endblock %}

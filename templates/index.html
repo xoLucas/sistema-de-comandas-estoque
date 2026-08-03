@@ -13,6 +13,7 @@
 {% endblock %}
 {% block scripts %}
 <script>
+document.body.classList.add('mesas-page');
 document.addEventListener('DOMContentLoaded', () => {
     checkAuth(async (user) => {
         document.getElementById('user-greeting').textContent = 'Olá, ' + user.name;

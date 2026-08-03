@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
+from app.core.timezone import ensure_utc, parse_local_datetime
 from app.models.promotion import Promotion
 from app.models.product import Product
 from app.models.user import User
@@ -100,8 +101,8 @@ async def create_promotion(
         description=req.description,
         discount_pct=req.discount_pct,
         is_active=req.is_active,
-        start_at=datetime.fromisoformat(req.start_at).astimezone(timezone.utc) if req.start_at else None,
-        end_at=datetime.fromisoformat(req.end_at).astimezone(timezone.utc) if req.end_at else None,
+        start_at=ensure_utc(parse_local_datetime(req.start_at)),
+        end_at=ensure_utc(parse_local_datetime(req.end_at)),
     )
 
     if req.product_ids:
@@ -160,9 +161,9 @@ async def update_promotion(
     if req.is_active is not None:
         promotion.is_active = req.is_active
     if req.start_at is not None:
-        promotion.start_at = datetime.fromisoformat(req.start_at).astimezone(timezone.utc) if req.start_at else None
+        promotion.start_at = ensure_utc(parse_local_datetime(req.start_at))
     if req.end_at is not None:
-        promotion.end_at = datetime.fromisoformat(req.end_at).astimezone(timezone.utc) if req.end_at else None
+        promotion.end_at = ensure_utc(parse_local_datetime(req.end_at))
     if req.product_ids is not None:
         product_result = await db.execute(select(Product).where(Product.id.in_(req.product_ids)))
         promotion.products = product_result.scalars().all()

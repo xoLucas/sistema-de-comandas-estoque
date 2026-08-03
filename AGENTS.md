@@ -3,6 +3,8 @@
 **PARADA OBRIGATÓRIA:** Antes de sugerir, planejar, alterar ou escrever qualquer linha de código, você deve obrigatoriamente ler e absorver o contexto dos seguintes arquivos:
 
 1. `01_ESCOPO_PROJETO.md`
+2. `docs/FLUXO_CAIXA.md` (ao trabalhar no módulo financeiro/caixa)
+3. `02_SPRINTS_PROJETO.md`
 
 ## 1. Diretrizes de Comunicação e Código
 - **Idioma das Respostas:** Explique, tire dúvidas e responda sempre em Português.
@@ -11,6 +13,7 @@
 
 ## 2. Regras Intocáveis do Negócio
 - Nenhuma solução técnica, sugestão de arquitetura ou lógica de código pode ser tomada sem considerar as diretrizes operacionais estabelecidas no **01_ESCOPO_PROJETO**.
+- Quero que decida as implementações pensando em produção. O software deve cumprir sua função em produção.
 
 ## 3. Arquitetura Obrigatória (Stack)
 É expressamente proibido adicionar linguagens, frameworks, bancos de dados que fujam da stack abaixo sem autorização explícita:

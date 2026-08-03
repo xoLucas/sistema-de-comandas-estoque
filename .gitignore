@@ -20,3 +20,8 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Temporary / local files
+tmp_simulate_updates.sql
+features-lads
+.~lock.*#

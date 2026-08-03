@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% block content %}
+<header class="table-header">
+    <a href="/" class="back-btn">&larr; Mesas</a>
+    <div style="min-width:0;">
+        <h1 id="balcao-title">BALCÃO</h1>
+        <p id="balcao-status" class="subtitle">Carregando...</p>
+    </div>
+</header>
+
+<div class="balcao-layout">
+    <div class="balcao-products">
+        <div class="balcao-products-header">
+            <div class="form-row" style="position:relative;">
+                <input type="text" id="balcao-search" class="input-field" placeholder="Buscar produto..." oninput="filterBalcaoSearch(this.value)" autocomplete="off">
+                <button onclick="clearBalcaoSearch()" class="btn-small" title="Limpar"><i class="bi bi-x-lg"></i></button>
+            </div>
+            <div class="category-filter" id="balcao-category-filter"></div>
+        </div>
+        <div class="balcao-product-list" id="balcao-product-list">
+            <div class="loading">Carregando produtos...</div>
+        </div>
+    </div>
+
+    <div class="balcao-cart">
+        <div class="balcao-cart-header">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+                <h2 style="margin:0;font-size:16px;">Comanda <span id="balcao-order-number"></span></h2>
+                <button onclick="openBalcaoCustomerModal()" class="btn-small" id="btn-balcao-customer">Cliente</button>
+            </div>
+            <div id="balcao-customer-display" style="display:none;font-size:12px;color:var(--text-muted);margin-top:4px;"></div>
+        </div>
+
+        <div class="balcao-cart-items" id="balcao-cart-items">
+            <p class="empty-msg">Nenhum item na comanda</p>
+        </div>
+
+        <div class="balcao-cart-summary">
+            <div class="balcao-total-row">
+                <span>Total</span>
+                <span id="balcao-total">R$ 0,00</span>
+            </div>
+        </div>
+
+        <div class="balcao-cart-actions">
+            <button onclick="showBalcaoCloseModal()" class="btn-primary-full" id="btn-balcao-close" style="font-size:16px;padding:14px;">
+                Finalizar Venda
+            </button>
+            <button onclick="printBalcaoReceipt()" class="btn-secondary-full" style="padding:12px;">
+                🖨️ Imprimir Nota
+            </button>
+            <button onclick="clearBalcaoQuantities()" class="btn-secondary-full" style="padding:12px;">
+                Limpar Comanda
+            </button>
+        </div>
+    </div>
+</div>
+
+<div id="balcao-close-modal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <h3>Finalizar Venda</h3>
+        <div class="payment-summary" style="margin-bottom:14px;">
+            <div class="summary-row" style="font-size:18px;font-weight:700;">
+                <span>Total</span>
+                <span id="balcao-close-total">R$ 0,00</span>
+            </div>
+        </div>
+        <div style="margin-bottom:14px;">
+            <label class="input-label">Forma de Pagamento</label>
+            <select id="balcao-close-method" class="select-field" onchange="updateBalcaoCloseMethod()">
+                <option value="dinheiro">Dinheiro</option>
+                <option value="cartao_credito">Cartão de Crédito</option>
+                <option value="cartao_debito">Cartão de Débito</option>
+                <option value="pix">Pix</option>
+            </select>
+        </div>
+        <div id="balcao-close-card-section" style="display:none;margin-bottom:14px;">
+            <label class="input-label">Maquininha</label>
+            <select id="balcao-close-card-machine" class="select-field">
+                <option value="1">Maquininha 1</option>
+                <option value="2">Maquininha 2</option>
+            </select>
+        </div>
+        <div id="balcao-close-cash-section" style="margin-bottom:14px;">
+            <label class="input-label">Valor recebido (R$)</label>
+            <input type="number" id="balcao-close-tendered" class="input-field" step="0.01" min="0" placeholder="0,00" oninput="updateBalcaoChange()">
+            <div class="payment-summary" style="margin-top:8px;padding:8px 12px;">
+                <div class="summary-row" style="font-weight:700;color:var(--green);">
+                    <span>Troco</span>
+                    <span id="balcao-close-change">R$ 0,00</span>
+                </div>
+            </div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:14px;">
+            <button onclick="confirmBalcaoClose()" class="btn-primary-full" style="flex:1;">Confirmar e Imprimir</button>
+            <button onclick="closeBalcaoCloseModal()" class="btn-secondary-full" style="flex:1;">Cancelar</button>
+        </div>
+        <p id="balcao-close-error" class="error-msg" style="display:none;"></p>
+    </div>
+</div>
+
+<div id="balcao-customer-modal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <h3>Vincular Cliente</h3>
+        <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px;">Opcional — para a nota.</p>
+        <input type="hidden" id="balcao-customer-id">
+        <div style="position:relative;">
+            <div class="form-row">
+                <input type="text" id="balcao-customer-name" class="input-field" placeholder="Buscar cliente..." oninput="searchBalcaoCustomer(this.value)" autocomplete="off">
+                <button onclick="showAllBalcaoCustomers()" class="btn-small" title="Ver todos"><i class="bi bi-list"></i></button>
+            </div>
+            <div id="balcao-customer-suggestions" class="autocomplete-list" style="display:none;"></div>
+        </div>
+        <p style="font-size:12px;color:var(--text-muted);margin-top:4px;">
+            <a href="/clientes" target="_blank">Cadastrar novo cliente</a>
+        </p>
+        <div style="display:flex;gap:8px;margin-top:14px;">
+            <button onclick="confirmBalcaoCustomer()" class="btn-primary-full" style="flex:1;">Vincular</button>
+            <button onclick="clearBalcaoCustomer()" class="btn-secondary-full" style="flex:1;">Remover</button>
+            <button onclick="closeBalcaoCustomerModal()" class="btn-secondary-full" style="flex:1;">Cancelar</button>
+        </div>
+    </div>
+</div>
+
+<div id="balcao-cash-register-closed-modal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <h3>Caixa Fechado</h3>
+        <p style="font-size:14px;color:var(--text-muted);margin-bottom:14px;">
+            Não é possível vender no balcão com o caixa fechado. Abra o caixa para continuar.
+        </p>
+        <div style="margin-bottom:14px;">
+            <label class="input-label">Dinheiro inicial no caixa</label>
+            <input type="number" id="balcao-cash-register-initial" class="input-field" step="0.01" min="0" placeholder="0,00">
+        </div>
+        <div style="display:flex;gap:8px;">
+            <button onclick="openCashRegisterFromBalcao()" class="btn-primary-full" style="flex:1;">Abrir Caixa</button>
+            <button onclick="closeBalcaoCashRegisterClosedModal()" class="btn-secondary-full" style="flex:1;">Cancelar</button>
+        </div>
+        <p id="balcao-cash-register-closed-error" class="error-msg" style="display:none;"></p>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const TABLE_ID = {{ table_id }};
+document.body.classList.add('balcao-page');
+document.addEventListener('DOMContentLoaded', () => {
+    checkAuth((user) => {
+        const bottomNav = document.getElementById('bottom-nav');
+        if (bottomNav) bottomNav.style.display = 'none';
+        highlightNav('mesas');
+        loadBalcaoDetail();
+        connectTablesWebSocket();
+        connectBalcaoWebSocket();
+    });
+});
+window.addEventListener('beforeunload', closeTablesWebSocket);
+</script>
+{% endblock %}

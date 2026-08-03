@@ -1,0 +1,182 @@
+{% extends "base.html" %}
+{% block content %}
+<header>
+    <h1>CONSIGNADOS</h1>
+    <p class="subtitle">Controle de vendas fiado e atacado</p>
+</header>
+
+<div class="filter-bar">
+    <input type="text" id="consignment-search" oninput="loadConsignments()" placeholder="Buscar cliente..." class="input-field">
+    <span class="filter-label">Status:</span>
+    <select id="consignment-status-filter" onchange="loadConsignments()" class="select-field">
+        <option value="todos">Todos</option>
+        <option value="pendente" selected>Pendentes</option>
+        <option value="pago">Pagos</option>
+    </select>
+    <span class="filter-label">Tipo:</span>
+    <select id="consignment-type-filter" onchange="loadConsignments()" class="select-field">
+        <option value="">Todos os tipos</option>
+        <option value="pf">Pessoa Física</option>
+        <option value="pj">Pessoa Jurídica</option>
+    </select>
+    <span class="filter-label">Ordenar:</span>
+    <select id="consignment-sort" onchange="loadConsignments()" class="select-field" title="Ordenar por">
+        <option value="pending_days">Dias pendentes</option>
+        <option value="total">Valor total</option>
+        <option value="created_at">Data de criação</option>
+    </select>
+    <select id="consignment-sort-order" onchange="loadConsignments()" class="select-field" title="Ordem">
+        <option value="desc">Maior primeiro</option>
+        <option value="asc">Menor primeiro</option>
+    </select>
+    <button onclick="showNewConsignmentModal()" class="btn-primary">Novo</button>
+</div>
+
+<div id="consignments-list" class="sales-list">
+    <div class="loading">Carregando...</div>
+</div>
+
+<div id="consignment-detail-modal" class="modal" style="display:none;">
+    <div class="modal-content modal-large">
+        <h3 id="consignment-detail-title">Detalhes do Consignado</h3>
+        <div class="payment-summary" style="margin-bottom:14px;">
+            <div class="summary-row"><span>Cliente</span><span id="consignment-detail-customer">-</span></div>
+            <div class="summary-row"><span>Tipo</span><span id="consignment-detail-type">-</span></div>
+            <div class="summary-row"><span>Status</span><span id="consignment-detail-status">-</span></div>
+            <div class="summary-row"><span>Total</span><span id="consignment-detail-total">-</span></div>
+            <div class="summary-row"><span>Pago</span><span id="consignment-detail-paid">-</span></div>
+            <div class="summary-row" style="font-weight:700;border-top:1px solid var(--border);padding-top:6px;margin-top:6px;"><span>Saldo</span><span id="consignment-detail-balance">-</span></div>
+            <div class="summary-row"><span>Dias pendentes</span><span id="consignment-detail-days">-</span></div>
+            <div class="summary-row"><span>Vencimento</span><span id="consignment-detail-due">-</span></div>
+            <div class="summary-row"><span>Observações</span><span id="consignment-detail-notes">-</span></div>
+            <div class="summary-row"><span>Garçom</span><span id="consignment-detail-waiter">-</span></div>
+            <div class="summary-row"><span>Criado em</span><span id="consignment-detail-created">-</span></div>
+        </div>
+
+        <h4>Itens</h4>
+        <div id="consignment-detail-items" class="partial-payment-list"></div>
+
+        <h4>Pagamentos</h4>
+        <div id="consignment-detail-payments" class="partial-payment-list"></div>
+
+        <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;">
+            <button id="consignment-detail-pay-btn" onclick="openConsignmentPaymentModalFromDetail()" class="btn-primary-full" style="flex:1;min-width:140px;">Registrar Pagamento</button>
+            <button onclick="closeConsignmentDetailModal()" class="btn-secondary-full" style="flex:1;min-width:140px;">Fechar</button>
+        </div>
+    </div>
+</div>
+
+<div id="consignment-payment-modal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <h3>Registrar Pagamento</h3>
+        <div class="payment-summary" style="margin-bottom:14px;">
+            <div class="summary-row"><span>Saldo devedor</span><span id="consignment-payment-balance">-</span></div>
+        </div>
+        <input type="hidden" id="consignment-payment-id">
+        <label class="input-label">Valor</label>
+        <input type="number" id="consignment-payment-amount" class="input-field" step="0.01" min="0.01" placeholder="0,00">
+        <label class="input-label">Forma de Pagamento</label>
+        <select id="consignment-payment-method" class="select-field" onchange="onConsignmentPaymentMethodChange()">
+            <option value="dinheiro">Dinheiro</option>
+            <option value="pix">Pix</option>
+            <option value="cartao_credito">Cartão de Crédito</option>
+            <option value="cartao_debito">Cartão de Débito</option>
+        </select>
+        <div id="consignment-payment-card-section" style="display:none;">
+            <label class="input-label">Maquininha</label>
+            <select id="consignment-payment-card-machine" class="select-field">
+                <option value="1">Maquininha 1</option>
+                <option value="2">Maquininha 2</option>
+            </select>
+        </div>
+        <label class="input-label">Observações</label>
+        <textarea id="consignment-payment-notes" class="input-field" rows="2"></textarea>
+        <p id="consignment-payment-error" class="error-msg" style="display:none;"></p>
+        <div style="display:flex;gap:8px;margin-top:12px;">
+            <button onclick="submitConsignmentPayment()" class="btn-primary-full" style="flex:1;">Confirmar</button>
+            <button onclick="closeConsignmentPaymentModal()" class="btn-secondary-full" style="flex:1;">Cancelar</button>
+        </div>
+    </div>
+</div>
+
+<div id="consignment-edit-modal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <h3>Editar Consignado</h3>
+        <input type="hidden" id="consignment-edit-id">
+        <label class="input-label">Tipo</label>
+        <select id="consignment-edit-type" class="select-field">
+            <option value="pf">Pessoa Física</option>
+            <option value="pj">Pessoa Jurídica</option>
+        </select>
+        <label class="input-label">Vencimento</label>
+        <input type="date" id="consignment-edit-due" class="input-field">
+        <label class="input-label">Observações</label>
+        <textarea id="consignment-edit-notes" class="input-field" rows="2"></textarea>
+        <p id="consignment-edit-error" class="error-msg" style="display:none;"></p>
+        <div style="display:flex;gap:8px;margin-top:12px;">
+            <button onclick="submitConsignmentEdit()" class="btn-primary-full" style="flex:1;">Salvar</button>
+            <button onclick="closeConsignmentEditModal()" class="btn-secondary-full" style="flex:1;">Cancelar</button>
+        </div>
+    </div>
+</div>
+
+<div id="new-consignment-modal" class="modal" style="display:none;">
+    <div class="modal-content modal-large">
+        <h3>Novo Consignado</h3>
+        <div style="position:relative;margin-bottom:10px;">
+            <label class="input-label">Cliente *</label>
+            <input type="hidden" id="new-consignment-customer-id">
+            <div class="form-row" style="position:relative;">
+                <input type="text" id="new-consignment-customer-name" class="input-field" placeholder="Buscar cliente..." oninput="searchConsignmentCustomer(this.value)" autocomplete="off">
+                <button onclick="showAllConsignmentCustomerSuggestions()" class="btn-small" title="Ver todos"><i class="bi bi-list"></i></button>
+            </div>
+            <div id="new-consignment-customer-suggestions" class="autocomplete-list" style="display:none;"></div>
+            <p style="font-size:12px;color:var(--text-muted);margin-top:4px;">
+                <a href="/clientes">Cadastrar novo cliente</a>
+            </p>
+        </div>
+        <label class="input-label">Tipo</label>
+        <select id="new-consignment-type" class="select-field">
+            <option value="pf">Pessoa Física</option>
+            <option value="pj">Pessoa Jurídica</option>
+        </select>
+        <label class="input-label">Vencimento</label>
+        <input type="date" id="new-consignment-due" class="input-field">
+        <label class="input-label">Observações</label>
+        <textarea id="new-consignment-notes" class="input-field" rows="2"></textarea>
+
+        <h4 style="margin-top:14px;">Itens</h4>
+        <div id="new-consignment-items-list"></div>
+        <button type="button" onclick="openConsignmentItemSelection()" class="btn-secondary-full" style="margin-top:8px;">+ Adicionar Itens</button>
+        <div id="new-consignment-total" style="margin-top:12px;font-size:18px;font-weight:700;text-align:right;color:var(--accent);">R$ 0,00</div>
+
+        <p id="new-consignment-error" class="error-msg" style="display:none;"></p>
+        <div style="display:flex;gap:8px;margin-top:14px;">
+            <button onclick="submitNewConsignment()" class="btn-primary-full" style="flex:1;">Criar</button>
+            <button onclick="closeNewConsignmentModal()" class="btn-secondary-full" style="flex:1;">Cancelar</button>
+        </div>
+    </div>
+</div>
+
+<div id="consignment-item-selection-modal" class="modal" style="display:none;">
+    <div class="modal-content modal-large" id="consignment-item-selection-content"></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+document.body.classList.add('consignados-page');
+document.addEventListener('DOMContentLoaded', () => {
+    checkAuth((user) => {
+        if (!requirePageAccess(['gerente', 'caixa'])) return;
+        document.getElementById('bottom-nav').style.display = 'flex';
+        initConsignmentsPage();
+    });
+});
+
+function openConsignmentPaymentModalFromDetail() {
+    if (consignmentDetailCache) {
+        openConsignmentPaymentModal(consignmentDetailCache.id);
+    }
+}
+</script>
+{% endblock %}

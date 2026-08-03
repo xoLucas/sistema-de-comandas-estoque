@@ -60,6 +60,10 @@ def can_view_financial(user: User) -> bool:
     return user.role in ("gerente", "caixa")
 
 
+def can_manage_cash_register(user: User) -> bool:
+    return user.role in ("gerente", "caixa")
+
+
 def can_view_suppliers(user: User) -> bool:
     return user.role in ("gerente", "estoquista", "caixa")
 
@@ -78,6 +82,10 @@ def can_view_settings(user: User) -> bool:
 
 def can_view_employees(user: User) -> bool:
     return user.role == "gerente"
+
+
+def can_view_customers(user: User) -> bool:
+    return user.role in ("gerente", "caixa")
 
 
 async def get_current_user_optional(

@@ -6,7 +6,8 @@
 </header>
 
 <div class="filter-bar">
-    <input type="text" id="employee-search" oninput="loadEmployees()" placeholder="Buscar funcionário..." class="input-field">
+    <input type="text" id="employee-search" oninput="loadEmployees()" placeholder="Buscar funcionários..." class="input-field" autocomplete="off" autocorrect="off" spellcheck="false">
+    <span class="filter-label">Status:</span>
     <select id="employee-filter-active" onchange="loadEmployees()" class="select-field">
         <option value="">Todos</option>
         <option value="true" selected>Ativos</option>
@@ -104,6 +105,7 @@
 {% endblock %}
 {% block scripts %}
 <script>
+document.body.classList.add('funcionarios-page');
 document.addEventListener('DOMContentLoaded', () => {
     checkAuth((user) => {
         if (!requirePageAccess(['gerente'])) return;

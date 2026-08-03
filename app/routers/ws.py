@@ -5,7 +5,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.database import async_session
 from app.core.security import decode_access_token
-from app.core.websocket import manager
+from app.core.websocket import manager, notification_manager
 from app.models.table import Table
 from app.models.order import Order
 from app.models.order_round import OrderRound
@@ -41,18 +41,24 @@ async def _build_table_payload(table_id: int) -> dict | None:
                 selectinload(Order.items),
                 selectinload(Order.rounds).selectinload(OrderRound.items),
             )
+            .order_by(Order.id)
         )
-        open_order = order_result.scalars().first()
+        open_orders = order_result.scalars().all()
+
+        total = sum(float(o.total) for o in open_orders)
+        partial_payment = sum(float(o.partial_payment) for o in open_orders)
+        partial_service_charge = sum(float(o.partial_service_charge) for o in open_orders)
 
         return {
             "id": table.id,
             "number": table.number,
             "status": table.status,
             "is_balcao": table.is_balcao,
-            "total": float(open_order.total) if open_order else 0.0,
-            "partial_payment": float(open_order.partial_payment) if open_order else 0.0,
-            "partial_service_charge": float(open_order.partial_service_charge) if open_order else 0.0,
-            "has_open_order": open_order is not None,
+            "total": round(total, 2),
+            "partial_payment": round(partial_payment, 2),
+            "partial_service_charge": round(partial_service_charge, 2),
+            "has_open_order": len(open_orders) > 0,
+            "open_orders_count": len(open_orders),
             "label": "Balcão" if table.is_balcao else f"Mesa {table.number}",
         }
 
@@ -61,6 +67,10 @@ async def broadcast_table_update(table_id: int) -> None:
     payload = await _build_table_payload(table_id)
     if payload:
         await manager.broadcast({"type": "table_update", "data": payload})
+
+
+async def broadcast_notification(notification: dict) -> None:
+    await notification_manager.broadcast({"type": "notification", "data": notification})
 
 
 @router.websocket("/mesas")
@@ -84,3 +94,25 @@ async def tables_websocket(
         manager.disconnect(websocket)
     except Exception:
         manager.disconnect(websocket)
+
+
+@router.websocket("/notifications")
+async def notifications_websocket(
+    websocket: WebSocket,
+    token: str = Query(...),
+):
+    user = await _get_user_from_token(token)
+    if not user:
+        await websocket.close(code=1008)
+        return
+
+    await notification_manager.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            if data == "ping":
+                await websocket.send_text("pong")
+    except WebSocketDisconnect:
+        notification_manager.disconnect(websocket)
+    except Exception:
+        notification_manager.disconnect(websocket)

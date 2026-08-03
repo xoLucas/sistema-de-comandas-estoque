@@ -9,10 +9,24 @@ from app.models.user import User
 from app.routers.auth_deps import get_current_user, can_view_product_cost
 from app.services.promotion_service import get_active_promotion_map
 
+
+def _is_pack(product: Product) -> bool:
+    return product.pack_unit_product_id is not None
+
+
+def _pack_stock_for_product(product: Product) -> int:
+    if not _is_pack(product) or not product.pack_unit_product:
+        return 0
+    size = product.pack_size or 1
+    if size <= 0:
+        return 0
+    return product.pack_unit_product.stock // size
+
 router = APIRouter(prefix="/api", tags=["products"])
 
 
 def _serialize_product_list(p: Product, promo_map: dict, user: User) -> dict:
+    is_pack = _is_pack(p)
     discount_pct, promo_name = promo_map.get(p.id, (0, None))
     discounted_price = round(float(p.price) * (1 - discount_pct / 100), 2) if discount_pct else float(p.price)
     item = {
@@ -23,9 +37,13 @@ def _serialize_product_list(p: Product, promo_map: dict, user: User) -> dict:
         "price": float(p.price),
         "discounted_price": discounted_price,
         "active_promotion": promo_name,
-        "stock": p.stock,
+        "stock": _pack_stock_for_product(p) if is_pack else p.stock,
         "min_stock": p.min_stock,
         "active": p.active,
+        "is_pack": is_pack,
+        "pack_size": p.pack_size if is_pack else None,
+        "pack_unit_product_id": p.pack_unit_product_id,
+        "pack_unit_product_name": p.pack_unit_product.name if is_pack and p.pack_unit_product else None,
     }
     if can_view_product_cost(user):
         item["cost"] = float(p.cost)
@@ -39,7 +57,7 @@ async def list_products(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    query = select(Product)
+    query = select(Product).options(selectinload(Product.pack_unit_product))
     if active_only:
         query = query.where(Product.active == True)
     result = await db.execute(query.order_by(Product.name))

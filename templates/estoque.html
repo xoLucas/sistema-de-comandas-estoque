@@ -21,20 +21,28 @@
 </div>
 
 <div class="filter-bar">
+    <input type="text" id="filter-search" class="input-field" placeholder="Buscar produto..." oninput="loadStock()">
+    <span class="filter-label">Categoria:</span>
     <select id="filter-category" onchange="loadStock()" class="select-field">
         <option value="">Todas Categorias</option>
     </select>
+    <span class="filter-label">Status:</span>
     <select id="filter-status" onchange="loadStock()" class="select-field">
         <option value="">Todos Status</option>
         <option value="em_falta">Em Falta</option>
         <option value="em_risco">Em Risco</option>
         <option value="em_conformidade">Em Conformidade</option>
     </select>
+    <span class="filter-label">Ordenar:</span>
     <select id="sort-by" onchange="loadStock()" class="select-field">
         <option value="name">A-Z</option>
         <option value="stock">Qtd</option>
         <option value="pct">% do Mínimo</option>
     </select>
+    <label class="checkbox-row" style="align-items:center;gap:6px;font-size:13px;color:var(--text-muted);">
+        <input type="checkbox" id="filter-show-inactive" onchange="loadStock()">
+        <span>Mostrar inativos</span>
+    </label>
 </div>
 
 <div id="stock-items" class="stock-items">
@@ -44,15 +52,46 @@
 <div class="actions-stack">
     <button onclick="showProductModal()" class="btn-primary-full manager-only">Novo Produto</button>
     <button onclick="showBatchLoad()" class="btn-secondary-full manager-only">Adicionar Carregamento</button>
+    <button onclick="showCategoryModal()" class="btn-secondary-full manager-only">Gerenciar Categorias</button>
 </div>
 
 <div id="batch-modal" class="modal" style="display:none;">
-    <div class="modal-content">
+    <div class="modal-content modal-large">
         <h3>Carregamento de Estoque</h3>
-        <div id="batch-items"></div>
-        <button onclick="submitBatchLoad()" class="btn-primary-full">Confirmar Carregamento</button>
-        <button onclick="closeBatchLoad()" class="btn-secondary-full">Cancelar</button>
+        <div class="pedido-search-bar">
+            <input type="text" id="batch-search" class="input-field" placeholder="Buscar produto..." oninput="filterBatchSearch(this.value)">
+        </div>
+        <div class="category-filter" id="batch-category-filter"></div>
+        <div id="batch-items" class="pedido-product-list"></div>
+        <div style="display:flex;gap:8px;margin-top:12px;">
+            <button onclick="submitBatchLoad()" class="btn-primary-full" style="flex:1;">Confirmar Carregamento</button>
+            <button onclick="closeBatchLoad()" class="btn-secondary-full" style="flex:1;">Cancelar</button>
+        </div>
         <p id="batch-error" class="error-msg" style="display:none;"></p>
+    </div>
+</div>
+
+<div id="category-modal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <h3>Gerenciar Categorias</h3>
+        <div id="category-list" class="category-list"></div>
+        <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;">
+            <label class="input-label" id="category-form-label">Nova Categoria</label>
+            <div class="form-row" style="align-items:stretch;">
+                <input type="text" id="new-category-name" class="input-field" placeholder="Nome da categoria" style="flex:1;">
+                <select id="new-category-printer" class="select-field" style="width:auto;min-width:140px;">
+                    <option value="">Padrão (automático)</option>
+                    <option value="bar">Bar</option>
+                    <option value="cozinha">Cozinha</option>
+                </select>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:8px;">
+                <button onclick="submitNewCategory()" id="category-submit-btn" class="btn-primary-full" style="flex:1;">Adicionar Categoria</button>
+                <button onclick="cancelEditCategory()" id="category-cancel-btn" class="btn-secondary-full" style="flex:1;display:none;">Cancelar</button>
+            </div>
+        </div>
+        <button onclick="closeCategoryModal()" class="btn-secondary-full" style="margin-top:12px;">Fechar</button>
+        <p id="category-error" class="error-msg" style="display:none;"></p>
     </div>
 </div>
 
@@ -80,7 +119,40 @@
             </div>
 
             <label class="input-label">Categoria *</label>
-            <input type="text" id="product-category" class="input-field" placeholder="Ex: Bebidas, Carnes">
+            <div class="form-row" style="align-items:stretch;">
+                <select id="product-category" class="select-field" style="flex:1;">
+                    <option value="">Selecione uma categoria...</option>
+                </select>
+                <button type="button" onclick="showCategoryModal()" class="btn-small" title="Gerenciar categorias" style="margin-top:0;">+</button>
+            </div>
+
+            <div class="toggle-row" style="margin:12px 0;">
+                <span class="toggle-label" id="product-is-pack-label">Este produto é um engradado</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="product-is-pack" onchange="togglePackFields()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+
+            <div id="pack-fields" style="display:none;">
+                <label class="input-label">Produto Unitário Vinculado *</label>
+                <select id="product-pack-unit" class="select-field">
+                    <option value="">Selecione o item unitário</option>
+                </select>
+                <p style="font-size:11px;color:var(--text-muted);margin:-4px 0 10px;">Ex: Cerveja Lata (unidade)</p>
+
+                <label class="input-label">Quantidade por Engradado *</label>
+                <input type="number" id="product-pack-size" class="input-field" placeholder="Ex: 12" min="2">
+                <p style="font-size:11px;color:var(--text-muted);margin:-4px 0 10px;">Quantas unidades compõem 1 engradado.</p>
+            </div>
+
+            <label class="input-label">Impressora do Pedido</label>
+            <select id="product-printer" class="select-field">
+                <option value="">Automático (por categoria)</option>
+                <option value="cozinha">Cozinha</option>
+                <option value="bar">Bar</option>
+            </select>
+            <p style="font-size:11px;color:var(--text-muted);margin:-4px 0 10px;">Onde o pedido deste item será impresso automaticamente.</p>
 
             <div class="form-row">
                 <div class="form-col">
@@ -96,6 +168,7 @@
                     <input type="number" step="0.01" id="product-price" class="input-field" placeholder="0,00" onchange="calculateProductMargin()">
                 </div>
             </div>
+            <p style="font-size:11px;color:var(--text-muted);margin:-4px 0 10px;">Fórmula: Preço = Custo / (1 - Margem/100). A margem é calculada sobre o preço de venda.</p>
 
             <div class="form-row">
                 <div class="form-col">
@@ -153,6 +226,7 @@
 {% endblock %}
 {% block scripts %}
 <script>
+document.body.classList.add('estoque-page');
 document.addEventListener('DOMContentLoaded', () => {
     checkAuth((user) => {
         document.getElementById('bottom-nav').style.display = 'flex';

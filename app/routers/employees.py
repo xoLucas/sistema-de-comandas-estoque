@@ -18,11 +18,12 @@ from app.models.daily_payment import DailyPayment
 from app.models.expense import Expense
 from app.models.user import User
 from app.routers.auth_deps import get_current_user, require_role, can_view_employees
+from app.validators.pydantic_mixins import EmployeeValidationMixin
 
 router = APIRouter(prefix="/api", tags=["employees"])
 
 
-class EmployeeCreate(BaseModel):
+class EmployeeCreate(EmployeeValidationMixin, BaseModel):
     name: str
     age: int | None = None
     nickname: str | None = None
@@ -35,7 +36,7 @@ class EmployeeCreate(BaseModel):
     login_role: str | None = None
 
 
-class EmployeeUpdate(BaseModel):
+class EmployeeUpdate(EmployeeValidationMixin, BaseModel):
     name: str
     age: int | None = None
     nickname: str | None = None

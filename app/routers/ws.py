@@ -5,7 +5,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.database import async_session
 from app.core.security import decode_access_token
-from app.core.websocket import manager, notification_manager
+from app.core.websocket import manager, notification_manager, stock_manager
 from app.models.table import Table
 from app.models.order import Order
 from app.models.order_round import OrderRound
@@ -73,6 +73,19 @@ async def broadcast_notification(notification: dict) -> None:
     await notification_manager.broadcast({"type": "notification", "data": notification})
 
 
+async def broadcast_stock_update(product_id: int, stock: int, status: str) -> None:
+    """Broadcast a stock update for a single product to all connected clients."""
+    print(f"[STOCK WS] broadcast product_id={product_id} stock={stock} status={status} connections={len(stock_manager.active_connections)}")
+    await stock_manager.broadcast({
+        "type": "stock_update",
+        "data": {
+            "product_id": product_id,
+            "stock": stock,
+            "status": status,
+        },
+    })
+
+
 @router.websocket("/mesas")
 async def tables_websocket(
     websocket: WebSocket,
@@ -116,3 +129,25 @@ async def notifications_websocket(
         notification_manager.disconnect(websocket)
     except Exception:
         notification_manager.disconnect(websocket)
+
+
+@router.websocket("/estoque")
+async def stock_websocket(
+    websocket: WebSocket,
+    token: str = Query(...),
+):
+    user = await _get_user_from_token(token)
+    if not user:
+        await websocket.close(code=1008)
+        return
+
+    await stock_manager.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            if data == "ping":
+                await websocket.send_text("pong")
+    except WebSocketDisconnect:
+        stock_manager.disconnect(websocket)
+    except Exception:
+        stock_manager.disconnect(websocket)

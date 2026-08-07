@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Integer, Float, ForeignKey, DateTime, func
+from sqlalchemy import Integer, Float, ForeignKey, DateTime, Boolean, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -15,6 +15,7 @@ class OrderItem(Base):
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     unit_price: Mapped[float] = mapped_column(Float, nullable=False)
     unit_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
+    is_pending: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

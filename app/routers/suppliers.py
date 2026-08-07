@@ -9,18 +9,19 @@ from app.models.supplier import Supplier
 from app.models.product import Product
 from app.models.user import User
 from app.routers.auth_deps import get_current_user, can_view_suppliers
+from app.validators.pydantic_mixins import SupplierValidationMixin
 
 router = APIRouter(prefix="/api/fornecedores", tags=["fornecedores"])
 
 
-class SupplierCreate(BaseModel):
+class SupplierCreate(SupplierValidationMixin, BaseModel):
     name: str
     contact: str | None = None
     active: bool = True
     product_ids: list[int] = []
 
 
-class SupplierUpdate(BaseModel):
+class SupplierUpdate(SupplierValidationMixin, BaseModel):
     name: str | None = None
     contact: str | None = None
     active: bool | None = None

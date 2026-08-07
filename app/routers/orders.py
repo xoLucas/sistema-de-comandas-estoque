@@ -6,7 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
-from app.routers.ws import broadcast_table_update
+from app.routers.ws import broadcast_table_update, broadcast_stock_update
+from app.services.stock_service import is_pack
 from app.models.table import Table
 from app.models.category import Category
 from app.models.product import Product
@@ -21,6 +22,7 @@ from app.models.cash_register_session import CashRegisterSession
 from app.routers.auth_deps import get_current_user
 from app.services.promotion_service import get_discounted_price
 from app.services.settings_service import get_setting_as_float, get_setting
+from app.services.stock_service import is_pack, pack_stock_for_product, stock_status
 from app.services.printer_service import build_order_receipt, build_kitchen_ticket, build_bar_ticket, schedule_function_printer_send, get_printer_for_function
 from app.services.notification_service import notify_stock_alert, broadcast_stock_notification
 
@@ -39,6 +41,13 @@ async def _require_open_cash_register(db: AsyncSession) -> CashRegisterSession |
 
 async def _notify_stock_status(db: AsyncSession, product: Product) -> Notification | None:
     return await notify_stock_alert(db, product)
+
+
+def _build_stock_broadcast_info(product: Product) -> tuple[int, int, str]:
+    """Return (product_id, stock, status) for a product, handling packs correctly."""
+    if is_pack(product):
+        return product.id, pack_stock_for_product(product), stock_status(product)
+    return product.id, product.stock, stock_status(product)
 
 
 async def _resolve_printer(db: AsyncSession, product: Product) -> str | None:
@@ -263,6 +272,13 @@ class CreatePedidoRequest(BaseModel):
     items: list[PedidoItem]
 
 
+class PendingOrderItemRequest(BaseModel):
+    table_id: int
+    order_id: int | None = None
+    product_id: int
+    quantity: int = 1
+
+
 class PrintReceiptItem(BaseModel):
     product_name: str
     quantity: float
@@ -477,6 +493,7 @@ async def create_pedido(
     bar_items = []
     item_price_map = {}
     stock_notifications = []
+    stock_broadcast_infos = []
     for entry in req.items:
         result = await db.execute(select(Product).where(Product.id == entry.product_id))
         product = result.scalars().first()
@@ -496,6 +513,10 @@ async def create_pedido(
             )
         except ValueError as e:
             return {"error": str(e)}
+
+        stock_broadcast_infos.append(_build_stock_broadcast_info(product))
+        if is_pack(product):
+            stock_broadcast_infos.append(_build_stock_broadcast_info(stock_product))
 
         if notification:
             stock_notifications.append(notification)
@@ -521,7 +542,7 @@ async def create_pedido(
 
     total_result = await db.execute(
         select(func.coalesce(func.sum(OrderItem.unit_price * OrderItem.quantity), 0.0))
-        .where(OrderItem.order_id == order.id)
+        .where(OrderItem.order_id == order.id, OrderItem.is_pending == False)
     )
     order.total = float(total_result.scalar_one())
 
@@ -529,6 +550,9 @@ async def create_pedido(
 
     for notification in stock_notifications:
         await broadcast_stock_notification(notification.id)
+
+    for product_id, stock, status in stock_broadcast_infos:
+        await broadcast_stock_update(product_id, stock, status)
 
     table_label = "Balcão" if table.is_balcao else f"Mesa {table.number}"
 
@@ -601,9 +625,10 @@ async def add_order_item(
             break
 
     stock_notification = None
+    stock_broadcast_infos = []
     if req.quantity > 0:
         try:
-            _, stock_notification = await _check_and_consume_stock(
+            stock_product, stock_notification = await _check_and_consume_stock(
                 db,
                 product,
                 req.quantity,
@@ -611,6 +636,9 @@ async def add_order_item(
                 req.table_id,
                 f"Pedido mesa {table.number if table else req.table_id}",
             )
+            stock_broadcast_infos.append(_build_stock_broadcast_info(product))
+            if is_pack(product):
+                stock_broadcast_infos.append(_build_stock_broadcast_info(stock_product))
         except ValueError as e:
             return {"error": str(e)}
 
@@ -642,6 +670,9 @@ async def add_order_item(
         try:
             stock_product, unit_quantity = await _resolve_pack_stock(db, product, qty_change)
             stock_product.stock += unit_quantity
+            stock_broadcast_infos.append(_build_stock_broadcast_info(product))
+            if is_pack(product):
+                stock_broadcast_infos.append(_build_stock_broadcast_info(stock_product))
             db.add(StockHistory(
                 product_id=stock_product.id,
                 order_id=order.id,
@@ -657,7 +688,7 @@ async def add_order_item(
 
     total_result = await db.execute(
         select(func.coalesce(func.sum(OrderItem.unit_price * OrderItem.quantity), 0.0))
-        .where(OrderItem.order_id == order.id)
+        .where(OrderItem.order_id == order.id, OrderItem.is_pending == False)
     )
     total = float(total_result.scalar_one())
     order.total = total
@@ -667,6 +698,9 @@ async def add_order_item(
 
     if stock_notification:
         await broadcast_stock_notification(stock_notification.id)
+
+    for product_id, stock, status in stock_broadcast_infos:
+        await broadcast_stock_update(product_id, stock, status)
 
     table_label = "Balcão" if table and table.is_balcao else f"Mesa {table.number if table else req.table_id}"
 
@@ -879,6 +913,7 @@ async def cancel_order(
     table_result = await db.execute(select(Table).where(Table.id == order.table_id))
     table = table_result.scalars().first()
 
+    stock_broadcast_infos = []
     for item in order.items:
         product = item.product
         if not product:
@@ -886,6 +921,9 @@ async def cancel_order(
         try:
             stock_product, unit_quantity = await _resolve_pack_stock(db, product, item.quantity)
             stock_product.stock += unit_quantity
+            stock_broadcast_infos.append(_build_stock_broadcast_info(product))
+            if is_pack(product):
+                stock_broadcast_infos.append(_build_stock_broadcast_info(stock_product))
             db.add(StockHistory(
                 product_id=stock_product.id,
                 order_id=order.id,
@@ -906,6 +944,9 @@ async def cancel_order(
 
     await db.commit()
     await broadcast_table_update(order.table_id)
+
+    for product_id, stock, status in stock_broadcast_infos:
+        await broadcast_stock_update(product_id, stock, status)
 
     return {"order_id": order.id, "status": "cancelada", "table_id": order.table_id}
 
@@ -1094,3 +1135,294 @@ async def print_order_receipt(
         return {"error": "Comanda não encontrada"}
 
     return await _print_order_receipt(db, order, user, req)
+
+
+# ====== PENDING ORDER (RESERVA TEMPORÁRIA) ======
+class PendingOrderActionRequest(BaseModel):
+    table_id: int
+    order_id: int | None = None
+
+
+@router.post("/pedido-pendente/item")
+async def add_pending_order_item(
+    req: PendingOrderItemRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Add/remove a pending item. Consumes or returns stock immediately but does not print."""
+    order = await _get_open_order_for_table(
+        db, req.table_id, req.order_id, options=[selectinload(Order.items)]
+    )
+    if not order:
+        return {"error": "Nenhuma comanda aberta para esta mesa"}
+
+    if not await _require_open_cash_register(db):
+        return {"error": "caixa_fechado", "detail": "O caixa está fechado. Abra o caixa para lançar pedidos."}
+
+    result = await db.execute(select(Product).where(Product.id == req.product_id))
+    product = result.scalars().first()
+    if not product:
+        return {"error": "Produto não encontrado"}
+
+    table_result = await db.execute(select(Table).where(Table.id == req.table_id))
+    table = table_result.scalars().first()
+
+    unit_price = await _get_promotional_price(product, db)
+
+    existing_item = None
+    for item in order.items:
+        if item.product_id == req.product_id and item.is_pending:
+            existing_item = item
+            break
+
+    stock_broadcast_infos = []
+    stock_notification = None
+
+    if req.quantity > 0:
+        try:
+            stock_product, stock_notification = await _check_and_consume_stock(
+                db,
+                product,
+                req.quantity,
+                order.id,
+                req.table_id,
+                f"Reserva pedido mesa {table.number if table else req.table_id}",
+            )
+        except ValueError as e:
+            return {"error": str(e)}
+
+        stock_broadcast_infos.append(_build_stock_broadcast_info(product))
+        if is_pack(product):
+            stock_broadcast_infos.append(_build_stock_broadcast_info(stock_product))
+
+        if existing_item:
+            existing_item.quantity += req.quantity
+            existing_item.unit_price = unit_price
+            if existing_item.unit_cost is None:
+                existing_item.unit_cost = float(product.cost) if product.cost is not None else 0.0
+        else:
+            order_item = OrderItem(
+                order_id=order.id,
+                product_id=product.id,
+                quantity=req.quantity,
+                unit_price=unit_price,
+                unit_cost=float(product.cost) if product.cost is not None else 0.0,
+                is_pending=True,
+            )
+            db.add(order_item)
+    else:
+        qty_change = abs(req.quantity)
+        if not existing_item:
+            return {"error": "Item não encontrado no pedido pendente"}
+
+        if existing_item.quantity <= qty_change:
+            await db.delete(existing_item)
+        else:
+            existing_item.quantity -= qty_change
+
+        try:
+            stock_product, unit_quantity = await _resolve_pack_stock(db, product, qty_change)
+            stock_product.stock += unit_quantity
+            stock_broadcast_infos.append(_build_stock_broadcast_info(product))
+            if is_pack(product):
+                stock_broadcast_infos.append(_build_stock_broadcast_info(stock_product))
+            db.add(StockHistory(
+                product_id=stock_product.id,
+                order_id=order.id,
+                table_id=req.table_id,
+                type="entrada",
+                quantity=unit_quantity,
+                note=f"Cancelamento reserva mesa {table.number if table else req.table_id}",
+            ))
+        except ValueError as e:
+            return {"error": str(e)}
+
+    await db.commit()
+
+    if stock_notification:
+        await broadcast_stock_notification(stock_notification.id)
+
+    for product_id, stock, status in stock_broadcast_infos:
+        await broadcast_stock_update(product_id, stock, status)
+
+    return {
+        "product_id": product.id,
+        "product_name": product.name,
+        "quantity": req.quantity,
+        "stock_remaining": _build_stock_broadcast_info(product)[1],
+    }
+
+
+@router.post("/pedido-pendente/confirmar")
+async def confirm_pending_order(
+    req: PendingOrderActionRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Confirm all pending items: attach to a round, update order total and print."""
+    order = await _get_open_order_for_table(
+        db,
+        req.table_id,
+        req.order_id,
+        options=[
+            selectinload(Order.items).selectinload(OrderItem.product),
+            selectinload(Order.rounds),
+            selectinload(Order.table),
+        ],
+    )
+    if not order:
+        return {"error": "Nenhuma comanda aberta para esta mesa"}
+
+    pending_items = [item for item in order.items if item.is_pending]
+    if not pending_items:
+        return {"error": "Nenhum item pendente para confirmar"}
+
+    round_number = len(order.rounds) + 1
+    rnd = OrderRound(order_id=order.id, round_number=round_number)
+    db.add(rnd)
+    await db.flush()
+
+    prep_items = []
+    bar_items = []
+    confirmed_items = []
+
+    for item in pending_items:
+        item.is_pending = False
+        item.order_round_id = rnd.id
+        confirmed_items.append({
+            "product_id": item.product_id,
+            "product_name": item.product.name,
+            "quantity": item.quantity,
+            "unit_price": float(item.unit_price),
+        })
+
+        printer = await _resolve_printer(db, item.product)
+        if printer == "cozinha":
+            prep_items.append({"name": item.product.name, "quantity": item.quantity})
+        elif printer == "bar":
+            bar_items.append({"name": item.product.name, "quantity": item.quantity})
+
+    total_result = await db.execute(
+        select(func.coalesce(func.sum(OrderItem.unit_price * OrderItem.quantity), 0.0))
+        .where(OrderItem.order_id == order.id, OrderItem.is_pending == False)
+    )
+    order.total = float(total_result.scalar_one())
+
+    await db.commit()
+    await broadcast_table_update(req.table_id)
+
+    table_label = "Balcão" if order.table and order.table.is_balcao else f"Mesa {order.table.number if order.table else req.table_id}"
+
+    if not order.table or not order.table.is_balcao:
+        if prep_items:
+            await _send_kitchen_ticket(
+                order.table.number if order.table else req.table_id,
+                round_number,
+                prep_items,
+                user.name,
+                order.customer_name,
+                order.id,
+                req.table_id,
+                table_label,
+            )
+        if bar_items:
+            await _send_bar_ticket(
+                order.table.number if order.table else req.table_id,
+                round_number,
+                bar_items,
+                user.name,
+                order.customer_name,
+                order.id,
+                req.table_id,
+                table_label,
+            )
+
+    return {
+        "round_number": round_number,
+        "order_id": order.id,
+        "total": order.total,
+        "items": confirmed_items,
+    }
+
+
+@router.post("/pedido-pendente/cancelar")
+async def cancel_pending_order(
+    req: PendingOrderActionRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Cancel all pending items and return stock."""
+    order = await _get_open_order_for_table(
+        db,
+        req.table_id,
+        req.order_id,
+        options=[selectinload(Order.items).selectinload(OrderItem.product), selectinload(Order.table)],
+    )
+    if not order:
+        return {"error": "Nenhuma comanda aberta para esta mesa"}
+
+    pending_items = [item for item in order.items if item.is_pending]
+    if not pending_items:
+        return {"success": True, "message": "Nenhum item pendente para cancelar"}
+
+    stock_broadcast_infos = []
+    for item in pending_items:
+        product = item.product
+        try:
+            stock_product, unit_quantity = await _resolve_pack_stock(db, product, item.quantity)
+        except ValueError:
+            stock_product = product
+            unit_quantity = item.quantity
+
+        stock_product.stock += unit_quantity
+        stock_broadcast_infos.append(_build_stock_broadcast_info(product))
+        if is_pack(product):
+            stock_broadcast_infos.append(_build_stock_broadcast_info(stock_product))
+        db.add(StockHistory(
+            product_id=stock_product.id,
+            order_id=order.id,
+            table_id=req.table_id,
+            type="entrada",
+            quantity=unit_quantity,
+            note=f"Cancelamento pedido pendente mesa {order.table.number if order.table else req.table_id}",
+        ))
+        await db.delete(item)
+
+    await db.commit()
+
+    for product_id, stock, status in stock_broadcast_infos:
+        await broadcast_stock_update(product_id, stock, status)
+
+    return {"success": True, "message": "Pedido pendente cancelado e estoque devolvido"}
+
+
+@router.get("/comanda/{order_id}/pendentes")
+async def get_pending_order_items(
+    order_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Return pending items for an open order."""
+    result = await db.execute(
+        select(Order)
+        .where(Order.id == order_id, Order.status == "aberta")
+        .options(selectinload(Order.items).selectinload(OrderItem.product))
+    )
+    order = result.scalars().first()
+    if not order:
+        return {"error": "Comanda não encontrada"}
+
+    pending_items = [item for item in order.items if item.is_pending]
+    return {
+        "items": [
+            {
+                "id": item.id,
+                "product_id": item.product_id,
+                "product_name": item.product.name,
+                "quantity": item.quantity,
+                "unit_price": float(item.unit_price),
+                "category": item.product.category,
+            }
+            for item in pending_items
+        ]
+    }

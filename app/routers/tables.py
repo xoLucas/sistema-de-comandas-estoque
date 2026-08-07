@@ -12,6 +12,7 @@ from app.models.order_round import OrderRound
 from app.models.user import User
 from app.core.timezone import as_local
 from app.routers.auth_deps import get_current_user, require_role
+from app.services.stock_service import is_pack, pack_stock_for_product, stock_status
 
 router = APIRouter(prefix="/api", tags=["tables"])
 
@@ -93,48 +94,39 @@ async def get_table_detail(
     order_result = await db.execute(order_query)
     open_orders = order_result.scalars().all()
 
+    def _item_payload(item: OrderItem) -> dict:
+        product = item.product
+        product_stock = pack_stock_for_product(product) if is_pack(product) else product.stock
+        return {
+            "id": item.id,
+            "product_id": item.product_id,
+            "product_name": product.name,
+            "quantity": item.quantity,
+            "unit_price": float(item.unit_price),
+            "subtotal": float(item.unit_price * item.quantity),
+            "category": product.category,
+            "product_stock": product_stock,
+            "product_status": stock_status(product),
+        }
+
     def _build_order_payload(order: Order) -> dict:
         pedidos = []
         for rnd in sorted(order.rounds, key=lambda r: r.round_number):
-            round_items = []
-            for item in rnd.items:
-                round_items.append(
+            round_items = [_item_payload(item) for item in rnd.items if not item.is_pending]
+            if round_items:
+                pedidos.append(
                     {
-                        "id": item.id,
-                        "product_id": item.product_id,
-                        "product_name": item.product.name,
-                        "quantity": item.quantity,
-                        "unit_price": float(item.unit_price),
-                        "subtotal": float(item.unit_price * item.quantity),
-                        "category": item.product.category,
+                        "id": rnd.id,
+                        "round_number": rnd.round_number,
+                        "created_at": as_local(rnd.created_at).strftime("%H:%M") if rnd.created_at else "",
+                        "items": round_items,
                     }
                 )
-
-            pedidos.append(
-                {
-                    "id": rnd.id,
-                    "round_number": rnd.round_number,
-                    "created_at": as_local(rnd.created_at).strftime("%H:%M") if rnd.created_at else "",
-                    "items": round_items,
-                }
-            )
 
         # Items added directly without a round (e.g., Balcão quick add)
-        direct_items = [item for item in order.items if item.order_round_id is None]
+        direct_items = [item for item in order.items if item.order_round_id is None and not item.is_pending]
         if direct_items:
-            round_items = []
-            for item in direct_items:
-                round_items.append(
-                    {
-                        "id": item.id,
-                        "product_id": item.product_id,
-                        "product_name": item.product.name,
-                        "quantity": item.quantity,
-                        "unit_price": float(item.unit_price),
-                        "subtotal": float(item.unit_price * item.quantity),
-                        "category": item.product.category,
-                    }
-                )
+            round_items = [_item_payload(item) for item in direct_items]
             pedidos.append(
                 {
                     "id": None,

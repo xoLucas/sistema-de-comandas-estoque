@@ -7,6 +7,7 @@ from app.core.database import get_db
 from app.models.setting import Setting
 from app.models.user import User
 from app.routers.auth_deps import get_current_user, require_role, can_view_settings
+from app.validators.pydantic_mixins import validate_setting_value
 from app.services.printer_service import (
     EscPosBuilder,
     _load_printer_config,
@@ -72,7 +73,11 @@ async def update_setting(
     if not setting:
         return {"error": "Configuração não encontrada"}
 
-    setting.value = payload.value
+    try:
+        setting.value = validate_setting_value(key, payload.value)
+    except ValueError as exc:
+        return {"error": str(exc)}
+
     await db.commit()
     await db.refresh(setting)
     return {

@@ -27,8 +27,16 @@ from app.routers.orders import (
     _resolve_pack_stock,
     _get_open_order_for_table,
 )
-from app.routers.ws import broadcast_table_update
+from app.routers.ws import broadcast_table_update, broadcast_stock_update
 from app.services.notification_service import broadcast_stock_notification
+from app.services.stock_service import is_pack, pack_stock_for_product, stock_status
+
+
+def _build_stock_broadcast_info(product):
+    """Return (product_id, stock, status) for a product, handling packs correctly."""
+    if is_pack(product):
+        return product.id, pack_stock_for_product(product), stock_status(product)
+    return product.id, product.stock, stock_status(product)
 
 router = APIRouter(prefix="/api", tags=["consignments"])
 
@@ -80,6 +88,7 @@ async def _consume_stock_for_items(
 ) -> list[dict]:
     created_items = []
     stock_notifications = []
+    products_to_broadcast = set()
     for entry in items:
         product = await db.execute(select(Product).where(Product.id == entry.product_id))
         product = product.scalars().first()
@@ -99,6 +108,10 @@ async def _consume_stock_for_items(
         except ValueError as e:
             raise ValueError(str(e))
 
+        products_to_broadcast.add(stock_product)
+        if is_pack(product):
+            products_to_broadcast.add(product)
+
         if notification:
             stock_notifications.append(notification)
 
@@ -117,10 +130,10 @@ async def _consume_stock_for_items(
             quantity=entry.quantity,
             unit_price=unit_price,
         ))
-    return created_items, stock_notifications
+    return created_items, stock_notifications, products_to_broadcast
 
 
-async def _return_stock_for_items(db: AsyncSession, consignment_id: int) -> None:
+async def _return_stock_for_items(db: AsyncSession, consignment_id: int) -> set:
     result = await db.execute(
         select(ConsignmentOrderItem)
         .where(ConsignmentOrderItem.consignment_order_id == consignment_id)
@@ -128,6 +141,7 @@ async def _return_stock_for_items(db: AsyncSession, consignment_id: int) -> None
     )
     items = result.scalars().all()
 
+    products_to_broadcast = set()
     for item in items:
         product = item.product
         if not product:
@@ -139,6 +153,9 @@ async def _return_stock_for_items(db: AsyncSession, consignment_id: int) -> None
             unit_quantity = item.quantity
 
         stock_product.stock += unit_quantity
+        products_to_broadcast.add(stock_product)
+        if is_pack(product):
+            products_to_broadcast.add(product)
         db.add(StockHistory(
             product_id=stock_product.id,
             consignment_order_id=consignment_id,
@@ -146,6 +163,7 @@ async def _return_stock_for_items(db: AsyncSession, consignment_id: int) -> None
             quantity=unit_quantity,
             note=f"Cancelamento consignado {consignment_id}",
         ))
+    return products_to_broadcast
 
 
 async def _recalculate_totals(db: AsyncSession, consignment_id: int) -> None:
@@ -275,7 +293,7 @@ async def create_consignment(
     await db.refresh(consignment)
 
     try:
-        items_out, stock_notifications = await _consume_stock_for_items(
+        items_out, stock_notifications, products_to_broadcast = await _consume_stock_for_items(
             db,
             req.items,
             consignment.id,
@@ -293,6 +311,9 @@ async def create_consignment(
 
     for notification in stock_notifications:
         await broadcast_stock_notification(notification.id)
+
+    for p in products_to_broadcast:
+        await broadcast_stock_update(*_build_stock_broadcast_info(p))
 
     return {
         "id": consignment.id,
@@ -500,13 +521,17 @@ async def cancel_consignment(
     if consignment.amount_paid > 0:
         return {"error": "Não é possível cancelar consignado com pagamentos registrados"}
 
-    await _return_stock_for_items(db, consignment.id)
+    products_to_broadcast = await _return_stock_for_items(db, consignment.id)
 
     consignment.status = "cancelado"
     consignment.closed_at = datetime.now(timezone.utc)
     consignment.balance = 0.0
 
     await db.commit()
+
+    for p in products_to_broadcast:
+        await broadcast_stock_update(*_build_stock_broadcast_info(p))
+
     return {"id": consignment.id, "status": consignment.status}
 
 
@@ -544,8 +569,9 @@ async def convert_order_to_consignment(
     if not customer.active:
         return {"error": "Cliente inativo"}
 
-    if not order.items:
-        return {"error": "Comanda não possui itens"}
+    confirmed_items = [item for item in order.items if not item.is_pending]
+    if not confirmed_items:
+        return {"error": "Comanda não possui itens confirmados"}
 
     consignment = ConsignmentOrder(
         customer_id=customer.id,
@@ -562,7 +588,7 @@ async def convert_order_to_consignment(
     await db.flush()
     await db.refresh(consignment)
 
-    for item in order.items:
+    for item in confirmed_items:
         db.add(ConsignmentOrderItem(
             consignment_order_id=consignment.id,
             product_id=item.product_id,
@@ -571,6 +597,32 @@ async def convert_order_to_consignment(
         ))
 
     await _recalculate_totals(db, consignment.id)
+
+    # Return stock for any pending items and remove them before finalizing the order
+    pending_items = [item for item in order.items if item.is_pending]
+    stock_broadcast_infos = []
+    for item in pending_items:
+        product = item.product
+        if not product:
+            continue
+        try:
+            stock_product, unit_quantity = await _resolve_pack_stock(db, product, item.quantity)
+        except ValueError:
+            stock_product = product
+            unit_quantity = item.quantity
+        stock_product.stock += unit_quantity
+        stock_broadcast_infos.append(_build_stock_broadcast_info(product))
+        if is_pack(product):
+            stock_broadcast_infos.append(_build_stock_broadcast_info(stock_product))
+        db.add(StockHistory(
+            product_id=stock_product.id,
+            order_id=order.id,
+            table_id=order.table_id,
+            type="entrada",
+            quantity=unit_quantity,
+            note=f"Cancelamento itens pendentes na conversão para consignado mesa {order.table.number if order.table else order.table_id}",
+        ))
+        await db.delete(item)
 
     order.status = "finalizada"
     order.closed_at = datetime.now(timezone.utc)
@@ -586,6 +638,9 @@ async def convert_order_to_consignment(
             order.table.status = "vazia"
 
     await db.commit()
+
+    for product_id, stock, status in stock_broadcast_infos:
+        await broadcast_stock_update(product_id, stock, status)
 
     if order.table_id:
         await broadcast_table_update(order.table_id)

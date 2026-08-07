@@ -491,6 +491,10 @@ async def dashboard_vendas(
 @router.get("/estoque")
 async def dashboard_estoque(
     format: str = Query("json"),
+    table_id: int | None = Query(None),
+    product_id: int | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -527,12 +531,23 @@ async def dashboard_estoque(
             out_items.append(item)
 
     # Últimas movimentações
-    movements_result = await db.execute(
+    movements_query = (
         select(StockHistory, Product)
         .join(Product, StockHistory.product_id == Product.id)
         .order_by(StockHistory.created_at.desc())
-        .limit(20)
     )
+    if table_id is not None:
+        movements_query = movements_query.where(StockHistory.table_id == table_id)
+    if product_id is not None:
+        movements_query = movements_query.where(StockHistory.product_id == product_id)
+
+    total_movements_result = await db.execute(
+        select(func.count(StockHistory.id)).select_from(movements_query.subquery())
+    )
+    total_movements = total_movements_result.scalar_one()
+
+    offset = (page - 1) * page_size
+    movements_result = await db.execute(movements_query.offset(offset).limit(page_size))
     recent_movements = []
     for history, product in movements_result.all():
         recent_movements.append({
@@ -567,6 +582,12 @@ async def dashboard_estoque(
         "risk_items": sorted(risk_items, key=lambda x: x["stock"])[:20],
         "out_items": sorted(out_items, key=lambda x: x["stock"])[:20],
         "recent_movements": recent_movements,
+        "movements_pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total": total_movements,
+            "total_pages": max(1, (total_movements + page_size - 1) // page_size),
+        },
     }
 
 

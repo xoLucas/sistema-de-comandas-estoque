@@ -26,3 +26,4 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 notification_manager = ConnectionManager()
+stock_manager = ConnectionManager()

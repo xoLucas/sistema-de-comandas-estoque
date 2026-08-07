@@ -2,9 +2,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from app.core.seed import run_seed
 from app.core.scheduler import start_scheduler, shutdown_scheduler
@@ -40,6 +41,21 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Lads Beer - Sistema de Comandas", lifespan=lifespan)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Return validation errors using the project's standard error shape."""
+    messages = []
+    for error in exc.errors():
+        loc = " -> ".join(str(item) for item in error.get("loc", []))
+        msg = error.get("msg", "Erro de validação")
+        messages.append(f"{loc}: {msg}".lstrip(" -> "))
+    return JSONResponse(
+        status_code=422,
+        content={"error": messages[0] if messages else "Dados inválidos"},
+    )
+
 
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 

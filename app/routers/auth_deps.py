@@ -85,7 +85,7 @@ def can_view_employees(user: User) -> bool:
 
 
 def can_view_customers(user: User) -> bool:
-    return user.role in ("gerente", "caixa")
+    return user.role in ("gerente", "caixa", "garcom")
 
 
 async def get_current_user_optional(

@@ -11,28 +11,29 @@ from app.models.order import Order
 from app.models.user import User
 from app.core.timezone import as_local
 from app.routers.auth_deps import get_current_user, require_role
+from app.validators.pydantic_mixins import CustomerValidationMixin
 
 router = APIRouter(prefix="/api", tags=["customers"])
 
 
-class CustomerCreate(BaseModel):
+class CustomerCreate(CustomerValidationMixin, BaseModel):
     name: str
+    customer_type: str = "pf"
     phone: str | None = None
     email: str | None = None
     document: str | None = None
     birth_date: str | None = None
-    customer_type: str = "pf"
     notes: str | None = None
     active: bool = True
 
 
-class CustomerUpdate(BaseModel):
+class CustomerUpdate(CustomerValidationMixin, BaseModel):
     name: str
+    customer_type: str = "pf"
     phone: str | None = None
     email: str | None = None
     document: str | None = None
     birth_date: str | None = None
-    customer_type: str = "pf"
     notes: str | None = None
     active: bool = True
 
@@ -81,7 +82,7 @@ async def get_customer(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role not in ("gerente", "caixa"):
+    if user.role not in ("gerente", "caixa", "garcom"):
         return {"error": "Acesso restrito"}
 
     result = await db.execute(
@@ -109,7 +110,7 @@ async def get_customer(
 async def create_customer(
     req: CustomerCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_role("gerente", "caixa")),
+    user: User = Depends(require_role("gerente", "caixa", "garcom")),
 ):
     if not req.name:
         return {"error": "Nome é obrigatório"}
@@ -215,7 +216,7 @@ async def customer_summary(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role not in ("gerente", "caixa"):
+    if user.role not in ("gerente", "caixa", "garcom"):
         return {"error": "Acesso restrito"}
 
     result = await db.execute(

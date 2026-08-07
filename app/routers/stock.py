@@ -13,9 +13,17 @@ from app.models.notification import Notification
 from app.models.supplier import Supplier
 from app.models.user import User
 from app.routers.auth_deps import get_current_user, can_manage_stock, can_view_product_cost
+from app.routers.ws import broadcast_stock_update
 from app.services.pricing_service import calculate_selling_price
 from app.services.stock_service import is_pack, pack_stock_for_product, stock_status
 from app.services.notification_service import notify_stock_alert, broadcast_stock_notification
+
+
+def _build_stock_broadcast_info(product: Product) -> tuple[int, int, str]:
+    """Return (product_id, stock, status) for a product, handling packs correctly."""
+    if is_pack(product):
+        return product.id, pack_stock_for_product(product), stock_status(product)
+    return product.id, product.stock, stock_status(product)
 
 router = APIRouter(prefix="/api/estoque", tags=["estoque"])
 
@@ -347,10 +355,13 @@ async def create_product(
         return {"error": "Código do produto já cadastrado"}
 
     if req.stock > 0:
-        _, _, notification = await _apply_pack_stock_change(product, req.stock, "entrada", "Estoque inicial", db)
+        changed_product, _, notification = await _apply_pack_stock_change(product, req.stock, "entrada", "Estoque inicial", db)
         await db.commit()
         if notification:
             await broadcast_stock_notification(notification.id)
+        await broadcast_stock_update(*_build_stock_broadcast_info(changed_product))
+        if is_pack(product):
+            await broadcast_stock_update(*_build_stock_broadcast_info(product))
 
     result = await db.execute(
         select(Product).where(Product.id == product.id).options(selectinload(Product.suppliers))
@@ -416,17 +427,22 @@ async def update_product(
             return {"error": "Engradado deve conter pelo menos 2 unidades"}
         product.pack_size = req.pack_size
 
+    stock_changed = False
     if req.stock is not None and req.stock != product.stock:
         if is_pack(product):
             return {"error": "Não é permitido alterar o estoque de um engradado diretamente. Altere o estoque do produto unitário vinculado."}
         product.stock = req.stock
         await _notify_stock_status(product)
+        stock_changed = True
 
     try:
         await db.commit()
     except IntegrityError:
         await db.rollback()
         return {"error": "Código do produto já cadastrado"}
+
+    if stock_changed:
+        await broadcast_stock_update(*_build_stock_broadcast_info(product))
 
     result = await db.execute(
         select(Product).where(Product.id == product.id).options(selectinload(Product.suppliers))
@@ -465,6 +481,9 @@ async def add_stock_movement(
         await db.refresh(changed_product)
         if notification:
             await broadcast_stock_notification(notification.id)
+        await broadcast_stock_update(*_build_stock_broadcast_info(changed_product))
+        if is_pack(product):
+            await broadcast_stock_update(*_build_stock_broadcast_info(product))
     except ValueError as e:
         await db.rollback()
         return {"error": str(e)}
@@ -534,6 +553,7 @@ async def add_stock_batch(
 
     updated = []
     stock_notifications = []
+    products_to_broadcast = set()
     for entry in req.items:
         result = await db.execute(
             select(Product).where(Product.id == entry.product_id).options(selectinload(Product.pack_unit_product))
@@ -545,6 +565,9 @@ async def add_stock_batch(
             changed_product, _, notification = await _apply_pack_stock_change(
                 product, entry.quantity, "entrada", "Carregamento em lote", db
             )
+            products_to_broadcast.add(changed_product)
+            if is_pack(product):
+                products_to_broadcast.add(product)
             if notification:
                 stock_notifications.append(notification)
             updated.append(
@@ -563,6 +586,9 @@ async def add_stock_batch(
 
     for notification in stock_notifications:
         await broadcast_stock_notification(notification.id)
+
+    for p in products_to_broadcast:
+        await broadcast_stock_update(*_build_stock_broadcast_info(p))
 
     return {"message": "Carregamento realizado com sucesso", "items": updated}
 
@@ -589,6 +615,8 @@ async def update_min_stock(
 
     if notification:
         await broadcast_stock_notification(notification.id)
+
+    await broadcast_stock_update(*_build_stock_broadcast_info(product))
 
     return {
         "id": product.id,

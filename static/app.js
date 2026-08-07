@@ -6513,10 +6513,10 @@ function initDashboards() {
     }
     populateDashboardYearSelect();
     const today = toLocalDateString(new Date());
-    const start = dashboardCurrentTab === 'geral' ? today : toLocalDateString(new Date(Date.now() - 6 * 24 * 60 * 60 * 1000));
+    const start = toLocalDateString(new Date(Date.now() - 6 * 24 * 60 * 60 * 1000));
     document.getElementById('dashboard-start-date').value = start;
     document.getElementById('dashboard-end-date').value = today;
-    setActivePeriodChip(dashboardCurrentTab === 'geral' ? 'today' : '7d');
+    setActivePeriodChip('7d');
     loadDashboardData(dashboardCurrentTab);
 }
 
@@ -6527,10 +6527,10 @@ function switchDashboardTab(tab) {
     if (activeBtn) activeBtn.classList.add('active');
 
     const today = toLocalDateString(new Date());
-    const start = tab === 'geral' ? today : toLocalDateString(new Date(Date.now() - 6 * 24 * 60 * 60 * 1000));
+    const start = toLocalDateString(new Date(Date.now() - 6 * 24 * 60 * 60 * 1000));
     document.getElementById('dashboard-start-date').value = start;
     document.getElementById('dashboard-end-date').value = today;
-    setActivePeriodChip(tab === 'geral' ? 'today' : '7d');
+    setActivePeriodChip('7d');
 
     loadDashboardData(tab);
 }

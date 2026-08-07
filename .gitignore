@@ -31,3 +31,10 @@ AGENTS.md
 01_ESCOPO_PROJETO.md
 02_SPRINTS_PROJETO.md
 requirements-dev.txt
+
+# Dev artifacts (manuals, screenshots, notes, spreadsheets)
+*.pdf
+printsbobas/
+bugs
+novos_requisitos_04082026
+pdv-lads.xlsx

@@ -612,6 +612,12 @@ header .subtitle {
     color: var(--text-muted);
 }
 
+.pedido-item .item-stock {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
 .pedido-item .item-actions {
     display: flex;
     align-items: center;

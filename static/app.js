@@ -112,6 +112,47 @@ function toLocalDateTimeString(date) {
     return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 }
 
+// ====== INPUT MASKS / VALIDATION HELPERS ======
+function cleanNumbersInput(value) {
+    return (value || '').replace(/\D/g, '');
+}
+
+function maskPhone(value) {
+    const digits = cleanNumbersInput(value);
+    if (digits.length > 11) return value;
+    if (digits.length <= 10) {
+        return digits.replace(/(\d{2})(\d{4})(\d{0,4})/, '($1) $2-$3').replace(/[-\s]$/, '');
+    }
+    return digits.replace(/(\d{2})(\d{5})(\d{0,4})/, '($1) $2-$3').replace(/[-\s]$/, '');
+}
+
+function maskCpfCnpj(value) {
+    const digits = cleanNumbersInput(value);
+    if (digits.length > 14) return value;
+    if (digits.length <= 11) {
+        return digits.replace(/(\d{3})(\d{3})(\d{3})(\d{0,2})/, '$1.$2.$3-$4').replace(/[.-]$/, '');
+    }
+    return digits.replace(/(\d{2})(\d{3})(\d{3})(\d{4})(\d{0,2})/, '$1.$2.$3/$4-$5').replace(/[./-]$/, '');
+}
+
+function maskContact(value) {
+    const text = (value || '').trim();
+    if (text.includes('@')) return text;
+    return maskPhone(text);
+}
+
+function isValidEmail(value) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((value || '').trim());
+}
+
+function validateContactInput(value) {
+    const text = (value || '').trim();
+    if (!text) return true;
+    if (text.includes('@')) return isValidEmail(text);
+    const digits = cleanNumbersInput(text);
+    return digits.length === 10 || digits.length === 11;
+}
+
 // ====== AUTH ======
 let currentUser = null;
 
@@ -152,7 +193,10 @@ function canViewPromotions() { return hasRole('gerente', 'caixa', 'estoquista', 
 function canManagePromotions() { return hasRole('gerente', 'caixa', 'estoquista'); }
 function canViewSettings() { return hasRole('gerente'); }
 function canViewEmployees() { return hasRole('gerente'); }
-function canViewCustomers() { return hasRole('gerente', 'caixa'); }
+function canViewCustomers() { return hasRole('gerente', 'caixa', 'garcom'); }
+function canCreateCustomer() { return hasRole('gerente', 'caixa', 'garcom'); }
+function canEditCustomer() { return hasRole('gerente', 'caixa'); }
+function canViewCustomerDashboard() { return hasRole('gerente', 'caixa'); }
 function canManageStock() { return hasRole('gerente', 'estoquista', 'caixa'); }
 function canViewProductCost() { return hasRole('gerente', 'caixa', 'estoquista'); }
 function canManageCashRegister() { return hasRole('gerente', 'caixa'); }
@@ -290,6 +334,9 @@ let notificationIsManager = false;
 let notificationPanelOpen = false;
 let notificationFilter = 'active'; // active, resolved
 
+// ====== STOCK ======
+let stockSocket = null;
+
 function connectNotificationsWebSocket() {
     if (notificationSocket) return;
     const token = getToken();
@@ -336,6 +383,117 @@ function closeNotificationsWebSocket() {
     if (notificationSocket) {
         notificationSocket.close();
         notificationSocket = null;
+    }
+}
+
+function connectStockWebSocket() {
+    if (stockSocket) return;
+    const token = getToken();
+    if (!token) return;
+
+    stockSocket = new WebSocket(`${WS_BASE}/estoque?token=${token}`);
+
+    stockSocket.onopen = () => {
+        console.log('Stock WebSocket connected');
+    };
+
+    stockSocket.onmessage = (event) => {
+        try {
+            const msg = JSON.parse(event.data);
+            console.log('[STOCK WS] received:', msg);
+            if (msg.type === 'stock_update' && msg.data) {
+                handleStockUpdate(msg.data);
+            }
+        } catch (err) {
+            console.error('Stock WS message error', err);
+        }
+    };
+
+    stockSocket.onclose = () => {
+        stockSocket = null;
+        setTimeout(connectStockWebSocket, 3000);
+    };
+
+    stockSocket.onerror = (err) => {
+        console.error('Stock WebSocket error', err);
+    };
+}
+
+function closeStockWebSocket() {
+    if (stockSocket) {
+        stockSocket.close();
+        stockSocket = null;
+    }
+}
+
+function handleStockUpdate(data) {
+    const productId = data.product_id;
+    const stock = data.stock;
+    console.log('[STOCK WS] handleStockUpdate productId=', productId, 'stock=', stock);
+
+    // Update pedido modal (mesa)
+    if (typeof pedidoInitialStock !== 'undefined') {
+        const currentQty = pedidoQuantities[productId] || 0;
+        // stock is available stock; initial = available + reserved (pending)
+        pedidoInitialStock[productId] = stock + currentQty;
+        const input = document.getElementById('pqty-' + productId);
+        const stockEl = document.getElementById('pstock-' + productId);
+        const addBtn = document.getElementById('padd-btn-' + productId);
+        if (stockEl) {
+            const cat = stockEl.dataset.cat || '';
+            const remaining = Math.max(0, stock);
+            stockEl.innerHTML = 'Estoque: <strong>' + remaining + '</strong>' + (cat ? ' | ' + cat : '');
+        }
+        if (input) {
+            input.max = stock + currentQty;
+        }
+        if (addBtn) {
+            addBtn.disabled = stock <= 0;
+        }
+        if (typeof applyPedidoFilters === 'function') {
+            applyPedidoFilters();
+        }
+    }
+
+    // Update balcão grid
+    const cardSelector = `.balcao-product-card[data-stock]`;
+    const cards = document.querySelectorAll(cardSelector);
+    cards.forEach(card => {
+        const onclickAttr = card.getAttribute('onclick') || '';
+        if (onclickAttr.includes('changeBalcaoQty(' + productId + ',')) {
+            card.dataset.stock = stock;
+            const stockEl = document.getElementById('bstock-' + productId);
+            if (stockEl) {
+                stockEl.innerHTML = 'Estoque: <strong>' + stock + '</strong>';
+            }
+            const input = document.getElementById('bqty-' + productId);
+            if (input) {
+                input.max = stock;
+                if (parseInt(input.value) > stock) {
+                    input.value = Math.max(1, stock);
+                }
+            }
+        }
+    });
+    if (cards.length > 0 && typeof applyBalcaoFilters === 'function') {
+        applyBalcaoFilters();
+    }
+
+    // Update estoque page
+    if (document.getElementById('stock-list') && typeof loadStock === 'function') {
+        loadStock();
+    }
+
+    // Update table detail view (comanda aberta na mesa)
+    const tableStockEl = document.getElementById('table-stock-' + productId);
+    const tableAddBtn = document.getElementById('table-add-btn-' + productId);
+    if (tableStockEl) {
+        console.log('[STOCK WS] updating table stock for product', productId, 'to', stock);
+        tableStockEl.innerHTML = 'Estoque: <strong>' + Math.max(0, stock) + '</strong>';
+    }
+    if (tableAddBtn) {
+        tableAddBtn.disabled = stock <= 0;
+        console.log('[STOCK WS] table add button for product', productId, 'disabled=', stock <= 0);
     }
 }
 
@@ -811,11 +969,12 @@ function renderPedidos(data) {
                 <div class="item-info">
                     <div class="item-name">${item.product_name}${paidBadge}</div>
                     <div class="item-meta">${formatCurrency(item.unit_price)} cada | ${item.category}</div>
+                    <div class="item-stock" id="table-stock-${item.product_id}">Estoque: <strong>${item.product_stock}</strong></div>
                 </div>
                 <div class="item-actions">
                     <button class="btn-remove" onclick="removeItemFromRound(${item.product_id}, ${pedido.id})">-</button>
                     <span class="qty">${item.quantity}</span>
-                    <button class="btn-add" onclick="addItemToRound(${item.product_id}, ${pedido.id})">+</button>
+                    <button class="btn-add" id="table-add-btn-${item.product_id}" onclick="addItemToRound(${item.product_id}, ${pedido.id})" ${item.product_stock <= 0 ? 'disabled' : ''}>+</button>
                 </div>
             </div>
             `;
@@ -866,25 +1025,38 @@ let pedidoProductsData = [];
 let pedidoSelectionHtml = '';
 let currentPedidoCategory = 'TODOS';
 let currentPedidoSearch = '';
+let pedidoShowOnlyInStock = true;
+
+let pendingOrderCancelling = false;
 
 function showAddPedidoModal() {
     Promise.all([
         apiFetch(API_BASE + '/produtos').then(r => r.json()),
-        apiFetch(API_BASE + '/categorias').then(r => r.json())
+        apiFetch(API_BASE + '/categorias').then(r => r.json()),
+        apiFetch(API_BASE + '/comanda/' + currentOrderId + '/pendentes').then(r => r.json())
     ])
-        .then(([products, categories]) => {
+        .then(([products, categories, pending]) => {
             pedidoQuantities = {};
             pedidoInitialStock = {};
             pedidoProductsData = products;
             currentPedidoCategory = 'TODOS';
             currentPedidoSearch = '';
+
+            const pendingMap = {};
+            (pending.items || []).forEach(item => {
+                pendingMap[item.product_id] = item.quantity;
+            });
+
             products.forEach(p => {
-                pedidoQuantities[p.id] = 0;
-                pedidoInitialStock[p.id] = p.stock;
+                const pendingQty = pendingMap[p.id] || 0;
+                pedidoQuantities[p.id] = pendingQty;
+                // initial stock is the real available stock plus what is already reserved
+                pedidoInitialStock[p.id] = p.stock + pendingQty;
             });
 
             pedidoSelectionHtml = buildPedidoSelectionView(products, categories);
             document.getElementById('pedido-modal-content').innerHTML = pedidoSelectionHtml;
+            applyPedidoFilters();
             document.getElementById('add-pedido-modal').style.display = 'flex';
         });
 }
@@ -900,28 +1072,35 @@ function buildPedidoSelectionView(products, categories) {
         const priceHtml = hasDiscount
             ? `<div class="prod-price"><span class="prod-original-price">${formatCurrency(p.price)}</span> ${formatCurrency(p.discounted_price)} <span class="promo-badge">${p.active_promotion || 'Promoção'}</span></div>`
             : `<div class="prod-price">${formatCurrency(p.price)}</div>`;
+        const qty = pedidoQuantities[p.id] || 0;
+        const available = (pedidoInitialStock[p.id] || 0) - qty;
         return `
         <div class="pedido-product-row" data-category="${p.category}">
             <div class="prod-info">
                 <div class="prod-name">${p.name}</div>
                 <div class="prod-stock" id="pstock-${p.id}" data-cat="${p.category}">
-                    Estoque: <strong>${p.stock}</strong>
+                    Estoque: <strong>${available}</strong>
                 </div>
                 ${priceHtml}
             </div>
             <div class="qty-control">
                 <button class="btn-sm btn-sm-remove" onclick="changePedidoQty(${p.id}, -1)">-</button>
-                <input type="number" class="qty-input" id="pqty-${p.id}" value="0" min="0" max="${p.stock}" readonly>
-                <button class="btn-sm btn-sm-add" onclick="changePedidoQty(${p.id}, 1)">+</button>
+                <input type="number" class="qty-input" id="pqty-${p.id}" value="${qty}" min="0" max="${pedidoInitialStock[p.id] || 0}" readonly>
+                <button class="btn-sm btn-sm-add" id="padd-btn-${p.id}" onclick="changePedidoQty(${p.id}, 1)" ${available <= 0 ? 'disabled' : ''}>+</button>
             </div>
         </div>
     `;
     }).join('');
 
+    const stockFilterLabel = pedidoShowOnlyInStock ? 'Mostrar todos' : 'Mostrar apenas com estoque';
+
     return `
         <h3>Novo Pedido</h3>
         <div class="pedido-search-bar">
             <input type="text" id="pedido-search" class="input-field" placeholder="Buscar produto..." oninput="filterPedidoSearch(this.value)">
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap;">
+            <button type="button" id="pedido-stock-filter" class="btn-small" onclick="togglePedidoStockFilter()">${stockFilterLabel}</button>
         </div>
         <div class="category-filter">
             <button type="button" class="category-btn active" data-category="TODOS" onclick="filterPedidoCategory(this)">Todos</button>
@@ -939,13 +1118,24 @@ function buildPedidoSelectionView(products, categories) {
 function applyPedidoFilters() {
     const q = currentPedidoSearch;
     const cat = currentPedidoCategory;
-    document.querySelectorAll('.pedido-product-row').forEach(row => {
+    document.querySelectorAll('#pedido-product-list .pedido-product-row').forEach(row => {
         const name = (row.querySelector('.prod-name')?.textContent || '').toLowerCase();
         const rowCat = row.dataset.category || '';
+        const input = row.querySelector('.qty-input');
+        const productId = input ? parseInt(input.id.replace('pqty-', '')) : null;
+        const stock = productId ? ((pedidoInitialStock[productId] || 0) - (pedidoQuantities[productId] || 0)) : 0;
         const matchesSearch = !q || name.includes(q);
         const matchesCategory = cat === 'TODOS' || rowCat === cat;
-        row.style.display = (matchesSearch && matchesCategory) ? '' : 'none';
+        const matchesStock = !pedidoShowOnlyInStock || stock > 0;
+        row.style.display = (matchesSearch && matchesCategory && matchesStock) ? '' : 'none';
     });
+}
+
+function togglePedidoStockFilter() {
+    pedidoShowOnlyInStock = !pedidoShowOnlyInStock;
+    const btn = document.getElementById('pedido-stock-filter');
+    if (btn) btn.textContent = pedidoShowOnlyInStock ? 'Mostrar todos' : 'Mostrar apenas com estoque';
+    applyPedidoFilters();
 }
 
 function filterPedidoCategory(btn) {
@@ -961,25 +1151,69 @@ function filterPedidoSearch(value) {
     applyPedidoFilters();
 }
 
-function changePedidoQty(productId, delta) {
-    const maxStock = pedidoInitialStock[productId] || 0;
-    let qty = (pedidoQuantities[productId] || 0) + delta;
-    if (qty < 0) qty = 0;
-    if (qty > maxStock) qty = maxStock;
-    pedidoQuantities[productId] = qty;
+async function changePedidoQty(productId, delta) {
+    const btn = document.getElementById('padd-btn-' + productId);
+    if (btn) btn.disabled = true;
 
-    const remaining = maxStock - qty;
-    const input = document.getElementById('pqty-' + productId);
-    const stockEl = document.getElementById('pstock-' + productId);
-    if (input) input.value = qty;
-    if (stockEl) {
-        const cat = stockEl.dataset.cat || '';
-        stockEl.innerHTML = 'Estoque: <strong>' + remaining + '</strong> | ' + cat;
+    try {
+        const res = await apiFetch(API_BASE + '/pedido-pendente/item', {
+            method: 'POST',
+            body: JSON.stringify({ table_id: TABLE_ID, order_id: currentOrderId, product_id: productId, quantity: delta })
+        });
+        const data = await res.json();
+        if (data.error) {
+            if (data.error === 'caixa_fechado') {
+                showCashRegisterClosedModal();
+                return;
+            }
+            alert(data.error);
+            return;
+        }
+
+        const currentQty = pedidoQuantities[productId] || 0;
+        const newQty = Math.max(0, currentQty + delta);
+        pedidoQuantities[productId] = newQty;
+        // initial stock = available returned by API + reserved quantity
+        pedidoInitialStock[productId] = (data.stock_remaining !== undefined ? data.stock_remaining : 0) + newQty;
+
+        const input = document.getElementById('pqty-' + productId);
+        const stockEl = document.getElementById('pstock-' + productId);
+        const addBtn = document.getElementById('padd-btn-' + productId);
+        const remaining = pedidoInitialStock[productId] - newQty;
+        if (input) input.value = newQty;
+        if (stockEl) {
+            const cat = stockEl.dataset.cat || '';
+            stockEl.innerHTML = 'Estoque: <strong>' + remaining + '</strong>' + (cat ? ' | ' + cat : '');
+        }
+        if (addBtn) addBtn.disabled = remaining <= 0;
+
+        applyPedidoFilters();
+    } catch (err) {
+        alert('Erro ao atualizar quantidade');
+    } finally {
+        const addBtn = document.getElementById('padd-btn-' + productId);
+        if (addBtn) {
+            const remaining = (pedidoInitialStock[productId] || 0) - (pedidoQuantities[productId] || 0);
+            addBtn.disabled = remaining <= 0;
+        }
     }
 }
 
-function closeAddPedidoModal() {
-    document.getElementById('add-pedido-modal').style.display = 'none';
+async function closeAddPedidoModal() {
+    if (pendingOrderCancelling) return;
+    pendingOrderCancelling = true;
+
+    try {
+        await apiFetch(API_BASE + '/pedido-pendente/cancelar', {
+            method: 'POST',
+            body: JSON.stringify({ table_id: TABLE_ID, order_id: currentOrderId })
+        });
+    } catch (err) {
+        console.error('Erro ao cancelar pedido pendente', err);
+    } finally {
+        pendingOrderCancelling = false;
+        document.getElementById('add-pedido-modal').style.display = 'none';
+    }
 }
 
 function reviewPedido() {
@@ -998,8 +1232,11 @@ function reviewPedido() {
     }
 
     if (selected.length === 0) {
-        document.getElementById('pedido-error').textContent = 'Selecione ao menos 1 item';
-        document.getElementById('pedido-error').style.display = 'block';
+        const errorEl = document.getElementById('pedido-error');
+        if (errorEl) {
+            errorEl.textContent = 'Selecione ao menos 1 item';
+            errorEl.style.display = 'block';
+        }
         return;
     }
 
@@ -1052,23 +1289,18 @@ function backToPedidoSelection() {
             const maxStock = pedidoInitialStock[pid] || 0;
             const remaining = maxStock - qty;
             const cat = stockEl.dataset.cat || '';
-            stockEl.innerHTML = 'Estoque: <strong>' + remaining + '</strong> | ' + cat;
+            stockEl.innerHTML = 'Estoque: <strong>' + remaining + '</strong>' + (cat ? ' | ' + cat : '');
         }
+        const addBtn = document.getElementById('padd-btn-' + pid);
+        if (addBtn) addBtn.disabled = remaining <= 0;
     }
 }
 
 async function confirmPedido() {
-    const items = [];
-    for (const [pid, qty] of Object.entries(pedidoQuantities)) {
-        if (qty > 0) {
-            items.push({ product_id: parseInt(pid), quantity: qty });
-        }
-    }
-
     try {
-        const res = await apiFetch(API_BASE + '/comanda/pedido', {
+        const res = await apiFetch(API_BASE + '/pedido-pendente/confirmar', {
             method: 'POST',
-            body: JSON.stringify({ table_id: TABLE_ID, order_id: currentOrderId, items })
+            body: JSON.stringify({ table_id: TABLE_ID, order_id: currentOrderId })
         });
         const data = await res.json();
         if (data.error) {
@@ -1076,19 +1308,36 @@ async function confirmPedido() {
                 showCashRegisterClosedModal();
                 return;
             }
-            document.getElementById('pedido-error').textContent = data.error;
-            document.getElementById('pedido-error').style.display = 'block';
+            const errorEl = document.getElementById('pedido-error');
+            if (errorEl) {
+                errorEl.textContent = data.error;
+                errorEl.style.display = 'block';
+            }
             return;
         }
-        closeAddPedidoModal();
+        document.getElementById('add-pedido-modal').style.display = 'none';
         loadTableDetail();
     } catch (err) {
-        document.getElementById('pedido-error').textContent = 'Erro ao criar pedido';
-        document.getElementById('pedido-error').style.display = 'block';
+        const errorEl = document.getElementById('pedido-error');
+        if (errorEl) {
+            errorEl.textContent = 'Erro ao confirmar pedido';
+            errorEl.style.display = 'block';
+        }
     }
 }
 
 // ====== INDIVIDUAL ITEM ADJUSTMENT WITHIN A ROUND ======
+function updateTableItemStockLocal(productId, stock) {
+    const stockEl = document.getElementById('table-stock-' + productId);
+    const addBtn = document.getElementById('table-add-btn-' + productId);
+    if (stockEl) {
+        stockEl.innerHTML = 'Estoque: <strong>' + Math.max(0, stock) + '</strong>';
+    }
+    if (addBtn) {
+        addBtn.disabled = stock <= 0;
+    }
+}
+
 async function addItemToRound(productId, roundId) {
     try {
         const res = await apiFetch(API_BASE + '/comanda/item', {
@@ -1104,7 +1353,10 @@ async function addItemToRound(productId, roundId) {
             alert(data.error);
             return;
         }
-        loadTableDetail();
+        await loadTableDetail();
+        if (data.stock_remaining !== undefined) {
+            updateTableItemStockLocal(productId, data.stock_remaining);
+        }
     } catch (err) { alert('Erro ao adicionar item'); }
 }
 
@@ -1123,7 +1375,10 @@ async function removeItemFromRound(productId, roundId) {
             alert(data.error);
             return;
         }
-        loadTableDetail();
+        await loadTableDetail();
+        if (data.stock_remaining !== undefined) {
+            updateTableItemStockLocal(productId, data.stock_remaining);
+        }
     } catch (err) { alert('Erro ao remover item'); }
 }
 
@@ -3762,7 +4017,10 @@ function _getSettingInputHtml(s) {
     const step = s.type === 'number' ? 'step="0.01"' : '';
     const placeholder = s.type === 'password' || s.key.includes('password') ? 'placeholder="••••••••"' : '';
     const typeAttr = s.key.includes('password') ? 'password' : inputType;
-    return `<input type="${typeAttr}" ${step} ${placeholder} id="setting-${s.key}" class="input-field" value="${s.value || ''}" onchange="submitSetting('${s.key}')">`;
+    const maskAttr = s.key === 'store_phone' ? ' oninput="this.value = maskPhone(this.value)"' :
+                     s.key === 'store_cnpj' ? ' oninput="this.value = maskCpfCnpj(this.value)"' :
+                     ['auto_report_email', 'smtp_user', 'smtp_from'].includes(s.key) ? ' type="email"' : '';
+    return `<input type="${typeAttr}" ${step} ${placeholder} id="setting-${s.key}" class="input-field" value="${s.value || ''}" onchange="submitSetting('${s.key}')"${maskAttr}>`;
 }
 
 async function loadSettings() {
@@ -4328,9 +4586,9 @@ async function loadCustomers() {
                     </div>
                 </div>
                 <div class="customer-actions">
-                    <button onclick="openCustomerDashboard(${c.id})" class="btn-small">Dashboard</button>
-                    <button onclick="editCustomer(${c.id})" class="btn-small">Editar</button>
-                    <button onclick="deleteCustomer(${c.id})" class="btn-small btn-danger">Excluir</button>
+                    ${canViewCustomerDashboard() ? `<button onclick="openCustomerDashboard(${c.id})" class="btn-small">Dashboard</button>` : ''}
+                    ${canEditCustomer() ? `<button onclick="editCustomer(${c.id})" class="btn-small">Editar</button>` : ''}
+                    ${canEditCustomer() ? `<button onclick="deleteCustomer(${c.id})" class="btn-small btn-danger">Excluir</button>` : ''}
                 </div>
             </div>
         `}).join('');
@@ -4351,7 +4609,10 @@ async function loadCustomerSummary(customerId) {
     } catch (err) {}
 }
 
-function showCustomerModal(customer = null) {
+let customerSavedCallback = null;
+
+function showCustomerModal(customer = null, onSaved = null) {
+    customerSavedCallback = onSaved || null;
     document.getElementById('customer-modal-title').textContent = customer ? 'Editar Cliente' : 'Novo Cliente';
     document.getElementById('customer-id').value = customer ? customer.id : '';
     document.getElementById('customer-name').value = customer ? customer.name : '';
@@ -4368,6 +4629,7 @@ function showCustomerModal(customer = null) {
 
 function closeCustomerModal() {
     document.getElementById('customer-modal').style.display = 'none';
+    customerSavedCallback = null;
 }
 
 async function submitCustomer() {
@@ -4403,8 +4665,13 @@ async function submitCustomer() {
             errorEl.style.display = 'block';
             return;
         }
+        const callback = customerSavedCallback;
         closeCustomerModal();
-        loadCustomers();
+        if (typeof callback === 'function') {
+            callback(data);
+        } else if (document.getElementById('customers-list')) {
+            loadCustomers();
+        }
     } catch (err) {
         errorEl.textContent = 'Erro ao salvar cliente';
         errorEl.style.display = 'block';
@@ -4414,6 +4681,54 @@ async function submitCustomer() {
 async function editCustomer(id) {
     const customer = customersCache.find(c => c.id === id);
     if (customer) showCustomerModal(customer);
+}
+
+function hideCreateCustomerButtonsIfNoPermission() {
+    if (canCreateCustomer()) return;
+    document.querySelectorAll('.create-customer-inline-btn').forEach(el => el.style.display = 'none');
+}
+
+function getCreateCustomerButtonHtml(onclick, label = 'Cadastrar novo cliente') {
+    if (!canCreateCustomer()) return '';
+    return `<button type="button" class="btn-link" onclick="${onclick}" style="font-size:12px;color:var(--text-muted);padding:0;background:none;border:none;cursor:pointer;text-decoration:underline;">${label}</button>`;
+}
+
+function openCreateCustomerForFiado() {
+    showCustomerModal(null, (newCustomer) => {
+        fiadoCustomerId = newCustomer.id;
+        document.getElementById('fiado-customer-id').value = newCustomer.id;
+        document.getElementById('fiado-customer-name').value = newCustomer.name;
+        document.getElementById('fiado-customer-suggestions').style.display = 'none';
+    });
+}
+
+function openCreateCustomerForBalcao() {
+    showCustomerModal(null, (newCustomer) => {
+        balcaoCurrentCustomerId = newCustomer.id;
+        balcaoCurrentCustomerName = newCustomer.name;
+        document.getElementById('balcao-customer-id').value = newCustomer.id;
+        document.getElementById('balcao-customer-name').value = newCustomer.name;
+        document.getElementById('balcao-customer-suggestions').style.display = 'none';
+    });
+}
+
+function openCreateCustomerForConsignment() {
+    showCustomerModal(null, (newCustomer) => {
+        newConsignmentCustomerId = newCustomer.id;
+        document.getElementById('new-consignment-customer-id').value = newCustomer.id;
+        document.getElementById('new-consignment-customer-name').value = newCustomer.name;
+        document.getElementById('new-consignment-customer-suggestions').style.display = 'none';
+    });
+}
+
+function openCreateCustomerForNewOrder() {
+    showCustomerModal(null, (newCustomer) => {
+        selectedTableCustomerId = newCustomer.id;
+        const input = document.getElementById('customer-name-input');
+        if (input) input.value = newCustomer.name;
+        updateSelectedCustomerUI();
+        hideCustomerSuggestions();
+    });
 }
 
 async function deleteCustomer(id) {
@@ -4610,7 +4925,7 @@ function renderCustomerSuggestions(customers) {
     if (!suggestionsEl) return;
 
     if (customers.length === 0) {
-        suggestionsEl.innerHTML = '<div class="autocomplete-empty">Nenhum cliente encontrado. O nome digitado será usado manualmente.</div>';
+        suggestionsEl.innerHTML = '<div class="autocomplete-empty">Nenhum cliente encontrado. ' + getCreateCustomerButtonHtml('openCreateCustomerForNewOrder()') + ' ou use o nome digitado manualmente.</div>';
         suggestionsEl.style.display = 'block';
         return;
     }
@@ -5048,7 +5363,7 @@ function renderConsignmentCustomerSuggestions(customers) {
     const suggestionsEl = document.getElementById('new-consignment-customer-suggestions');
     if (!suggestionsEl) return;
     if (customers.length === 0) {
-        suggestionsEl.innerHTML = '<div class="autocomplete-empty">Nenhum cliente encontrado. <a href="/clientes">Cadastre um cliente</a></div>';
+        suggestionsEl.innerHTML = '<div class="autocomplete-empty">Nenhum cliente encontrado. ' + getCreateCustomerButtonHtml('openCreateCustomerForConsignment()') + '</div>';
         suggestionsEl.style.display = 'block';
         return;
     }
@@ -5473,7 +5788,7 @@ function renderFiadoCustomerSuggestions(customers) {
     const suggestionsEl = document.getElementById('fiado-customer-suggestions');
     if (!suggestionsEl) return;
     if (customers.length === 0) {
-        suggestionsEl.innerHTML = '<div class="autocomplete-empty">Nenhum cliente encontrado. <a href="/clientes">Cadastre um cliente</a></div>';
+        suggestionsEl.innerHTML = '<div class="autocomplete-empty">Nenhum cliente encontrado. ' + getCreateCustomerButtonHtml('openCreateCustomerForFiado()') + '</div>';
         suggestionsEl.style.display = 'block';
         return;
     }
@@ -5583,6 +5898,7 @@ let balcaoCurrentCustomerName = null;
 let balcaoCurrentCategory = 'TODOS';
 let balcaoCurrentSearch = '';
 let balcaoSearchDebounce = null;
+let balcaoShowOnlyInStock = true;
 
 async function loadBalcaoDetail() {
     try {
@@ -5680,13 +5996,15 @@ function renderBalcaoProductGrid(products, categories) {
         listEl.innerHTML = '<p class="empty-msg">Nenhum produto disponível</p>';
         return;
     }
+    const btn = document.getElementById('balcao-stock-filter');
+    if (btn) btn.textContent = balcaoShowOnlyInStock ? 'Mostrar todos' : 'Mostrar apenas com estoque';
     listEl.innerHTML = products.map(p => {
         const hasDiscount = p.discounted_price !== undefined && p.discounted_price < p.price;
         const priceHtml = hasDiscount
             ? `<div class="prod-price"><span class="prod-original-price">${formatCurrency(p.price)}</span> ${formatCurrency(p.discounted_price)} <span class="promo-badge">${p.active_promotion || 'Promoção'}</span></div>`
             : `<div class="prod-price">${formatCurrency(p.price)}</div>`;
         return `
-        <div class="balcao-product-card" data-category="${p.category}" data-name="${p.name.toLowerCase()}">
+        <div class="balcao-product-card" data-category="${p.category}" data-name="${p.name.toLowerCase()}" data-stock="${p.stock}">
             <div class="balcao-product-info">
                 <div class="prod-name">${p.name}</div>
                 <div class="prod-stock" id="bstock-${p.id}" data-cat="${p.category}">Estoque: <strong>${p.stock}</strong></div>
@@ -5729,10 +6047,19 @@ function applyBalcaoFilters() {
     document.querySelectorAll('.balcao-product-card').forEach(card => {
         const name = card.dataset.name || '';
         const cat = card.dataset.category || '';
+        const stock = parseInt(card.dataset.stock || '0');
         const matchesSearch = !balcaoCurrentSearch || name.includes(balcaoCurrentSearch);
         const matchesCategory = balcaoCurrentCategory === 'TODOS' || cat === balcaoCurrentCategory;
-        card.style.display = (matchesSearch && matchesCategory) ? '' : 'none';
+        const matchesStock = !balcaoShowOnlyInStock || stock > 0;
+        card.style.display = (matchesSearch && matchesCategory && matchesStock) ? '' : 'none';
     });
+}
+
+function toggleBalcaoStockFilter() {
+    balcaoShowOnlyInStock = !balcaoShowOnlyInStock;
+    const btn = document.getElementById('balcao-stock-filter');
+    if (btn) btn.textContent = balcaoShowOnlyInStock ? 'Mostrar todos' : 'Mostrar apenas com estoque';
+    applyBalcaoFilters();
 }
 
 async function changeBalcaoQty(productId, delta) {
@@ -5771,6 +6098,8 @@ async function changeBalcaoQty(productId, delta) {
         const stockEl = document.getElementById('bstock-' + productId);
         if (stockEl && data.stock_remaining !== undefined) {
             stockEl.innerHTML = 'Estoque: <strong>' + data.stock_remaining + '</strong>';
+            const card = stockEl.closest('.balcao-product-card');
+            if (card) card.dataset.stock = data.stock_remaining;
         }
     } catch (err) {
         alert('Erro ao atualizar item');
@@ -6010,7 +6339,7 @@ function renderBalcaoCustomerSuggestions(customers) {
     const suggestionsEl = document.getElementById('balcao-customer-suggestions');
     if (!suggestionsEl) return;
     if (customers.length === 0) {
-        suggestionsEl.innerHTML = '<div class="autocomplete-empty">Nenhum cliente encontrado. <a href="/clientes">Cadastre um cliente</a></div>';
+        suggestionsEl.innerHTML = '<div class="autocomplete-empty">Nenhum cliente encontrado. ' + getCreateCustomerButtonHtml('openCreateCustomerForBalcao()') + '</div>';
         suggestionsEl.style.display = 'block';
         return;
     }
@@ -6159,6 +6488,10 @@ function connectBalcaoWebSocket() {
 // ====== DASHBOARDS ======
 let dashboardCurrentTab = 'geral';
 let dashboardCurrentData = {};
+let dashboardEstoqueTableFilter = '';
+let dashboardEstoqueProductFilter = '';
+let dashboardEstoquePage = 1;
+const DASHBOARD_ESTOQUE_PAGE_SIZE = 20;
 let dashboardCharts = {};
 
 const DASHBOARD_COLORS = {
@@ -6287,6 +6620,12 @@ async function loadDashboardData(tab) {
     const params = [];
     if (start) params.push('start_date=' + encodeURIComponent(start));
     if (end) params.push('end_date=' + encodeURIComponent(end));
+    if (tab === 'estoque') {
+        if (dashboardEstoqueTableFilter) params.push('table_id=' + encodeURIComponent(dashboardEstoqueTableFilter));
+        if (dashboardEstoqueProductFilter) params.push('product_id=' + encodeURIComponent(dashboardEstoqueProductFilter));
+        params.push('page=' + encodeURIComponent(dashboardEstoquePage));
+        params.push('page_size=' + encodeURIComponent(DASHBOARD_ESTOQUE_PAGE_SIZE));
+    }
     const url = API_BASE + '/dashboards/' + tab + (params.length ? '?' + params.join('&') : '');
     try {
         const res = await apiFetch(url);
@@ -6573,12 +6912,22 @@ function renderDashboardEstoque(data) {
             </table>
         </div>
         <div class="dashboard-section-title">Últimas Movimentações</div>
+        <div class="dashboard-filters" style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
+            <select id="dashboard-estoque-table-filter" class="input-field" onchange="setDashboardEstoqueTableFilter(this.value)" style="min-width:140px;">
+                <option value="">Todas as mesas</option>
+            </select>
+            <select id="dashboard-estoque-product-filter" class="input-field" onchange="setDashboardEstoqueProductFilter(this.value)" style="min-width:180px;">
+                <option value="">Todos os produtos</option>
+            </select>
+            <button type="button" class="btn-small" onclick="clearDashboardEstoqueFilters()">Limpar</button>
+        </div>
         <div class="dashboard-table-card">
             <table class="dashboard-table">
                 <thead><tr><th>Produto</th><th>Tipo</th><th>Qtd</th><th>Nota</th><th>Data</th></tr></thead>
                 <tbody>${(data.recent_movements || []).map(m => `<tr><td>${m.product_name}</td><td>${m.type}</td><td>${m.quantity}</td><td>${m.note || ''}</td><td>${m.created_at ? new Date(m.created_at).toLocaleString('pt-BR') : ''}</td></tr>`).join('')}</tbody>
             </table>
         </div>
+        ${renderDashboardEstoquePagination(data.movements_pagination)}
     `;
 
     const ctxStatus = document.getElementById('chart-stock-status');
@@ -6607,6 +6956,77 @@ function renderDashboardEstoque(data) {
             }
         });
     }
+
+    loadDashboardEstoqueFilters();
+}
+
+async function loadDashboardEstoqueFilters() {
+    const tableSelect = document.getElementById('dashboard-estoque-table-filter');
+    const productSelect = document.getElementById('dashboard-estoque-product-filter');
+    if (!tableSelect || !productSelect) return;
+
+    try {
+        const [tablesRes, productsRes] = await Promise.all([
+            apiFetch(API_BASE + '/mesas'),
+            apiFetch(API_BASE + '/produtos?active_only=false')
+        ]);
+        const tables = await tablesRes.json();
+        const products = await productsRes.json();
+
+        tableSelect.innerHTML = '<option value="">Todas as mesas</option>' +
+            tables.map(t => `<option value="${t.id}" ${String(t.id) === dashboardEstoqueTableFilter ? 'selected' : ''}>${t.label}</option>`).join('');
+
+        productSelect.innerHTML = '<option value="">Todos os produtos</option>' +
+            products.map(p => `<option value="${p.id}" ${String(p.id) === dashboardEstoqueProductFilter ? 'selected' : ''}>${p.name}</option>`).join('');
+    } catch (err) {
+        console.error('Erro ao carregar filtros do dashboard de estoque', err);
+    }
+}
+
+function setDashboardEstoqueTableFilter(value) {
+    dashboardEstoqueTableFilter = value;
+    dashboardEstoquePage = 1;
+    loadDashboardData('estoque');
+}
+
+function setDashboardEstoqueProductFilter(value) {
+    dashboardEstoqueProductFilter = value;
+    dashboardEstoquePage = 1;
+    loadDashboardData('estoque');
+}
+
+function clearDashboardEstoqueFilters() {
+    dashboardEstoqueTableFilter = '';
+    dashboardEstoqueProductFilter = '';
+    dashboardEstoquePage = 1;
+    const tableSelect = document.getElementById('dashboard-estoque-table-filter');
+    const productSelect = document.getElementById('dashboard-estoque-product-filter');
+    if (tableSelect) tableSelect.value = '';
+    if (productSelect) productSelect.value = '';
+    loadDashboardData('estoque');
+}
+
+function renderDashboardEstoquePagination(pagination) {
+    if (!pagination) return '';
+    const { page, page_size, total, total_pages } = pagination;
+    const hasPrev = page > 1;
+    const hasNext = page < total_pages;
+    const start = total === 0 ? 0 : (page - 1) * page_size + 1;
+    const end = Math.min(page * page_size, total);
+    return `
+        <div class="dashboard-pagination" style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;flex-wrap:wrap;gap:8px;">
+            <span style="font-size:12px;color:var(--text-muted);">${start}-${end} de ${total}</span>
+            <div style="display:flex;gap:8px;">
+                <button type="button" class="btn-small" onclick="changeDashboardEstoquePage(${page - 1})" ${hasPrev ? '' : 'disabled'}>Anterior</button>
+                <button type="button" class="btn-small" onclick="changeDashboardEstoquePage(${page + 1})" ${hasNext ? '' : 'disabled'}>Próxima</button>
+            </div>
+        </div>
+    `;
+}
+
+function changeDashboardEstoquePage(newPage) {
+    dashboardEstoquePage = newPage;
+    loadDashboardData('estoque');
 }
 
 function renderDashboardClientes(data) {

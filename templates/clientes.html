@@ -33,38 +33,6 @@
     <div class="loading">Carregando...</div>
 </div>
 
-<div id="customer-modal" class="modal" style="display:none;">
-    <div class="modal-content">
-        <h3 id="customer-modal-title">Novo Cliente</h3>
-        <input type="hidden" id="customer-id">
-        <label class="input-label">Nome *</label>
-        <input type="text" id="customer-name" class="input-field" placeholder="Nome completo">
-        <label class="input-label">Telefone</label>
-        <input type="text" id="customer-phone" class="input-field" placeholder="(00) 00000-0000">
-        <label class="input-label">E-mail</label>
-        <input type="email" id="customer-email" class="input-field" placeholder="email@exemplo.com">
-        <label class="input-label">CPF/CNPJ</label>
-        <input type="text" id="customer-document" class="input-field" placeholder="000.000.000-00">
-        <label class="input-label">Data de nascimento</label>
-        <input type="date" id="customer-birth-date" class="input-field">
-        <label class="input-label">Tipo</label>
-        <select id="customer-type" class="select-field">
-            <option value="pf">Pessoa Física</option>
-            <option value="pj">Pessoa Jurídica</option>
-        </select>
-        <label class="input-label">Observações</label>
-        <textarea id="customer-notes" class="input-field" rows="2"></textarea>
-        <label class="input-label">
-            <input type="checkbox" id="customer-active" checked> Ativo
-        </label>
-        <p id="customer-error" class="error-msg" style="display:none;"></p>
-        <div style="display:flex;gap:8px;margin-top:12px;">
-            <button onclick="submitCustomer()" class="btn-primary-full" style="flex:1;">Salvar</button>
-            <button onclick="closeCustomerModal()" class="btn-secondary-full" style="flex:1;">Cancelar</button>
-        </div>
-    </div>
-</div>
-
 <div id="customer-dashboard-modal" class="modal" style="display:none;">
     <div class="modal-content customer-dashboard-content">
         <h3 id="dashboard-customer-name">Dashboard do Cliente</h3>
@@ -108,9 +76,10 @@
 document.body.classList.add('clientes-page');
 document.addEventListener('DOMContentLoaded', () => {
     checkAuth((user) => {
-        if (!requirePageAccess(['gerente', 'caixa'])) return;
+        if (!requirePageAccess(['gerente', 'caixa', 'garcom'])) return;
         document.getElementById('bottom-nav').style.display = 'flex';
         highlightNav('clientes');
+        hideCreateCustomerButtonsIfNoPermission();
         loadCustomers();
     });
 });

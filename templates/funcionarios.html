@@ -43,7 +43,7 @@
         </div>
 
         <label class="input-label">Contato</label>
-        <input type="text" id="employee-contact" class="input-field" placeholder="Telefone / WhatsApp">
+        <input type="text" id="employee-contact" class="input-field" placeholder="Telefone / WhatsApp" oninput="this.value = maskContact(this.value)">
 
         <label class="input-label">Função *</label>
         <input type="text" id="employee-role" class="input-field" placeholder="Ex: Garçom, Churrasqueiro">

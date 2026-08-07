@@ -20,6 +20,9 @@
         <button onclick="showAllCustomerSuggestions()" class="btn-small" title="Ver todos"><i class="bi bi-list"></i></button>
     </div>
     <div id="customer-suggestions" class="autocomplete-list" style="display:none;"></div>
+    <p style="font-size:12px;color:var(--text-muted);margin-top:4px;" id="new-order-create-customer-wrapper">
+        <button type="button" class="btn-link create-customer-inline-btn" onclick="openCreateCustomerForNewOrder()" style="font-size:12px;color:var(--text-muted);padding:0;background:none;border:none;cursor:pointer;text-decoration:underline;">Cadastrar novo cliente</button>
+    </p>
     <div id="new-order-create-actions" style="display:none;gap:8px;margin-top:10px;">
         <button onclick="createNewOrder()" class="btn-primary-full" style="flex:1;">Criar Comanda</button>
         <button onclick="cancelNewOrder()" class="btn-secondary-full" style="flex:1;">Cancelar</button>
@@ -222,8 +225,8 @@
                 <button onclick="showAllFiadoCustomerSuggestions()" class="btn-small" title="Ver todos"><i class="bi bi-list"></i></button>
             </div>
             <div id="fiado-customer-suggestions" class="autocomplete-list" style="display:none;"></div>
-            <p style="font-size:12px;color:var(--text-muted);margin-top:4px;">
-                <a href="/clientes" target="_blank">Cadastrar novo cliente</a>
+            <p style="font-size:12px;color:var(--text-muted);margin-top:4px;" id="fiado-create-customer-wrapper">
+                <button type="button" class="btn-link create-customer-inline-btn" onclick="openCreateCustomerForFiado()" style="font-size:12px;color:var(--text-muted);padding:0;background:none;border:none;cursor:pointer;text-decoration:underline;">Cadastrar novo cliente</button>
             </p>
         </div>
         <p id="fiado-error" class="error-msg" style="display:none;"></p>
@@ -258,6 +261,7 @@ const TABLE_ID = {{ table_id }};
 document.addEventListener('DOMContentLoaded', () => {
     checkAuth((user) => {
         document.getElementById('bottom-nav').style.display = 'flex';
+        hideCreateCustomerButtonsIfNoPermission();
         loadTableDetail(user);
     });
 });

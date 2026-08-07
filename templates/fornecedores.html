@@ -30,7 +30,7 @@
         <label class="input-label">Nome</label>
         <input type="text" id="supplier-name" class="input-field" placeholder="Nome do fornecedor">
         <label class="input-label">Contato</label>
-        <input type="text" id="supplier-contact" class="input-field" placeholder="Telefone / e-mail / WhatsApp">
+        <input type="text" id="supplier-contact" class="input-field" placeholder="Telefone / e-mail / WhatsApp" oninput="this.value = maskContact(this.value)">
         <label class="input-label">Produtos</label>
         <div id="supplier-products" class="checkbox-list"></div>
         <div class="toggle-row" style="margin-top:12px;">

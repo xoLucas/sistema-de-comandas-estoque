@@ -15,6 +15,9 @@
                 <input type="text" id="balcao-search" class="input-field" placeholder="Buscar produto..." oninput="filterBalcaoSearch(this.value)" autocomplete="off">
                 <button onclick="clearBalcaoSearch()" class="btn-small" title="Limpar"><i class="bi bi-x-lg"></i></button>
             </div>
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap;">
+                <button type="button" id="balcao-stock-filter" class="btn-small" onclick="toggleBalcaoStockFilter()">Mostrar todos</button>
+            </div>
             <div class="category-filter" id="balcao-category-filter"></div>
         </div>
         <div class="balcao-product-list" id="balcao-product-list">
@@ -112,7 +115,7 @@
             <div id="balcao-customer-suggestions" class="autocomplete-list" style="display:none;"></div>
         </div>
         <p style="font-size:12px;color:var(--text-muted);margin-top:4px;">
-            <a href="/clientes" target="_blank">Cadastrar novo cliente</a>
+            <button type="button" class="btn-link create-customer-inline-btn" onclick="openCreateCustomerForBalcao()" style="font-size:12px;color:var(--text-muted);padding:0;background:none;border:none;cursor:pointer;text-decoration:underline;">Cadastrar novo cliente</button>
         </p>
         <div style="display:flex;gap:8px;margin-top:14px;">
             <button onclick="confirmBalcaoCustomer()" class="btn-primary-full" style="flex:1;">Vincular</button>
@@ -149,6 +152,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const bottomNav = document.getElementById('bottom-nav');
         if (bottomNav) bottomNav.style.display = 'none';
         highlightNav('mesas');
+        hideCreateCustomerButtonsIfNoPermission();
         loadBalcaoDetail();
         connectTablesWebSocket();
         connectBalcaoWebSocket();

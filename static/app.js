@@ -2,6 +2,78 @@ const API_BASE = '/api';
 const WS_BASE = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
 let tableSocket = null;
 
+const THEME_KEY = 'lads_theme_mode';
+const THEME_DEFAULT = 'dark';
+
+function applyTheme(mode) {
+    const root = document.documentElement;
+    if (!root) return;
+    mode = mode === 'light' ? 'light' : 'dark';
+    root.setAttribute('data-theme', mode);
+    const metaThemeColor = document.querySelector('meta[name="theme-color"]');
+    if (metaThemeColor) {
+        metaThemeColor.setAttribute('content', mode === 'light' ? '#f6f8fa' : '#0d1117');
+    }
+}
+
+function getStoredTheme() {
+    try {
+        return localStorage.getItem(THEME_KEY) || THEME_DEFAULT;
+    } catch {
+        return THEME_DEFAULT;
+    }
+}
+
+function setStoredTheme(mode) {
+    try {
+        localStorage.setItem(THEME_KEY, mode === 'light' ? 'light' : 'dark');
+    } catch {}
+}
+
+function toggleTheme() {
+    const current = getStoredTheme();
+    const next = current === 'light' ? 'dark' : 'light';
+    applyTheme(next);
+    setStoredTheme(next);
+    return next;
+}
+
+function initTheme() {
+    applyTheme(getStoredTheme());
+}
+
+function syncThemeFromSettings() {
+    const settingValue = appSettings && appSettings['theme_mode'];
+    if (settingValue) {
+        applyTheme(settingValue);
+        setStoredTheme(settingValue);
+    }
+}
+
+async function toggleThemeSetting() {
+    const nextMode = toggleTheme();
+    const labelEl = document.getElementById('theme-mode-label');
+    const btn = document.getElementById('setting-theme_mode');
+    if (labelEl) {
+        labelEl.textContent = nextMode === 'light' ? 'Modo Claro' : 'Modo Escuro';
+    }
+    if (btn) {
+        const icon = nextMode === 'light' ? '<i class="bi bi-sun"></i>' : '<i class="bi bi-moon-stars"></i>';
+        btn.innerHTML = icon + ' <span id="theme-mode-label">' + (nextMode === 'light' ? 'Modo Claro' : 'Modo Escuro') + '</span>';
+    }
+    if (appSettings) {
+        appSettings['theme_mode'] = nextMode;
+    }
+    try {
+        await apiFetch(API_BASE + '/configuracoes/theme_mode', {
+            method: 'PUT',
+            body: JSON.stringify({ value: nextMode })
+        });
+    } catch (err) {
+        console.error('Error saving theme setting', err);
+    }
+}
+
 function getToken() {
     return localStorage.getItem('lads_token');
 }
@@ -3587,6 +3659,7 @@ async function loadAppSettings() {
         const settings = await res.json();
         appSettings = {};
         settings.forEach(s => appSettings[s.key] = s.value);
+        syncThemeFromSettings();
     } catch (err) {
         appSettings = {};
     }
@@ -3604,6 +3677,12 @@ function getSettingFloat(key, defaultValue) {
 }
 
 const SETTINGS_GROUPS = [
+    {
+        id: 'appearance',
+        label: 'Aparência',
+        icon: '<i class="bi bi-palette"></i>',
+        keys: ['theme_mode']
+    },
     {
         id: 'store',
         label: 'Dados do Estabelecimento',
@@ -3650,6 +3729,15 @@ const SETTINGS_GROUPS = [
 ];
 
 function _getSettingInputHtml(s) {
+    if (s.key === 'theme_mode') {
+        const isLight = s.value === 'light';
+        const icon = isLight ? '<i class="bi bi-sun"></i>' : '<i class="bi bi-moon-stars"></i>';
+        const label = isLight ? 'Modo Claro' : 'Modo Escuro';
+        return `
+            <button type="button" id="setting-${s.key}" class="btn-secondary" onclick="toggleThemeSetting()" style="display:inline-flex;align-items:center;gap:8px;">
+                ${icon} <span id="theme-mode-label">${label}</span>
+            </button>`;
+    }
     if (s.type === 'boolean') {
         const checked = s.value && s.value.toString().toLowerCase() === 'true' ? 'checked' : '';
         return `
@@ -3767,6 +3855,7 @@ async function loadSettings() {
         container.innerHTML = html;
 
         populateSettingsSidebar(settingsMap, orphanKeys);
+        syncThemeFromSettings();
     } catch (err) {
         container.innerHTML = '<div class="error-msg">Erro ao carregar configurações</div>';
     }

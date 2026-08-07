@@ -222,6 +222,7 @@ SEED_SETTINGS = [
     {"key": "printer_nota", "value": "1", "label": "Impressora para Nota", "description": "Qual impressora imprime a nota não fiscal (1 ou 2)", "type": "string"},
     {"key": "printer_cozinha", "value": "1", "label": "Impressora para Cozinha", "description": "Qual impressora imprime pedidos da cozinha (1 ou 2)", "type": "string"},
     {"key": "printer_bar", "value": "2", "label": "Impressora para Bar", "description": "Qual impressora imprime pedidos do bar (1 ou 2)", "type": "string"},
+    {"key": "theme_mode", "value": "dark", "label": "Tema da Interface", "description": "Modo de exibição do sistema: claro (light) ou escuro (dark)", "type": "string"},
 ]
 
 async def _ensure_columns() -> None:

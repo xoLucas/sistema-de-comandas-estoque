@@ -5,6 +5,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
     <meta name="theme-color" content="#0d1117">
     <title>Lads Beer</title>
+    <script>
+        (function() {
+            const THEME_KEY = 'lads_theme_mode';
+            const DEFAULT_THEME = 'dark';
+            let mode;
+            try {
+                mode = localStorage.getItem(THEME_KEY) || DEFAULT_THEME;
+            } catch {
+                mode = DEFAULT_THEME;
+            }
+            mode = mode === 'light' ? 'light' : 'dark';
+            document.documentElement.setAttribute('data-theme', mode);
+            document.querySelector('meta[name="theme-color"]').setAttribute('content', mode === 'light' ? '#f6f8fa' : '#0d1117');
+        })();
+    </script>
     <link rel="stylesheet" href="/static/icons/bootstrap-icons/bootstrap-icons.css">
     <link rel="stylesheet" href="/static/style.css?v=125">
 </head>

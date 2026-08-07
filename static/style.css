@@ -43,6 +43,42 @@
     --font-mono: 'SF Mono', 'Fira Code', monospace;
 }
 
+html[data-theme="light"] {
+    --bg: #f6f8fa;
+    --surface: #ffffff;
+    --surface-hover: #f3f4f6;
+    --border: #d0d7de;
+    --border-accent: #c4cdd5;
+    --text: #1f2328;
+    --text-muted: #57606a;
+    --text-dim: #8c959f;
+    --accent: #e05a3b;
+    --accent-hover: #f78166;
+    --green: #1a7f37;
+    --green-bg: rgba(26, 127, 55, 0.10);
+    --yellow: #9a6700;
+    --yellow-bg: rgba(154, 103, 0, 0.10);
+    --red: #cf222e;
+    --red-bg: rgba(207, 34, 46, 0.10);
+    --blue: #0969da;
+    --blue-bg: rgba(9, 105, 218, 0.10);
+    --orange: #bc4c00;
+    --orange-bg: rgba(188, 76, 0, 0.10);
+    --gray: #6e7781;
+    --gray-bg: rgba(110, 119, 129, 0.10);
+
+    --shadow-sm: 0 1px 2px rgba(31, 35, 40, 0.08);
+    --shadow: 0 2px 8px rgba(31, 35, 40, 0.12);
+    --shadow-lg: 0 4px 16px rgba(31, 35, 40, 0.16);
+
+    /* Aliases para compatibilidade com classes legadas */
+    --color-secondary: var(--surface);
+    --color-tertiary: var(--surface-hover);
+    --border-color: var(--border);
+    --text-color: var(--text);
+    --color-accent: var(--accent);
+}
+
 html {
     font-size: 16px;
     -webkit-text-size-adjust: 100%;

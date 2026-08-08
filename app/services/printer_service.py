@@ -372,6 +372,7 @@ def build_kitchen_ticket(
     b.line("ITENS:")
     for p in prep_items:
         b.line(f"  {p['quantity']}x {p['name']}")
+    b.separator()
 
     b.cut()
 
@@ -426,6 +427,7 @@ def build_bar_ticket(
     b.line("BEBIDAS:")
     for b_item in bar_items:
         b.line(f"  {b_item['quantity']}x {b_item['name']}")
+    b.separator()
 
     b.cut()
 

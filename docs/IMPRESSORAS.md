@@ -4,6 +4,43 @@ Este guia explica como configurar as duas impressoras térmicas **80mm ESC/POS**
 
 ---
 
+##0. Configurando o roteador
+
+1. Acesso Inicial e Configuração da LAN
+Primeiro, isole o roteador. Não conecte nenhum cabo na porta WAN (a porta de internet, geralmente de cor diferente). Conecte apenas o seu PC em uma das portas LAN.
+
+Abra o navegador e acesse o painel do Mercusys (geralmente [http://mwlogin.net](http://mwlogin.net) ou [http://192.168.1.1](http://192.168.1.1)).
+
+Crie uma senha de administrador (se for o primeiro acesso) ou faça o login (admin123).
+
+Vá em Avançado (Advanced) > Rede (Network) > Configurações da LAN (LAN Settings).
+
+Garanta que o IP da LAN do roteador esteja configurado como 192.168.1.1 e a máscara de sub-rede como 255.255.255.0. Salve. (Se alterar, o roteador vai reiniciar).
+
+2. Configuração do Wi-Fi para os Garçons
+Como essa rede não tem internet, o Wi-Fi servirá apenas para rotear as requisições HTTP dos celulares para a porta 8000 do seu PC.
+
+Vá em Wireless > Rede Host (Host Network).
+
+Defina o SSID (ex: Lads_Beer_Sistema_Local).
+
+Crie uma Senha forte.
+
+Dica de performance: Se o roteador for dual-band (2.4GHz e 5GHz), ative as duas. Deixe os celulares dos garçons preferencialmente na 5GHz (tem menor alcance, mas sofre menos interferência em ambientes comerciais).
+
+3. Reserva de IP (DHCP Reservation) — A etapa mais crítica
+Seu guia recomenda IPs fixos para o PC (192.168.1.10) e para as impressoras (.101 e .102). Em vez de configurar IPs estáticos direto no sistema operacional do Linux, a forma mais robusta é forçar o Mercusys a entregar sempre os mesmos IPs usando o MAC Address (Endereço Físico) das placas de rede.
+
+Vá em Avançado (Advanced) > Rede (Network) > Servidor DHCP (DHCP Server).
+
+Certifique-se de que o Servidor DHCP está Habilitado.
+
+Na seção de Reserva de Endereço (Address Reservation), clique em Adicionar.
+
+Você precisará cadastrar os 3 equipamentos:
+
+![alt text](image.png)
+
 ## 1. Especificações do hardware
 
 | Especificação | Valor |
@@ -85,8 +122,8 @@ Sugestão de IPs:
 
 | Impressora | IP sugerido | Função típica |
 |------------|-------------|---------------|
-| Impressora 1 | `192.168.1.101` | Cozinha |
-| Impressora 2 | `192.168.1.102` | Bar |
+| Impressora 1 | `192.168.1.101` | Balcão |
+| Impressora 2 | `192.168.1.102` | Churrasqueira |
 
 Você pode configurar o IP de duas formas:
 

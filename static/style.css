@@ -5546,3 +5546,36 @@ header .subtitle {
 }
 
 /* ===== RESPONSIVE ADJUSTMENTS ===== */
+
+/* =========================================
+   CLASSES UTILITÁRIAS PARA EVITAR OVERFLOW
+   ========================================= */
+
+/* Trunca o texto com "..." em uma única linha */
+.text-truncate {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+}
+
+/* Corrige o bug do flexbox que empurra os itens para fora da tela */
+.flex-min-zero {
+    flex: 1;
+    min-width: 0;
+}
+
+/* Força textos e palavras longas a quebrarem de linha */
+.text-break-word {
+    max-width: 100%;
+    overflow-wrap: break-word;
+    word-wrap: break-word;
+    word-break: break-word;
+}
+
+/* Ajuste específico para a tag (span) do nome do cliente */
+.customer-badge-truncate {
+    display: inline-block;
+    max-width: 85%;
+    vertical-align: middle;
+}

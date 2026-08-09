@@ -11,7 +11,7 @@
 <div id="customer-section" style="display:none;margin-bottom:12px;position:relative;">
     <label class="input-label" style="font-size:12px;color:var(--text-muted);">Cliente da nova comanda</label>
     <div id="customer-selected" style="display:none;align-items:center;gap:8px;margin-bottom:8px;">
-        <span style="background:var(--accent);color:#fff;padding:4px 10px;border-radius:var(--radius);font-size:13px;font-weight:600;" id="customer-selected-name"></span>
+        <span style="background:var(--accent);color:#fff;padding:4px 10px;border-radius:var(--radius);font-size:13px;font-weight:600;" id="customer-selected-name" class="text-truncate customer-badge-truncate"></span>
         <button onclick="clearSelectedCustomer()" class="btn-small" title="Remover cliente"><i class="bi bi-x-lg"></i></button>
     </div>
     <div class="form-row" style="position:relative;">
@@ -31,12 +31,12 @@
 
 <div id="order-selector-section" style="display:none;margin-bottom:12px;">
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
-        <div style="flex:1;">
+        <div class="flex-min-zero">
             <label class="input-label" style="font-size:12px;color:var(--text-muted);">Comanda</label>
-            <select id="order-selector" class="select-field" onchange="switchOrder(this.value)" style="margin-top:4px;">
+            <select id="order-selector" class="select-field text-truncate" onchange="switchOrder(this.value)" style="margin-top:4px;">
             </select>
         </div>
-        <button id="btn-new-order" onclick="startNewOrder()" class="btn-small" style="margin-top:16px;white-space:nowrap;">+ Nova</button>
+        <button id="btn-new-order" onclick="startNewOrder()" class="btn-small" style="margin-top:16px;white-space:nowrap;flex-shrink:0;">+ Nova</button>
     </div>
 </div>
 
@@ -55,7 +55,7 @@
 </div>
 
 <div id="active-actions" style="display:none;">
-    <div id="pedidos-section"></div>
+    <div id="pedidos-section" class="text-break-word"></div>
 
     <button onclick="showAddPedidoModal()" class="btn-pedido-full">+ Novo Pedido</button>
 
@@ -115,7 +115,7 @@
 
         <div id="partial-items-mode" style="display:none;">
             <p style="font-size:13px;color:var(--text-muted);margin-bottom:10px;">Selecione a quantidade de cada item pago:</p>
-            <div id="partial-payment-items" class="partial-payment-list"></div>
+            <div id="partial-payment-items" class="partial-payment-list text-break-word"></div>
             <div class="payment-summary" style="padding:10px 12px;margin-top:10px;">
                 <div class="summary-row"><span>Selecionado</span><span id="partial-selected-total">R$ 0,00</span></div>
             </div>

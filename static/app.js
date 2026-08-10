@@ -2213,6 +2213,8 @@ async function confirmClose() {
     const paymentMethod = document.getElementById('close-payment-method').value;
     const cardMachine = isCardMethod(paymentMethod) ? (document.getElementById('close-card-machine')?.value || '1') : null;
     const errorEl = document.getElementById('close-error');
+    const tenderedInput = document.getElementById('close-tendered-amount');
+    const tendered = tenderedInput ? parseFloat(tenderedInput.value) : 0;
 
     try {
         const res = await apiFetch(API_BASE + '/comanda/fechar', {
@@ -2222,7 +2224,8 @@ async function confirmClose() {
                 order_id: currentOrderId,
                 apply_service_charge: applyServiceCharge,
                 payment_method: paymentMethod,
-                card_machine: cardMachine
+                card_machine: cardMachine,
+                amount: paymentMethod === 'dinheiro' ? tendered : null
             })
         });
         const data = await res.json();
@@ -6243,6 +6246,7 @@ async function confirmBalcaoClose() {
                 apply_service_charge: false,
                 payment_method: method,
                 card_machine: (method === 'cartao_credito' || method === 'cartao_debito') ? cardMachine : null,
+                amount: method === 'dinheiro' ? tendered : null,
             }),
         });
         const data = await res.json();

@@ -250,6 +250,7 @@ class CloseOrderRequest(BaseModel):
     payment_method: str | None = None
     card_machine: str | None = None
     order_id: int | None = None
+    amount: float | None = None
 
 
 class PartialPaymentRequest(BaseModel):
@@ -846,6 +847,12 @@ async def close_order(
     close_method = req.payment_method or "nao_informado"
     if close_method not in _CLOSE_PAYMENT_METHODS:
         return {"error": "Forma de pagamento inválida"}
+
+    if close_method != "fiado":
+        if req.amount is None:
+            return {"error": "Informe o valor pago"}
+        if req.amount < final_total:
+            return {"error": f"Valor pago (R$ {req.amount:.2f}) é menor que o total final (R$ {final_total:.2f})"}
 
     order.status = "finalizada"
     order.closed_at = datetime.now(timezone.utc)

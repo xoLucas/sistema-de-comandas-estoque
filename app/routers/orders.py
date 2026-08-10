@@ -848,7 +848,7 @@ async def close_order(
     if close_method not in _CLOSE_PAYMENT_METHODS:
         return {"error": "Forma de pagamento inválida"}
 
-    if close_method != "fiado":
+    if close_method == "dinheiro":
         if req.amount is None:
             return {"error": "Informe o valor pago"}
         if req.amount < final_total:

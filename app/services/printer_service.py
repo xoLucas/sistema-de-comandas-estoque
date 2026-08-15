@@ -50,6 +50,34 @@ def _format_money(value: float) -> str:
     return f"R$ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
+def _wrap_text(text: str, width: int) -> list[str]:
+    """Wrap a text into lines of at most `width` characters, breaking on spaces."""
+    text = text.strip()
+    if not text:
+        return []
+    words = text.split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        if len(word) > width:
+            if current:
+                lines.append(current)
+                current = ""
+            for i in range(0, len(word), width):
+                lines.append(word[i : i + width])
+            continue
+        if not current:
+            current = word
+        elif len(current) + 1 + len(word) <= width:
+            current += " " + word
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines
+
+
 def _print_terminal_preview(title: str, lines: list[str]) -> None:
     print()
     print("=" * 40)
@@ -229,6 +257,7 @@ async def _background_send_to_function_printer(
                 items=context.get("items"),
                 customer_name=context.get("customer_name"),
                 waiter_name=context.get("waiter_name"),
+                observation=context.get("observation"),
             )
             await broadcast_notification(notification_to_dict(notification))
     except Exception:
@@ -316,7 +345,6 @@ def build_order_receipt(
     footer = store_info.get("ticket_footer")
     if footer:
         b.line(footer)
-    b.line("Documento sem valor fiscal")
     b.line("Obrigado pela preferencia!")
     b.cut()
 
@@ -348,6 +376,7 @@ def build_kitchen_ticket(
     customer_name: str | None,
     order_id: int | None,
     printer_width: int = 32,
+    observation: str | None = None,
 ) -> bytes:
     b = EscPosBuilder(width=printer_width)
 
@@ -372,6 +401,15 @@ def build_kitchen_ticket(
     b.line("ITENS:")
     for p in prep_items:
         b.line(f"  {p['quantity']}x {p['name']}")
+
+    if observation:
+        b.separator()
+        b.bold_on()
+        b.line("OBSERVACAO:")
+        b.bold_off()
+        for obs_line in _wrap_text(observation, printer_width):
+            b.line(obs_line)
+
     b.separator()
 
     b.cut()
@@ -390,6 +428,10 @@ def build_kitchen_ticket(
     preview_lines.append("-" * 32)
     for p in prep_items:
         preview_lines.append(f"  {p['quantity']}x {p['name']}")
+    if observation:
+        preview_lines.append("-" * 32)
+        preview_lines.append("OBSERVACAO:")
+        preview_lines.extend(_wrap_text(observation, 32))
     _print_terminal_preview("COZINHA", preview_lines)
 
     return b.build()
@@ -403,6 +445,7 @@ def build_bar_ticket(
     customer_name: str | None,
     order_id: int | None,
     printer_width: int = 32,
+    observation: str | None = None,
 ) -> bytes:
     b = EscPosBuilder(width=printer_width)
 
@@ -427,6 +470,15 @@ def build_bar_ticket(
     b.line("BEBIDAS:")
     for b_item in bar_items:
         b.line(f"  {b_item['quantity']}x {b_item['name']}")
+
+    if observation:
+        b.separator()
+        b.bold_on()
+        b.line("OBSERVACAO:")
+        b.bold_off()
+        for obs_line in _wrap_text(observation, printer_width):
+            b.line(obs_line)
+
     b.separator()
 
     b.cut()
@@ -445,6 +497,10 @@ def build_bar_ticket(
     preview_lines.append("-" * 32)
     for b_item in bar_items:
         preview_lines.append(f"  {b_item['quantity']}x {b_item['name']}")
+    if observation:
+        preview_lines.append("-" * 32)
+        preview_lines.append("OBSERVACAO:")
+        preview_lines.extend(_wrap_text(observation, 32))
     _print_terminal_preview("BAR", preview_lines)
 
     return b.build()

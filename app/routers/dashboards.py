@@ -5,9 +5,9 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse, JSONResponse
-from sqlalchemy import select, func, cast, Date, or_, extract
+from sqlalchemy import select, func, cast, Date, or_, extract, case
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import selectinload, aliased
 
 from app.core.database import get_db
 from app.core.timezone import (
@@ -24,6 +24,7 @@ from app.models.product import Product
 from app.models.table import Table
 from app.models.user import User
 from app.models.customer import Customer
+from app.models.employee import Employee
 from app.models.consignment import ConsignmentOrder, ConsignmentOrderItem, ConsignmentPayment
 from app.models.cash_register_session import CashRegisterSession
 from app.models.cash_register_movement import CashRegisterMovement
@@ -82,7 +83,7 @@ async def dashboard_geral(
     sales_result = await db.execute(
         select(
             func.coalesce(func.sum(Order.total), 0.0),
-            func.coalesce(func.sum(Order.total * Order.service_charge_pct / 100), 0.0),
+            func.coalesce(func.sum(Order.service_charge_amount), 0.0),
             func.count(Order.id),
         ).where(
             Order.status == "finalizada",
@@ -372,20 +373,31 @@ async def dashboard_vendas(
     ]
 
     # Por garçom
+    waiter_user = aliased(User)
+    closer_user = aliased(User)
+    waiter_name_expr = func.coalesce(
+        Employee.name,
+        case(
+            (closer_user.role != "gerente", closer_user.name),
+            else_=waiter_user.name,
+        ),
+    )
     waiter_result = await db.execute(
         select(
-            User.name,
+            waiter_name_expr,
             func.coalesce(func.sum(Order.total), 0.0),
             func.count(Order.id),
         )
-        .join(Order, Order.waiter_id == User.id)
+        .join(waiter_user, Order.waiter_id == waiter_user.id)
+        .join(closer_user, Order.closed_by_id == closer_user.id)
+        .outerjoin(Employee, Order.closed_waiter_id == Employee.id)
         .where(
             Order.status == "finalizada",
             Order.closed_at >= start_dt,
             Order.closed_at <= end_dt,
             or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
         )
-        .group_by(User.name)
+        .group_by(waiter_name_expr)
         .order_by(func.coalesce(func.sum(Order.total), 0.0).desc())
     )
     by_waiter = [
@@ -692,21 +704,39 @@ async def dashboard_funcionarios(
     start_dt, end_dt, start_local, end_local = _parse_dates(start_date, end_date, default_days=7)
 
     # Vendas por garçom
+    waiter_user = aliased(User)
+    closer_user = aliased(User)
+    waiter_id_expr = func.coalesce(
+        Employee.id,
+        case(
+            (closer_user.role != "gerente", closer_user.id),
+            else_=waiter_user.id,
+        ),
+    )
+    waiter_name_expr = func.coalesce(
+        Employee.name,
+        case(
+            (closer_user.role != "gerente", closer_user.name),
+            else_=waiter_user.name,
+        ),
+    )
     waiter_result = await db.execute(
         select(
-            User.id,
-            User.name,
+            waiter_id_expr,
+            waiter_name_expr,
             func.coalesce(func.sum(Order.total), 0.0),
             func.count(Order.id),
         )
-        .join(Order, Order.waiter_id == User.id)
+        .join(waiter_user, Order.waiter_id == waiter_user.id)
+        .join(closer_user, Order.closed_by_id == closer_user.id)
+        .outerjoin(Employee, Order.closed_waiter_id == Employee.id)
         .where(
             Order.status == "finalizada",
             Order.closed_at >= start_dt,
             Order.closed_at <= end_dt,
             or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
         )
-        .group_by(User.id, User.name)
+        .group_by(waiter_id_expr, waiter_name_expr)
         .order_by(func.coalesce(func.sum(Order.total), 0.0).desc())
     )
     by_waiter = []

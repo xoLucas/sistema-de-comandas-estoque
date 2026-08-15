@@ -276,10 +276,36 @@ async def _ensure_columns() -> None:
             text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS card_machine VARCHAR(30) DEFAULT NULL")
         )
         await conn.execute(
+            text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS closed_by_id INTEGER REFERENCES users(id)")
+        )
+        await conn.execute(
+            text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS closed_waiter_id INTEGER REFERENCES employees(id)")
+        )
+        await conn.execute(
+            text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS service_charge_amount FLOAT NOT NULL DEFAULT 0.0")
+        )
+        await conn.execute(
+            text(
+                "UPDATE orders SET closed_by_id = waiter_id "
+                "WHERE closed_by_id IS NULL AND status = 'finalizada'"
+            )
+        )
+        await conn.execute(
+            text(
+                "UPDATE orders SET service_charge_amount = partial_service_charge + "
+                "CASE WHEN service_charge_applied THEN GREATEST(0, total - partial_payment) * (service_charge_pct / 100) "
+                "ELSE 0 END "
+                "WHERE status = 'finalizada' AND service_charge_amount = 0"
+            )
+        )
+        await conn.execute(
             text("ALTER TABLE products ADD COLUMN IF NOT EXISTS printer VARCHAR(20) DEFAULT NULL")
         )
         await conn.execute(
             text("ALTER TABLE order_items ADD COLUMN IF NOT EXISTS unit_cost FLOAT DEFAULT NULL")
+        )
+        await conn.execute(
+            text("ALTER TABLE order_rounds ADD COLUMN IF NOT EXISTS observation VARCHAR(255) DEFAULT NULL")
         )
         await conn.execute(
             text("ALTER TABLE stock_history ADD COLUMN IF NOT EXISTS consignment_order_id INTEGER REFERENCES consignment_orders(id)")

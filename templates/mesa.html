@@ -167,6 +167,15 @@
     <div class="modal-content">
         <h3>Fechar Mesa</h3>
         <div id="close-summary" style="margin-bottom:14px;"></div>
+        <div id="close-waiter-section" style="display:none;margin-bottom:14px;position:relative;">
+            <label class="input-label">Garçom a creditar</label>
+            <div class="form-row" style="position:relative;">
+                <input type="hidden" id="close-waiter-id">
+                <input type="text" id="close-waiter-input" placeholder="Digite o nome do garçom..." class="input-field" oninput="searchCloseWaiter(this.value)" autocomplete="off">
+                <button onclick="showAllCloseWaiters()" class="btn-small" title="Ver todos"><i class="bi bi-list"></i></button>
+            </div>
+            <div id="close-waiter-suggestions" class="autocomplete-list" style="display:none;"></div>
+        </div>
         <div style="margin-bottom:10px;">
             <label style="display:flex;align-items:center;gap:10px;font-size:15px;cursor:pointer;">
                 <input type="checkbox" id="apply-service-charge" onchange="updateCloseTotal()" style="width:18px;height:18px;accent-color:var(--accent);">

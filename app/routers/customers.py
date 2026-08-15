@@ -1,5 +1,5 @@
 from datetime import datetime, date
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy import select, func, extract, cast, Date
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,9 +8,12 @@ from sqlalchemy.orm import selectinload
 from app.core.database import get_db
 from app.models.customer import Customer
 from app.models.order import Order
+from app.models.order_item import OrderItem
+from app.models.product import Product
 from app.models.user import User
 from app.core.timezone import as_local
 from app.routers.auth_deps import get_current_user, require_role
+from app.routers.financial import serialize_order_sale
 from app.validators.pydantic_mixins import CustomerValidationMixin
 
 router = APIRouter(prefix="/api", tags=["customers"])
@@ -337,6 +340,111 @@ def _month_label(month: int) -> str:
     return labels.get(month, str(month))
 
 
+@router.get("/clientes/{customer_id}/comandas")
+async def customer_orders(
+    customer_id: int,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if user.role not in ("gerente", "caixa"):
+        return {"error": "Acesso restrito"}
+
+    result = await db.execute(select(Customer).where(Customer.id == customer_id))
+    customer = result.scalars().first()
+    if not customer:
+        return {"error": "Cliente não encontrado"}
+
+    count_result = await db.execute(
+        select(func.count(Order.id)).where(
+            Order.customer_id == customer_id,
+            Order.status == "finalizada",
+        )
+    )
+    total = int(count_result.scalar_one())
+
+    offset = (page - 1) * page_size
+    orders_result = await db.execute(
+        select(Order)
+        .where(
+            Order.customer_id == customer_id,
+            Order.status == "finalizada",
+        )
+        .options(
+            selectinload(Order.table),
+            selectinload(Order.waiter),
+            selectinload(Order.closed_by),
+            selectinload(Order.closed_waiter),
+            selectinload(Order.customer),
+            selectinload(Order.items).selectinload(OrderItem.product),
+        )
+        .order_by(Order.closed_at.desc())
+        .offset(offset)
+        .limit(page_size)
+    )
+    orders = orders_result.scalars().all()
+
+    return {
+        "sales": [serialize_order_sale(o) for o in orders],
+        "pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": max(1, (total + page_size - 1) // page_size),
+        },
+    }
+
+
 def _weekday_label(weekday: int) -> str:
     labels = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
     return labels[weekday]
+
+
+@router.get("/clientes/{customer_id}/itens-consumo")
+async def customer_item_ranking(
+    customer_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if user.role not in ("gerente", "caixa"):
+        return {"error": "Acesso restrito"}
+
+    result = await db.execute(select(Customer).where(Customer.id == customer_id))
+    customer = result.scalars().first()
+    if not customer:
+        return {"error": "Cliente não encontrado"}
+
+    items_result = await db.execute(
+        select(
+            Product.name,
+            func.sum(OrderItem.quantity),
+            func.sum(OrderItem.unit_price * OrderItem.quantity),
+        )
+        .join(OrderItem, OrderItem.product_id == Product.id)
+        .join(Order, Order.id == OrderItem.order_id)
+        .where(
+            Order.customer_id == customer_id,
+            Order.status == "finalizada",
+        )
+        .group_by(Product.name)
+        .order_by(
+            func.sum(OrderItem.quantity).desc(),
+            func.sum(OrderItem.unit_price * OrderItem.quantity).desc(),
+        )
+    )
+
+    items = [
+        {
+            "product_name": name,
+            "quantity": int(qty or 0),
+            "total": round(float(total or 0), 2),
+        }
+        for name, qty, total in items_result.all()
+    ]
+
+    return {
+        "customer_id": customer.id,
+        "name": customer.name,
+        "items": items,
+    }

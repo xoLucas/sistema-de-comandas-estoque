@@ -145,6 +145,7 @@ async def _rebuild_printer_data(notification, printer_width: int, db) -> bytes |
     customer_name = details.get("customer_name")
     waiter_name = details.get("waiter_name") or ""
     order_id = details.get("order_id")
+    observation = details.get("observation")
 
     if function == "cozinha":
         return build_kitchen_ticket(
@@ -155,6 +156,7 @@ async def _rebuild_printer_data(notification, printer_width: int, db) -> bytes |
             customer_name,
             order_id,
             printer_width,
+            observation,
         )
 
     if function == "bar":
@@ -166,6 +168,7 @@ async def _rebuild_printer_data(notification, printer_width: int, db) -> bytes |
             customer_name,
             order_id,
             printer_width,
+            observation,
         )
 
     if function == "nota":

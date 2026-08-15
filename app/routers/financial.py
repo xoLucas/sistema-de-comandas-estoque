@@ -41,6 +41,96 @@ from app.models.order_item import OrderItem
 from app.models.product import Product
 
 
+def _resolve_waiter_name(order: Order) -> str:
+    """Resolve the waiter credited for a closed order.
+
+    - Explicitly selected employee (manager override) always wins.
+    - A non-manager closer (garçom/caixa/estoquista) is credited themselves.
+    - A manager closing without selecting anyone credits the waiter who opened.
+    """
+    if order.closed_waiter:
+        return order.closed_waiter.name
+    if order.closed_by and order.closed_by.role != "gerente":
+        return order.closed_by.name
+    if order.waiter:
+        return order.waiter.name
+    if order.closed_by:
+        return order.closed_by.name
+    return "N/A"
+
+
+def serialize_order_sale(order: Order) -> dict:
+    """Serialize a finalized order into the same shape returned by /financeiro/vendas.
+
+    The order must have its relationships loaded (table, waiter, closed_by,
+    closed_waiter, customer and items -> product).
+    """
+    product_remaining = max(0.0, order.total - order.partial_payment)
+    service_remaining = (
+        product_remaining * (order.service_charge_pct / 100)
+        if order.service_charge_applied
+        else 0.0
+    )
+    service_amount = order.service_charge_amount
+    final = product_remaining + service_remaining
+
+    payment_method_label = PAYMENT_LABELS.get(
+        order.payment_method or "nao_informado", order.payment_method or "Não Informado"
+    )
+    payment_details = []
+    for idx, pd in enumerate(order.partial_payments_detail or [], start=1):
+        p_method = pd.get("method", "nao_informado")
+        payment_details.append({
+            "type": "parcial",
+            "index": idx,
+            "method": p_method,
+            "method_label": PAYMENT_LABELS.get(p_method, p_method),
+            "amount": round(float(pd.get("amount", 0)), 2),
+            "product_portion": round(float(pd.get("product_portion", pd.get("amount", 0))), 2),
+            "service_portion": round(float(pd.get("service_portion", 0)), 2),
+            "card_machine": pd.get("card_machine"),
+            "apply_service_charge": pd.get("apply_service_charge", False),
+            "created_at": pd.get("created_at"),
+        })
+    payment_details.append({
+        "type": "final",
+        "method": order.payment_method or "nao_informado",
+        "method_label": payment_method_label,
+        "amount": round(float(final), 2),
+        "card_machine": order.card_machine,
+    })
+
+    return {
+        "order_id": order.id,
+        "table_number": order.table.number if order.table else 0,
+        "is_balcao": order.table.is_balcao if order.table else False,
+        "waiter_name": _resolve_waiter_name(order),
+        "customer_id": order.customer_id,
+        "customer_name": order.customer_name or (order.customer.name if order.customer else None),
+        "items_count": sum(item.quantity for item in order.items),
+        "total": float(order.total),
+        "service_charge_pct": float(order.service_charge_pct),
+        "service_charge_amount": round(float(service_amount), 2),
+        "partial_payment": float(order.partial_payment),
+        "partial_service_charge": float(order.partial_service_charge),
+        "final_total": float(final),
+        "payment_method": order.payment_method or "nao_informado",
+        "payment_method_label": payment_method_label,
+        "card_machine": order.card_machine,
+        "closed_at": order.closed_at.isoformat() if order.closed_at else None,
+        "items": [
+            {
+                "product_name": item.product.name if item.product else "N/A",
+                "quantity": item.quantity,
+                "unit_price": float(item.unit_price),
+                "total": round(float(item.unit_price) * item.quantity, 2),
+            }
+            for item in order.items
+        ],
+        "payment_details": payment_details,
+    }
+
+
 async def _get_perdas(
     start: datetime,
     end: datetime,
@@ -255,6 +345,8 @@ async def _build_daily_report(
         .options(
             selectinload(Order.table),
             selectinload(Order.waiter),
+            selectinload(Order.closed_by),
+            selectinload(Order.closed_waiter),
             selectinload(Order.items).selectinload(OrderItem.product),
         )
         .order_by(Order.closed_at)
@@ -326,7 +418,7 @@ async def _build_daily_report(
         service_remaining = (
             product_remaining * (o.service_charge_pct / 100) if o.service_charge_applied else 0.0
         )
-        service_amount = o.partial_service_charge + service_remaining
+        service_amount = o.service_charge_amount
         final = product_remaining + service_remaining
         close_method = o.payment_method or "nao_informado"
         close_fee = await _card_fee_for_order_payment(final, close_method, o.card_machine, db, card_fee_rates)
@@ -341,7 +433,7 @@ async def _build_daily_report(
         report["summary"]["total_card_fees"] += close_fee
         report["summary"]["gross_total"] += final
 
-        waiter_name = o.waiter.name if o.waiter else "N/A"
+        waiter_name = _resolve_waiter_name(o)
         waiter_totals[waiter_name]["service_charge"] += service_amount
         waiter_totals[waiter_name]["orders"] += 1
         waiter_totals[waiter_name]["sales"] += o.total
@@ -498,6 +590,8 @@ async def _build_session_report(
         .options(
             selectinload(Order.table),
             selectinload(Order.waiter),
+            selectinload(Order.closed_by),
+            selectinload(Order.closed_waiter),
             selectinload(Order.items).selectinload(OrderItem.product),
         )
         .order_by(Order.closed_at)
@@ -605,7 +699,7 @@ async def _build_session_report(
         service_remaining = (
             product_remaining * (o.service_charge_pct / 100) if o.service_charge_applied else 0.0
         )
-        service_amount = o.partial_service_charge + service_remaining
+        service_amount = o.service_charge_amount
         final = product_remaining + service_remaining
         close_method = o.payment_method or "nao_informado"
         close_fee = await _card_fee_for_order_payment(final, close_method, o.card_machine, db, card_fee_rates)
@@ -620,7 +714,7 @@ async def _build_session_report(
         report["summary"]["total_card_fees"] += close_fee
         report["summary"]["gross_total"] += final
 
-        waiter_name = o.waiter.name if o.waiter else "N/A"
+        waiter_name = _resolve_waiter_name(o)
         waiter_totals[waiter_name]["service_charge"] += service_amount
         waiter_totals[waiter_name]["orders"] += 1
         waiter_totals[waiter_name]["sales"] += o.total
@@ -773,6 +867,8 @@ async def list_sales(
         .options(
             selectinload(Order.table),
             selectinload(Order.waiter),
+            selectinload(Order.closed_by),
+            selectinload(Order.closed_waiter),
             selectinload(Order.customer),
             selectinload(Order.items).selectinload(OrderItem.product),
         )
@@ -793,71 +889,9 @@ async def list_sales(
     total_service = 0.0
 
     for o in orders:
-        product_remaining = max(0.0, o.total - o.partial_payment)
-        service_remaining = (
-            product_remaining * (o.service_charge_pct / 100) if o.service_charge_applied else 0.0
-        )
-        service_amount = o.partial_service_charge + service_remaining
-        final = product_remaining + service_remaining
         total_day += o.total
-        total_service += service_amount
-
-        payment_method_label = PAYMENT_LABELS.get(o.payment_method or "nao_informado", o.payment_method or "Não Informado")
-        final_payment = {
-            "type": "final",
-            "method": o.payment_method or "nao_informado",
-            "method_label": payment_method_label,
-            "amount": round(float(final), 2),
-            "card_machine": o.card_machine,
-        }
-        payment_details = []
-        for idx, pd in enumerate(o.partial_payments_detail or [], start=1):
-            p_method = pd.get("method", "nao_informado")
-            payment_details.append({
-                "type": "parcial",
-                "index": idx,
-                "method": p_method,
-                "method_label": PAYMENT_LABELS.get(p_method, p_method),
-                "amount": round(float(pd.get("amount", 0)), 2),
-                "product_portion": round(float(pd.get("product_portion", pd.get("amount", 0))), 2),
-                "service_portion": round(float(pd.get("service_portion", 0)), 2),
-                "card_machine": pd.get("card_machine"),
-                "apply_service_charge": pd.get("apply_service_charge", False),
-                "created_at": pd.get("created_at"),
-            })
-        payment_details.append(final_payment)
-
-        data.append(
-            {
-                "order_id": o.id,
-                "table_number": o.table.number if o.table else 0,
-                "is_balcao": o.table.is_balcao if o.table else False,
-                "waiter_name": o.waiter.name if o.waiter else "N/A",
-                "customer_id": o.customer_id,
-                "customer_name": o.customer_name or (o.customer.name if o.customer else None),
-                "items_count": sum(item.quantity for item in o.items),
-                "total": float(o.total),
-                "service_charge_pct": float(o.service_charge_pct),
-                "service_charge_amount": round(float(service_amount), 2),
-                "partial_payment": float(o.partial_payment),
-                "partial_service_charge": float(o.partial_service_charge),
-                "final_total": float(final),
-                "payment_method": o.payment_method or "nao_informado",
-                "payment_method_label": payment_method_label,
-                "card_machine": o.card_machine,
-                "closed_at": o.closed_at.isoformat() if o.closed_at else None,
-                "items": [
-                    {
-                        "product_name": item.product.name if item.product else "N/A",
-                        "quantity": item.quantity,
-                        "unit_price": float(item.unit_price),
-                        "total": round(float(item.unit_price) * item.quantity, 2),
-                    }
-                    for item in o.items
-                ],
-                "payment_details": payment_details,
-            }
-        )
+        total_service += o.service_charge_amount
+        data.append(serialize_order_sale(o))
 
     return {
         "sales": data,
@@ -903,7 +937,7 @@ async def dashboard(
         sales_result = await db.execute(
             select(
                 func.coalesce(func.sum(Order.total), 0),
-                func.coalesce(func.sum(Order.total * Order.service_charge_pct / 100), 0),
+                func.coalesce(func.sum(Order.service_charge_amount), 0),
                 func.count(Order.id),
             ).where(
                 Order.status == "finalizada",

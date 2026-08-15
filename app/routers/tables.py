@@ -9,6 +9,7 @@ from app.models.table import Table
 from app.models.order import Order
 from app.models.order_item import OrderItem
 from app.models.order_round import OrderRound
+from app.models.product import Product
 from app.models.user import User
 from app.core.timezone import as_local
 from app.routers.auth_deps import get_current_user, require_role
@@ -35,8 +36,8 @@ async def list_tables(
             select(Order)
             .where(Order.table_id == t.id, Order.status == "aberta")
             .options(
-                selectinload(Order.items),
-                selectinload(Order.rounds).selectinload(OrderRound.items),
+                selectinload(Order.items).selectinload(OrderItem.product).selectinload(Product.pack_unit_product),
+                selectinload(Order.rounds).selectinload(OrderRound.items).selectinload(OrderItem.product).selectinload(Product.pack_unit_product),
             )
             .order_by(Order.id)
         )
@@ -81,10 +82,11 @@ async def get_table_detail(
         .where(Order.table_id == table_id, Order.status == "aberta")
         .options(
             selectinload(Order.waiter),
-            selectinload(Order.items).selectinload(OrderItem.product),
+            selectinload(Order.items).selectinload(OrderItem.product).selectinload(Product.pack_unit_product),
             selectinload(Order.rounds)
             .selectinload(OrderRound.items)
-            .selectinload(OrderItem.product),
+            .selectinload(OrderItem.product)
+            .selectinload(Product.pack_unit_product),
         )
     )
     if table.is_balcao:

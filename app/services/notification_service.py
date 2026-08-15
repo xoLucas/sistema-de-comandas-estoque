@@ -24,6 +24,7 @@ async def create_printer_failure_notification(
     items: list[dict] | None = None,
     customer_name: str | None = None,
     waiter_name: str | None = None,
+    observation: str | None = None,
 ) -> Notification:
     function_label = _function_label(function)
     title = f"Falha na impressora {function_label}"
@@ -49,6 +50,7 @@ async def create_printer_failure_notification(
         "items": items or [],
         "customer_name": customer_name,
         "waiter_name": waiter_name,
+        "observation": observation,
     }
 
     notification = Notification(

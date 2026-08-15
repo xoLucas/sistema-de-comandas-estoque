@@ -37,6 +37,13 @@
     <div class="modal-content customer-dashboard-content">
         <h3 id="dashboard-customer-name">Dashboard do Cliente</h3>
 
+        <div class="customer-top-item-block" id="customer-top-item-block" onclick="openCustomerItemsRanking()" style="cursor:pointer;">
+            <div class="customer-top-item-label">Item mais consumido</div>
+            <div class="customer-top-item-value" id="customer-top-item-value">Carregando...</div>
+            <div class="customer-top-item-sub" id="customer-top-item-sub"></div>
+            <div class="customer-top-item-hint">Ver ranking completo ›</div>
+        </div>
+
         <div class="customer-summary-cards">
             <div class="customer-summary-card">
                 <span class="customer-summary-label">Consumo Total</span>
@@ -67,7 +74,33 @@
             <div id="weekday-chart" class="customer-chart-container"></div>
         </div>
 
+        <div class="customer-chart-block">
+            <h4>Histórico de Comandas</h4>
+            <div id="customer-orders-list" class="customer-orders-list"></div>
+            <div id="customer-orders-pagination" class="customer-orders-pagination"></div>
+        </div>
+
         <button onclick="closeCustomerDashboardModal()" class="btn-secondary-full">Fechar</button>
+    </div>
+</div>
+
+<div id="sale-detail-modal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <h3 id="sale-detail-title">Detalhes da Comanda</h3>
+        <div id="sale-detail-content"></div>
+        <div style="display:flex;gap:8px;margin-top:12px;">
+            <button onclick="closeSaleDetailModal()" class="btn-secondary-full" style="flex:1;">Fechar</button>
+        </div>
+    </div>
+</div>
+
+<div id="customer-items-ranking-modal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <h3 id="customer-items-ranking-title">Ranking de Consumo</h3>
+        <div id="customer-items-ranking-content"></div>
+        <div style="display:flex;gap:8px;margin-top:12px;">
+            <button onclick="closeCustomerItemsRanking()" class="btn-secondary-full" style="flex:1;">Fechar</button>
+        </div>
     </div>
 </div>
 {% endblock %}

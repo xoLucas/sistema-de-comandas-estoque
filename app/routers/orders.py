@@ -18,6 +18,7 @@ from app.models.stock_history import StockHistory
 from app.models.notification import Notification
 from app.models.user import User
 from app.models.customer import Customer
+from app.models.employee import Employee
 from app.models.cash_register_session import CashRegisterSession
 from app.routers.auth_deps import get_current_user
 from app.services.promotion_service import get_discounted_price
@@ -157,6 +158,48 @@ async def _return_order_stock(
         ))
 
 
+async def _release_pending_items(
+    db: AsyncSession,
+    order: Order,
+    table_id: int,
+    note: str,
+) -> list[tuple[int, int, str]]:
+    """Return stock for unconfirmed (pending) items and delete them.
+
+    Returns (product_id, stock, status) tuples for WebSocket broadcasting.
+    """
+    pending_items = [item for item in order.items if item.is_pending]
+    if not pending_items:
+        return []
+
+    stock_broadcast_infos = []
+    for item in pending_items:
+        product = item.product
+        if not product:
+            continue
+        try:
+            stock_product, unit_quantity = await _resolve_pack_stock(db, product, item.quantity)
+        except ValueError:
+            stock_product = product
+            unit_quantity = item.quantity
+
+        stock_product.stock += unit_quantity
+        stock_broadcast_infos.append(_build_stock_broadcast_info(product))
+        if is_pack(product):
+            stock_broadcast_infos.append(_build_stock_broadcast_info(stock_product))
+        db.add(StockHistory(
+            product_id=stock_product.id,
+            order_id=order.id,
+            table_id=table_id,
+            type="entrada",
+            quantity=unit_quantity,
+            note=note,
+        ))
+        await db.delete(item)
+
+    return stock_broadcast_infos
+
+
 async def _check_and_consume_stock_consignment(
     db: AsyncSession,
     product: Product,
@@ -251,6 +294,7 @@ class CloseOrderRequest(BaseModel):
     card_machine: str | None = None
     order_id: int | None = None
     amount: float | None = None
+    waiter_id: int | None = None
 
 
 class PartialPaymentRequest(BaseModel):
@@ -271,6 +315,7 @@ class CreatePedidoRequest(BaseModel):
     table_id: int
     order_id: int | None = None
     items: list[PedidoItem]
+    observation: str | None = None
 
 
 class PendingOrderItemRequest(BaseModel):
@@ -309,6 +354,7 @@ async def _send_kitchen_ticket(
     order_id: int | None = None,
     table_id: int | None = None,
     table_label: str | None = None,
+    observation: str | None = None,
 ) -> None:
     if not prep_items:
         return
@@ -316,7 +362,7 @@ async def _send_kitchen_ticket(
     printer = await get_printer_for_function("cozinha")
     width = printer["width"] if printer else 32
     data = build_kitchen_ticket(
-        table_number, round_number, prep_items, waiter_name, customer_name, order_id, width
+        table_number, round_number, prep_items, waiter_name, customer_name, order_id, width, observation
     )
     context = {
         "function": "cozinha",
@@ -330,6 +376,7 @@ async def _send_kitchen_ticket(
         "items": prep_items,
         "customer_name": customer_name,
         "waiter_name": waiter_name,
+        "observation": observation,
     }
     schedule_function_printer_send(data, "cozinha", context)
 
@@ -343,6 +390,7 @@ async def _send_bar_ticket(
     order_id: int | None = None,
     table_id: int | None = None,
     table_label: str | None = None,
+    observation: str | None = None,
 ) -> None:
     if not bar_items:
         return
@@ -350,7 +398,7 @@ async def _send_bar_ticket(
     printer = await get_printer_for_function("bar")
     width = printer["width"] if printer else 32
     data = build_bar_ticket(
-        table_number, round_number, bar_items, waiter_name, customer_name, order_id, width
+        table_number, round_number, bar_items, waiter_name, customer_name, order_id, width, observation
     )
     context = {
         "function": "bar",
@@ -364,6 +412,7 @@ async def _send_bar_ticket(
         "items": bar_items,
         "customer_name": customer_name,
         "waiter_name": waiter_name,
+        "observation": observation,
     }
     schedule_function_printer_send(data, "bar", context)
 
@@ -483,7 +532,7 @@ async def create_pedido(
 
     round_number = len(order.rounds) + 1
 
-    rnd = OrderRound(order_id=order.id, round_number=round_number)
+    rnd = OrderRound(order_id=order.id, round_number=round_number, observation=req.observation)
     db.add(rnd)
     await db.flush()
 
@@ -560,12 +609,12 @@ async def create_pedido(
     if not table.is_balcao:
         if prep_items:
             await _send_kitchen_ticket(
-                table.number, round_number, prep_items, user.name, order.customer_name, order.id, table.id, table_label
+                table.number, round_number, prep_items, user.name, order.customer_name, order.id, table.id, table_label, req.observation
             )
 
         if bar_items:
             await _send_bar_ticket(
-                table.number, round_number, bar_items, user.name, order.customer_name, order.id, table.id, table_label
+                table.number, round_number, bar_items, user.name, order.customer_name, order.id, table.id, table_label, req.observation
             )
 
     items_out = []
@@ -854,10 +903,27 @@ async def close_order(
         if req.amount < final_total:
             return {"error": f"Valor pago (R$ {req.amount:.2f}) é menor que o total final (R$ {final_total:.2f})"}
 
+    table_label = "Balcão" if table and table.is_balcao else f"Mesa {table.number if table else req.table_id}"
+    stock_broadcast_infos = await _release_pending_items(
+        db,
+        order,
+        req.table_id,
+        f"Cancelamento itens pendentes no fechamento da {table_label}",
+    )
+
     order.status = "finalizada"
     order.closed_at = datetime.now(timezone.utc)
     order.payment_method = close_method
     order.card_machine = req.card_machine
+    order.closed_by_id = user.id
+    order.service_charge_amount = round(order.partial_service_charge + remaining_service, 2)
+
+    if req.waiter_id is not None and user.role == "gerente":
+        employee_result = await db.execute(select(Employee).where(Employee.id == req.waiter_id))
+        employee = employee_result.scalars().first()
+        if not employee:
+            return {"error": "Funcionário não encontrado"}
+        order.closed_waiter_id = employee.id
 
     await db.flush()
     if not await _has_open_orders(db, req.table_id):
@@ -865,6 +931,9 @@ async def close_order(
             table.status = "vazia"
 
     await db.commit()
+
+    for product_id, stock, status in stock_broadcast_infos:
+        await broadcast_stock_update(product_id, stock, status)
 
     if table.is_balcao:
         receipt_result = None
@@ -1148,6 +1217,7 @@ async def print_order_receipt(
 class PendingOrderActionRequest(BaseModel):
     table_id: int
     order_id: int | None = None
+    observation: str | None = None
 
 
 @router.post("/pedido-pendente/item")
@@ -1285,7 +1355,7 @@ async def confirm_pending_order(
         return {"error": "Nenhum item pendente para confirmar"}
 
     round_number = len(order.rounds) + 1
-    rnd = OrderRound(order_id=order.id, round_number=round_number)
+    rnd = OrderRound(order_id=order.id, round_number=round_number, observation=req.observation)
     db.add(rnd)
     await db.flush()
 
@@ -1331,6 +1401,7 @@ async def confirm_pending_order(
                 order.id,
                 req.table_id,
                 table_label,
+                req.observation,
             )
         if bar_items:
             await _send_bar_ticket(
@@ -1342,6 +1413,7 @@ async def confirm_pending_order(
                 order.id,
                 req.table_id,
                 table_label,
+                req.observation,
             )
 
     return {

@@ -622,6 +622,7 @@ function renderNotificationCard(n) {
     if (details.failed_printer_name) detailRows.push(`<div class="detail-row"><span class="detail-label">Impressora</span><span class="detail-value">${details.failed_printer_name}</span></div>`);
     if (details.customer_name) detailRows.push(`<div class="detail-row"><span class="detail-label">Cliente</span><span class="detail-value">${details.customer_name}</span></div>`);
     if (details.waiter_name) detailRows.push(`<div class="detail-row"><span class="detail-label">Garçom</span><span class="detail-value">${details.waiter_name}</span></div>`);
+    if (details.observation) detailRows.push(`<div class="detail-row"><span class="detail-label">Observação</span><span class="detail-value">${escapeHtml(details.observation)}</span></div>`);
 
     const detailsHtml = detailRows.length > 0
         ? `<div class="notification-card-details">${detailRows.join('')}${itemsHtml}</div>`
@@ -1026,6 +1027,8 @@ let pedidoSelectionHtml = '';
 let currentPedidoCategory = 'TODOS';
 let currentPedidoSearch = '';
 let pedidoShowOnlyInStock = true;
+let pedidoObservation = '';
+let pedidoReserved = false;
 
 let pendingOrderCancelling = false;
 
@@ -1041,11 +1044,13 @@ function showAddPedidoModal() {
             pedidoProductsData = products;
             currentPedidoCategory = 'TODOS';
             currentPedidoSearch = '';
+            pedidoObservation = '';
 
             const pendingMap = {};
             (pending.items || []).forEach(item => {
                 pendingMap[item.product_id] = item.quantity;
             });
+            pedidoReserved = (pending.items || []).length > 0;
 
             products.forEach(p => {
                 const pendingQty = pendingMap[p.id] || 0;
@@ -1187,6 +1192,7 @@ async function changePedidoQty(productId, delta) {
         }
         if (addBtn) addBtn.disabled = remaining <= 0;
 
+        pedidoReserved = Object.values(pedidoQuantities).some(q => q > 0);
         applyPedidoFilters();
     } catch (err) {
         alert('Erro ao atualizar quantidade');
@@ -1212,9 +1218,30 @@ async function closeAddPedidoModal() {
         console.error('Erro ao cancelar pedido pendente', err);
     } finally {
         pendingOrderCancelling = false;
+        pedidoReserved = false;
         document.getElementById('add-pedido-modal').style.display = 'none';
     }
 }
+
+// Release any pending reservation if the waiter leaves the page with the
+// order modal open (mobile hardware back button, closing the tab, etc.).
+window.addEventListener('pagehide', () => {
+    if (!pedidoReserved || typeof TABLE_ID === 'undefined') return;
+    try {
+        const token = getToken();
+        fetch(API_BASE + '/pedido-pendente/cancelar', {
+            method: 'POST',
+            keepalive: true,
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': token ? 'Bearer ' + token : ''
+            },
+            body: JSON.stringify({ table_id: TABLE_ID, order_id: currentOrderId })
+        });
+    } catch (err) {
+        // Best-effort only; ignore failures during unload.
+    }
+});
 
 function reviewPedido() {
     const selected = [];
@@ -1269,6 +1296,10 @@ function reviewPedido() {
             <span>Total do Pedido</span>
             <span>${formatCurrency(total)}</span>
         </div>
+        <div style="margin-top:12px;">
+            <label class="input-label">Observação do pedido</label>
+            <textarea id="pedido-observation" class="input-field" rows="2" maxlength="255" placeholder="Ex.: sem cebola, bem passado, sem gelo..." oninput="pedidoObservation = this.value" style="resize:none;width:100%;">${escapeHtml(pedidoObservation)}</textarea>
+        </div>
         <div style="display:flex;gap:8px;margin-top:14px;">
             <button onclick="confirmPedido()" class="btn-primary-full" style="flex:1;">Confirmar e Enviar</button>
             <button onclick="backToPedidoSelection()" class="btn-secondary-full" style="flex:1;">Voltar</button>
@@ -1298,9 +1329,11 @@ function backToPedidoSelection() {
 
 async function confirmPedido() {
     try {
+        const observationEl = document.getElementById('pedido-observation');
+        const observation = (observationEl ? observationEl.value : pedidoObservation).trim();
         const res = await apiFetch(API_BASE + '/pedido-pendente/confirmar', {
             method: 'POST',
-            body: JSON.stringify({ table_id: TABLE_ID, order_id: currentOrderId })
+            body: JSON.stringify({ table_id: TABLE_ID, order_id: currentOrderId, observation: observation || null })
         });
         const data = await res.json();
         if (data.error) {
@@ -1315,6 +1348,8 @@ async function confirmPedido() {
             }
             return;
         }
+        pedidoObservation = '';
+        pedidoReserved = false;
         document.getElementById('add-pedido-modal').style.display = 'none';
         loadTableDetail();
     } catch (err) {
@@ -1775,6 +1810,82 @@ async function createNewOrder() {
     } catch (err) { alert('Erro ao criar nova comanda'); }
 }
 
+let closeWaiterCache = [];
+let selectedCloseWaiterId = null;
+
+async function loadCloseWaiters() {
+    try {
+        const res = await apiFetch(API_BASE + '/funcionarios?active_only=true');
+        const data = await res.json();
+        closeWaiterCache = (data && !data.error) ? data : [];
+    } catch (err) {
+        closeWaiterCache = [];
+    }
+}
+
+function searchCloseWaiter(query) {
+    const el = document.getElementById('close-waiter-suggestions');
+    if (!el) return;
+    const q = (query || '').trim().toLowerCase();
+    if (!q) {
+        el.style.display = 'none';
+        return;
+    }
+    const matches = closeWaiterCache.filter(e => (e.name || '').toLowerCase().includes(q));
+    renderCloseWaiterSuggestions(matches);
+}
+
+async function showAllCloseWaiters() {
+    const input = document.getElementById('close-waiter-input');
+    if (input) input.value = '';
+    selectedCloseWaiterId = null;
+    if (closeWaiterCache.length === 0) await loadCloseWaiters();
+    renderCloseWaiterSuggestions(closeWaiterCache);
+}
+
+function renderCloseWaiterSuggestions(employees) {
+    const el = document.getElementById('close-waiter-suggestions');
+    if (!el) return;
+    if (!employees || employees.length === 0) {
+        el.innerHTML = '<div class="autocomplete-empty">Nenhum funcionário encontrado</div>';
+        el.style.display = 'block';
+        return;
+    }
+    el.innerHTML = employees.map(e => `
+        <div class="autocomplete-item" onclick="selectCloseWaiter(${e.id})">
+            <span>${escapeHtml(e.name)}</span>
+            <span class="autocomplete-meta">${escapeHtml(e.role || '')}</span>
+        </div>
+    `).join('');
+    el.style.display = 'block';
+}
+
+function selectCloseWaiter(id) {
+    const emp = closeWaiterCache.find(e => e.id === id);
+    selectedCloseWaiterId = id;
+    const input = document.getElementById('close-waiter-input');
+    if (input) input.value = emp ? emp.name : '';
+    hideCloseWaiterSuggestions();
+}
+
+function clearCloseWaiter() {
+    selectedCloseWaiterId = null;
+    const input = document.getElementById('close-waiter-input');
+    if (input) input.value = '';
+}
+
+function hideCloseWaiterSuggestions() {
+    const el = document.getElementById('close-waiter-suggestions');
+    if (el) el.style.display = 'none';
+}
+
+document.addEventListener('click', (e) => {
+    const section = document.getElementById('close-waiter-section');
+    if (section && !section.contains(e.target)) {
+        hideCloseWaiterSuggestions();
+    }
+});
+
 async function showCloseModal() {
     const order = getCurrentOrder();
     if (!order) return;
@@ -1808,6 +1919,15 @@ async function showCloseModal() {
 
     document.getElementById('close-tendered-amount').value = remainingProduct.toFixed(2);
 
+    const isManager = hasRole('gerente');
+    const waiterSection = document.getElementById('close-waiter-section');
+    if (waiterSection) waiterSection.style.display = isManager ? 'block' : 'none';
+    selectedCloseWaiterId = null;
+    const waiterInput = document.getElementById('close-waiter-input');
+    if (waiterInput) waiterInput.value = '';
+    hideCloseWaiterSuggestions();
+    if (isManager) loadCloseWaiters();
+
     updateCloseTotal();
     document.getElementById('close-modal').style.display = 'flex';
 }
@@ -1840,6 +1960,8 @@ function updateCloseTotal() {
 }
 
 function closeCloseModal() {
+    selectedCloseWaiterId = null;
+    hideCloseWaiterSuggestions();
     document.getElementById('close-modal').style.display = 'none';
 }
 
@@ -2225,7 +2347,8 @@ async function confirmClose() {
                 apply_service_charge: applyServiceCharge,
                 payment_method: paymentMethod,
                 card_machine: cardMachine,
-                amount: paymentMethod === 'dinheiro' ? tendered : null
+                amount: paymentMethod === 'dinheiro' ? tendered : null,
+                waiter_id: selectedCloseWaiterId || null
             })
         });
         const data = await res.json();
@@ -3711,6 +3834,11 @@ async function loadPromotions() {
         document.getElementById('count-expirada').textContent = counts.expirada;
         document.getElementById('count-desativada').textContent = counts.desativada;
 
+        const canManage = canManagePromotions();
+        document.querySelectorAll('.promo-manager-only').forEach(el => {
+            el.style.display = canManage ? 'block' : 'none';
+        });
+
         if (promotions.length === 0) {
             container.innerHTML = '<p class="empty-msg">Nenhuma promoção cadastrada</p>';
             return;
@@ -3718,11 +3846,6 @@ async function loadPromotions() {
 
         const statusLabels = { ativa: 'Ativa', agendada: 'Agendada', expirada: 'Expirada', desativada: 'Desativada' };
         const statusColors = { ativa: 'green', agendada: 'yellow', expirada: 'orange', desativada: 'red' };
-
-        const canManage = canManagePromotions();
-        document.querySelectorAll('.promo-manager-only').forEach(el => {
-            el.style.display = canManage ? 'block' : 'none';
-        });
 
         container.innerHTML = promotions.map(p => {
             const period = formatPromotionPeriod(p.start_at, p.end_at);
@@ -4755,6 +4878,8 @@ async function openCustomerDashboard(customerId) {
     document.getElementById('customer-dashboard-modal').style.display = 'flex';
     await loadCustomerSummaryForDashboard(customerId);
     await loadCustomerDashboard(customerId);
+    await loadCustomerOrders(customerId, 1);
+    await loadCustomerItems(customerId);
 }
 
 async function loadCustomerSummaryForDashboard(customerId) {
@@ -4878,6 +5003,132 @@ function renderBarChart(containerId, data, labelKey, countKey, totalKey) {
 
 function closeCustomerDashboardModal() {
     document.getElementById('customer-dashboard-modal').style.display = 'none';
+}
+
+// ====== CUSTOMER ORDER HISTORY (COMANDAS) ======
+let customerOrdersCustomerId = null;
+let customerOrdersPage = 1;
+let customerOrdersData = [];
+
+async function loadCustomerOrders(customerId, page) {
+    const listEl = document.getElementById('customer-orders-list');
+    const pagEl = document.getElementById('customer-orders-pagination');
+    if (!listEl) return;
+
+    customerOrdersCustomerId = customerId;
+    customerOrdersPage = page || 1;
+    listEl.innerHTML = '<div class="loading">Carregando...</div>';
+    if (pagEl) pagEl.innerHTML = '';
+
+    try {
+        const res = await apiFetch(API_BASE + '/clientes/' + customerId + '/comandas?page=' + customerOrdersPage + '&page_size=10');
+        const data = await res.json();
+        if (data.error) {
+            listEl.innerHTML = '<div class="error-msg">' + data.error + '</div>';
+            return;
+        }
+
+        customerOrdersData = data.sales || [];
+        if (customerOrdersData.length === 0) {
+            listEl.innerHTML = '<p class="empty-msg">Nenhuma comanda registrada</p>';
+            return;
+        }
+
+        listEl.innerHTML = customerOrdersData.map((s, idx) => {
+            const orderTotal = round(s.total + s.service_charge_amount, 2);
+            return `
+            <div class="sale-card" onclick="openCustomerOrderDetail(${idx})" style="cursor:pointer;">
+                <div class="sale-header">
+                    <span class="sale-table">Comanda #${s.order_id} - ${s.is_balcao ? 'Balcão' : 'Mesa ' + s.table_number}</span>
+                    <span class="sale-time">${s.closed_at ? _fmtDateTime(s.closed_at) : '-'}</span>
+                </div>
+                <div class="sale-total">${formatCurrency(orderTotal)}</div>
+            </div>
+            `;
+        }).join('');
+
+        renderCustomerOrdersPagination(data.pagination);
+    } catch (err) {
+        listEl.innerHTML = '<div class="error-msg">Erro ao carregar comandas</div>';
+    }
+}
+
+function renderCustomerOrdersPagination(pagination) {
+    const pagEl = document.getElementById('customer-orders-pagination');
+    if (!pagEl || !pagination) return;
+
+    const start = (pagination.page - 1) * pagination.page_size + 1;
+    const end = Math.min(pagination.page * pagination.page_size, pagination.total);
+
+    pagEl.innerHTML = `
+        <span class="customer-orders-pagination-info">Mostrando ${start}-${end} de ${pagination.total}</span>
+        <div class="customer-orders-pagination-buttons">
+            <button class="btn-small" onclick="loadCustomerOrders(customerOrdersCustomerId, ${pagination.page - 1})" ${pagination.page <= 1 ? 'disabled' : ''}>Anterior</button>
+            <button class="btn-small" onclick="loadCustomerOrders(customerOrdersCustomerId, ${pagination.page + 1})" ${pagination.page >= pagination.total_pages ? 'disabled' : ''}>Próxima</button>
+        </div>
+    `;
+}
+
+function openCustomerOrderDetail(index) {
+    const sale = customerOrdersData[index];
+    if (!sale) return;
+    window._lastSalesData = customerOrdersData;
+    openSaleDetailModal(index);
+}
+
+// ====== CUSTOMER ITEM RANKING ======
+let customerItemsCustomerId = null;
+let customerItemsRanking = [];
+
+async function loadCustomerItems(customerId) {
+    customerItemsCustomerId = customerId;
+    const valueEl = document.getElementById('customer-top-item-value');
+    const subEl = document.getElementById('customer-top-item-sub');
+
+    try {
+        const res = await apiFetch(API_BASE + '/clientes/' + customerId + '/itens-consumo');
+        const data = await res.json();
+        if (data.error) {
+            if (valueEl) valueEl.textContent = '-';
+            if (subEl) subEl.textContent = '';
+            return;
+        }
+        customerItemsRanking = data.items || [];
+        const top = customerItemsRanking[0];
+        if (top) {
+            if (valueEl) valueEl.textContent = top.product_name;
+            if (subEl) subEl.textContent = top.quantity + 'x consumido' + (top.total > 0 ? ' · ' + formatCurrency(top.total) : '');
+        } else {
+            if (valueEl) valueEl.textContent = 'Nenhum consumo registrado';
+            if (subEl) subEl.textContent = '';
+        }
+    } catch (err) {
+        if (valueEl) valueEl.textContent = '-';
+        if (subEl) subEl.textContent = '';
+    }
+}
+
+function openCustomerItemsRanking() {
+    const modal = document.getElementById('customer-items-ranking-modal');
+    const contentEl = document.getElementById('customer-items-ranking-content');
+    if (!modal || !contentEl) return;
+
+    if (customerItemsRanking.length === 0) {
+        contentEl.innerHTML = '<p class="empty-msg">Nenhum consumo registrado</p>';
+    } else {
+        contentEl.innerHTML = customerItemsRanking.map((it, idx) => `
+            <div class="summary-row">
+                <span>${idx + 1}. ${escapeHtml(it.product_name)}</span>
+                <span>${it.quantity}x · ${formatCurrency(it.total)}</span>
+            </div>
+        `).join('');
+    }
+    modal.style.display = 'flex';
+}
+
+function closeCustomerItemsRanking() {
+    const modal = document.getElementById('customer-items-ranking-modal');
+    if (modal) modal.style.display = 'none';
 }
 
 // ====== TABLE CUSTOMER AUTOCOMPLETE ======
@@ -5004,7 +5255,16 @@ document.addEventListener('keydown', (e) => {
     if (visibleModals.length === 0) return;
 
     // Close the last (topmost) visible modal so stacked modals close one by one.
-    visibleModals[visibleModals.length - 1].style.display = 'none';
+    const topModal = visibleModals[visibleModals.length - 1];
+
+    // The "Novo Pedido" modal holds a pending reservation that must be released
+    // when closed without confirming the order.
+    if (topModal.id === 'add-pedido-modal') {
+        closeAddPedidoModal();
+        return;
+    }
+
+    topModal.style.display = 'none';
 });
 
 // ===== SCROLL HELPER =====

@@ -11,6 +11,8 @@ class Order(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     table_id: Mapped[int] = mapped_column(ForeignKey("tables.id"), nullable=False)
     waiter_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    closed_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    closed_waiter_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"), nullable=True)
     customer_id: Mapped[int | None] = mapped_column(ForeignKey("customers.id"), nullable=True)
     customer_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="aberta", nullable=False)
@@ -20,6 +22,7 @@ class Order(Base):
     partial_payments_detail: Mapped[list | None] = mapped_column(JSON, default=list, nullable=True)
     service_charge_pct: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     service_charge_applied: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    service_charge_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     payment_method: Mapped[str | None] = mapped_column(String(30), nullable=True)
     card_machine: Mapped[str | None] = mapped_column(String(30), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -28,7 +31,9 @@ class Order(Base):
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     table = relationship("Table", back_populates="orders")
-    waiter = relationship("User")
+    waiter = relationship("User", foreign_keys=[waiter_id])
+    closed_by = relationship("User", foreign_keys=[closed_by_id])
+    closed_waiter = relationship("Employee", foreign_keys=[closed_waiter_id])
     customer = relationship("Customer", back_populates="orders")
     items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
     rounds = relationship("OrderRound", back_populates="order", cascade="all, delete-orphan")

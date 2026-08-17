@@ -142,6 +142,15 @@ class EscPosBuilder:
         self.data.extend(b"\n\n\n")
         self.data.extend(_cmd(GS, b"V", b"\x00"))
 
+    def size(self, width: int, height: int):
+        """Altera o tamanho da fonte. width e height devem ser de 1 a 8."""
+        # O protocolo ESC/POS aceita valores de 0 a 7 (que representam 1x a 8x)
+        w = max(0, min(7, width - 1))
+        h = max(0, min(7, height - 1))
+        # O byte é calculado juntando a largura e a altura
+        n = (w << 4) | h
+        self.data.extend(_cmd(GS, b"!", bytes([n])))
+
     def build(self) -> bytes:
         return bytes(self.data)
 
@@ -368,11 +377,10 @@ def build_order_receipt(
 
     return b.build()
 
-
 def build_ficha_ticket(
     store_name: str,
     product_name: str,
-    printer_width: int = 32,
+    printer_width: int = 32, # 48 colunas para impressora 80mm
 ) -> bytes:
     """Build a minimal "ficha" ticket: store name, date/time and product."""
     b = EscPosBuilder(width=printer_width)
@@ -384,11 +392,16 @@ def build_ficha_ticket(
 
     now = datetime.now(ZoneInfo("America/Sao_Paulo"))
     b.line(now.strftime("%d/%m/%Y %H:%M"))
-
-    b.line("")
-
+    
     b.bold_on()
+    
+    b.size(2, 2) 
+
     b.line(product_name)
+
+    # Retorna para o tamanho normal
+    b.size(1, 1)
+
     b.bold_off()
     b.separator()
 
@@ -397,12 +410,11 @@ def build_ficha_ticket(
     preview_lines = [
         store_name,
         now.strftime("%d/%m/%Y %H:%M"),
-        product_name,
+        f"** {product_name} **",
     ]
     _print_terminal_preview("FICHA", preview_lines)
 
     return b.build()
-
 
 def build_kitchen_ticket(
     table_number: int,

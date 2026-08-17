@@ -27,7 +27,7 @@ async def list_tables(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    result = await db.execute(select(Table).order_by(Table.is_balcao, Table.number))
+    result = await db.execute(select(Table).where(Table.active == True).order_by(Table.is_balcao, Table.number))
     tables = result.scalars().all()
 
     data = []
@@ -185,6 +185,7 @@ async def list_tables_admin(
             "number": t.number,
             "status": t.status,
             "is_balcao": t.is_balcao,
+            "active": t.active,
         }
         for t in tables
     ]
@@ -230,8 +231,24 @@ async def delete_table(
         select(Order).where(Order.table_id == table_id, Order.status == "aberta")
     )
     if open_orders.scalars().first():
-        return {"error": "Não é possível excluir mesa com comandas abertas"}
+        return {"error": "Não é possível arquivar mesa com comandas abertas"}
 
-    await db.delete(table)
+    table.active = False
     await db.commit()
-    return {"message": "Mesa excluída com sucesso"}
+    return {"message": "Mesa arquivada com sucesso"}
+
+
+@router.post("/mesas/{table_id}/reativar")
+async def restore_table(
+    table_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_role("gerente")),
+):
+    result = await db.execute(select(Table).where(Table.id == table_id, Table.is_balcao == False))
+    table = result.scalars().first()
+    if not table:
+        return {"error": "Mesa não encontrada"}
+
+    table.active = True
+    await db.commit()
+    return {"message": "Mesa reativada com sucesso"}

@@ -1,5 +1,5 @@
 from datetime import datetime, timezone, timedelta
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy import select, desc, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,14 +10,19 @@ import logging
 from app.core.timezone import as_local
 from app.models.cash_register_session import CashRegisterSession
 from app.models.cash_register_movement import CashRegisterMovement
+from app.models.cash_position_movement import CashPositionMovement
 from app.models.order import Order
 from app.models.table import Table
 from app.models.user import User
-from app.routers.auth_deps import get_current_user, can_manage_cash_register
+from app.routers.auth_deps import get_current_user, can_manage_cash_register, require_role
 from app.services.settings_service import get_setting, get_setting_as_bool
 from app.services.email_service import send_email_with_attachment
 from app.services.cash_service import compute_cash_inflows
-from app.routers.financial import _build_session_report, _build_pdf_bytes
+from app.routers.financial import (
+    _build_session_report,
+    _build_pdf_bytes,
+    compute_session_close_metrics,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +43,13 @@ class CashMovementRequest(BaseModel):
     type: str  # sangria or suprimento
     amount: float
     note: str | None = None
+
+
+class CashPositionMovementRequest(BaseModel):
+    type: str  # entrada or saida
+    title: str
+    amount: float
+    observation: str | None = None
 
 
 @router.get("/ativo")
@@ -224,6 +236,36 @@ async def close_cash_register(
     session.final_cash = req.final_cash
     session.observations = req.observations or session.observations
 
+    metrics = await compute_session_close_metrics(session, db)
+
+    if metrics["gross_total"] > 0:
+        db.add(CashPositionMovement(
+            type="entrada",
+            source="automatico",
+            title="Fechamento de caixa",
+            amount=metrics["gross_total"],
+            session_id=session.id,
+            created_by_id=user.id,
+        ))
+    if metrics["card_fees"] > 0:
+        db.add(CashPositionMovement(
+            type="saida",
+            source="automatico",
+            title="Taxa de cartão",
+            amount=metrics["card_fees"],
+            session_id=session.id,
+            created_by_id=user.id,
+        ))
+    if metrics["service_charge"] > 0:
+        db.add(CashPositionMovement(
+            type="saida",
+            source="automatico",
+            title="Taxa de serviço",
+            amount=metrics["service_charge"],
+            session_id=session.id,
+            created_by_id=user.id,
+        ))
+
     await db.commit()
     await db.refresh(session)
 
@@ -322,6 +364,112 @@ async def create_cash_movement(
             "created_at": movement.created_at.isoformat() if movement.created_at else None,
         },
     }
+
+
+def _cash_position_movement_payload(m: CashPositionMovement) -> dict:
+    return {
+        "id": m.id,
+        "type": m.type,
+        "source": m.source,
+        "title": m.title,
+        "amount": float(m.amount),
+        "observation": m.observation,
+        "created_by": m.created_by.name if m.created_by else None,
+        "created_at": m.created_at.isoformat() if m.created_at else None,
+    }
+
+
+@router.get("/posicao")
+async def get_cash_position(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if not can_manage_cash_register(user):
+        return {"error": "Acesso restrito ao caixa ou gerente"}
+
+    totals_result = await db.execute(
+        select(CashPositionMovement.type, func.sum(CashPositionMovement.amount))
+        .group_by(CashPositionMovement.type)
+    )
+    totals = {t: float(a or 0) for t, a in totals_result.all()}
+    cash_position = round(totals.get("entrada", 0.0) - totals.get("saida", 0.0), 2)
+
+    count_result = await db.execute(select(func.count(CashPositionMovement.id)))
+    total = int(count_result.scalar_one())
+
+    offset = (page - 1) * page_size
+    movements_result = await db.execute(
+        select(CashPositionMovement)
+        .options(selectinload(CashPositionMovement.created_by))
+        .order_by(desc(CashPositionMovement.created_at), desc(CashPositionMovement.id))
+        .offset(offset)
+        .limit(page_size)
+    )
+    movements = movements_result.scalars().all()
+
+    return {
+        "cash_position": cash_position,
+        "movements": [_cash_position_movement_payload(m) for m in movements],
+        "pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": max(1, (total + page_size - 1) // page_size),
+        },
+    }
+
+
+@router.post("/posicao/movimentacoes")
+async def create_cash_position_movement(
+    req: CashPositionMovementRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if not can_manage_cash_register(user):
+        return {"error": "Acesso restrito ao caixa ou gerente"}
+
+    if req.type not in ("entrada", "saida"):
+        return {"error": "Tipo deve ser entrada ou saída"}
+    if req.amount <= 0:
+        return {"error": "Valor deve ser maior que zero"}
+    if not req.title or not req.title.strip():
+        return {"error": "Informe um título para a movimentação"}
+
+    movement = CashPositionMovement(
+        type=req.type,
+        source="manual",
+        title=req.title.strip(),
+        amount=req.amount,
+        observation=req.observation,
+        created_by_id=user.id,
+    )
+    db.add(movement)
+    await db.commit()
+    await db.refresh(movement)
+
+    return {"success": True, "movement": _cash_position_movement_payload(movement)}
+
+
+@router.delete("/posicao/movimentacoes/{movement_id}")
+async def delete_cash_position_movement(
+    movement_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_role("gerente")),
+):
+    result = await db.execute(
+        select(CashPositionMovement).where(CashPositionMovement.id == movement_id)
+    )
+    movement = result.scalars().first()
+    if not movement:
+        return {"error": "Movimentação não encontrada"}
+    if movement.source != "manual":
+        return {"error": "Movimentações automáticas não podem ser excluídas"}
+
+    await db.delete(movement)
+    await db.commit()
+    return {"message": "Movimentação removida"}
 
 
 async def _send_close_report_email(db, session: CashRegisterSession) -> None:

@@ -6158,10 +6158,33 @@ let balcaoInitialStock = {};
 let balcaoCurrentOrder = null;
 let balcaoCurrentCustomerId = null;
 let balcaoCurrentCustomerName = null;
+const FICHA_MODE_KEY = 'lads_balcao_ficha_mode';
+let balcaoFichaMode = localStorage.getItem(FICHA_MODE_KEY) === 'true';
 let balcaoCurrentCategory = 'TODOS';
 let balcaoCurrentSearch = '';
 let balcaoSearchDebounce = null;
 let balcaoShowOnlyInStock = true;
+
+function toggleBalcaoFichaMode() {
+    balcaoFichaMode = !balcaoFichaMode;
+    localStorage.setItem(FICHA_MODE_KEY, String(balcaoFichaMode));
+    updateFichaModeButton();
+}
+
+function updateFichaModeButton() {
+    const btn = document.getElementById('btn-balcao-ficha-mode');
+    if (!btn) return;
+    btn.textContent = 'Modo Ficha: ' + (balcaoFichaMode ? 'ON' : 'OFF');
+    if (balcaoFichaMode) {
+        btn.classList.add('active');
+        btn.style.background = 'var(--accent)';
+        btn.style.color = '#fff';
+    } else {
+        btn.classList.remove('active');
+        btn.style.background = '';
+        btn.style.color = '';
+    }
+}
 
 async function loadBalcaoDetail() {
     try {
@@ -6507,6 +6530,7 @@ async function confirmBalcaoClose() {
                 payment_method: method,
                 card_machine: (method === 'cartao_credito' || method === 'cartao_debito') ? cardMachine : null,
                 amount: method === 'dinheiro' ? tendered : null,
+                ficha_mode: balcaoFichaMode,
             }),
         });
         const data = await res.json();
@@ -6756,6 +6780,8 @@ let dashboardEstoqueTableFilter = '';
 let dashboardEstoqueProductFilter = '';
 let dashboardEstoquePage = 1;
 const DASHBOARD_ESTOQUE_PAGE_SIZE = 20;
+let dashboardGestaoPage = 1;
+const DASHBOARD_GESTAO_PAGE_SIZE = 50;
 let dashboardCharts = {};
 
 const DASHBOARD_COLORS = {
@@ -6786,6 +6812,7 @@ function initDashboards() {
 
 function switchDashboardTab(tab) {
     dashboardCurrentTab = tab;
+    dashboardGestaoPage = 1;
     document.querySelectorAll('.dashboards-nav-btn').forEach(btn => btn.classList.remove('active'));
     const activeBtn = document.querySelector(`.dashboards-nav-btn[data-tab="${tab}"]`);
     if (activeBtn) activeBtn.classList.add('active');
@@ -6845,6 +6872,7 @@ function setDashboardPeriod(period) {
     document.getElementById('dashboard-start-date').value = formatDashboardDate(start);
     document.getElementById('dashboard-end-date').value = formatDashboardDate(end);
     setActivePeriodChip(period);
+    dashboardGestaoPage = 1;
     loadDashboardData(dashboardCurrentTab);
 }
 
@@ -6854,6 +6882,7 @@ function setDashboardYear(year) {
     document.getElementById('dashboard-start-date').value = `${y}-01-01`;
     document.getElementById('dashboard-end-date').value = `${y}-12-31`;
     setActivePeriodChip(null);
+    dashboardGestaoPage = 1;
     loadDashboardData(dashboardCurrentTab);
 }
 
@@ -6872,6 +6901,7 @@ function populateDashboardYearSelect() {
 
 function applyDashboardDateFilter() {
     setActivePeriodChip(null);
+    dashboardGestaoPage = 1;
     loadDashboardData(dashboardCurrentTab);
 }
 
@@ -6890,6 +6920,10 @@ async function loadDashboardData(tab) {
         params.push('page=' + encodeURIComponent(dashboardEstoquePage));
         params.push('page_size=' + encodeURIComponent(DASHBOARD_ESTOQUE_PAGE_SIZE));
     }
+    if (tab === 'gestao') {
+        params.push('page=' + encodeURIComponent(dashboardGestaoPage));
+        params.push('page_size=' + encodeURIComponent(DASHBOARD_GESTAO_PAGE_SIZE));
+    }
     const url = API_BASE + '/dashboards/' + tab + (params.length ? '?' + params.join('&') : '');
     try {
         const res = await apiFetch(url);
@@ -6904,6 +6938,7 @@ async function loadDashboardData(tab) {
         else if (tab === 'estoque') renderDashboardEstoque(data);
         else if (tab === 'clientes') renderDashboardClientes(data);
         else if (tab === 'funcionarios') renderDashboardFuncionarios(data);
+        else if (tab === 'gestao') renderDashboardGestao(data);
     } catch (err) {
         content.innerHTML = '<div class="error-msg">Erro ao carregar dashboard</div>';
     }
@@ -7412,6 +7447,154 @@ function renderDashboardFuncionarios(data) {
     }
 }
 
+function renderDashboardGestao(data) {
+    const content = document.getElementById('dashboards-content');
+    destroyDashboardCharts();
+
+    const cashPosition = data.cash_position || 0;
+    const posClass = cashPosition >= 0 ? 'positive' : 'negative';
+
+    const movements = data.movements || [];
+    const rows = movements.map(m => {
+        const isEntrada = m.type === 'entrada';
+        const typeClass = isEntrada ? 'mov-type-entrada' : 'mov-type-saida';
+        const valClass = isEntrada ? 'gestao-val-entrada' : 'gestao-val-saida';
+        const sign = isEntrada ? '+' : '-';
+        const canDelete = m.source === 'manual' && hasRole('gerente');
+        const autoTag = m.source === 'automatico' ? '<span class="gestao-auto-tag">automático</span>' : '';
+        return `
+        <tr>
+            <td><span class="${typeClass}">${isEntrada ? 'Entrada' : 'Saída'}</span></td>
+            <td>${escapeHtml(m.title)}${autoTag}</td>
+            <td class="${valClass}">${sign}${formatCurrency(m.amount)}</td>
+            <td>${escapeHtml(m.created_by || '-')}</td>
+            <td>${m.created_at ? _fmtDateTime(m.created_at) : '-'}</td>
+            <td>${escapeHtml(m.observation || '')}</td>
+            <td>${canDelete ? `<button class="btn-icon-danger" onclick="deleteGestaoMovement(${m.id})" title="Excluir"><i class="bi bi-trash"></i></button>` : ''}</td>
+        </tr>`;
+    }).join('');
+
+    content.innerHTML = `
+        <div class="dashboard-section-title">Período: ${data.period?.start || ''} a ${data.period?.end || ''}</div>
+        <div class="dashboard-cards-grid">
+            <div class="dashboards-card">
+                <div class="dashboards-label">Lucro Líquido do Período</div>
+                <div class="dashboards-value">${formatCurrency(data.net_profit || 0)}</div>
+                <div class="dashboards-sub">Faturamento: ${formatCurrency(data.total_sales || 0)}</div>
+            </div>
+        </div>
+        <div class="gestao-cash-position ${posClass}">
+            <div class="gestao-cash-position-label">Posição de Caixa</div>
+            <div class="gestao-cash-position-value">${formatCurrency(cashPosition)}</div>
+        </div>
+        <div class="gestao-toolbar">
+            <div class="dashboard-section-title">Histórico de Entradas e Saídas</div>
+            <button class="btn-primary" onclick="openGestaoMovementModal()"><i class="bi bi-plus-lg"></i> Nova Movimentação</button>
+        </div>
+        <div class="dashboard-table-card" style="margin-top:12px;">
+            ${movements.length === 0
+                ? '<div class="empty-msg" style="padding:12px;text-align:center;">Nenhuma movimentação registrada</div>'
+                : `<table class="dashboard-table">
+                    <thead><tr><th>Tipo</th><th>Título</th><th>Valor</th><th>Usuário</th><th>Data/Hora</th><th>Observação</th><th></th></tr></thead>
+                    <tbody>${rows}</tbody>
+                </table>`}
+        </div>
+        ${renderGestaoPagination(data.movements_pagination)}
+    `;
+}
+
+function renderGestaoPagination(pagination) {
+    if (!pagination) return '';
+    const { page, page_size, total, total_pages } = pagination;
+    const hasPrev = page > 1;
+    const hasNext = page < total_pages;
+    const start = total === 0 ? 0 : (page - 1) * page_size + 1;
+    const end = Math.min(page * page_size, total);
+    return `
+        <div class="dashboard-pagination" style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;flex-wrap:wrap;gap:8px;">
+            <span style="font-size:12px;color:var(--text-muted);">${start}-${end} de ${total}</span>
+            <div style="display:flex;gap:8px;">
+                <button type="button" class="btn-small" onclick="changeDashboardGestaoPage(${page - 1})" ${hasPrev ? '' : 'disabled'}>Anterior</button>
+                <button type="button" class="btn-small" onclick="changeDashboardGestaoPage(${page + 1})" ${hasNext ? '' : 'disabled'}>Próxima</button>
+            </div>
+        </div>
+    `;
+}
+
+function changeDashboardGestaoPage(newPage) {
+    dashboardGestaoPage = newPage;
+    loadDashboardData('gestao');
+}
+
+function openGestaoMovementModal() {
+    const modal = document.getElementById('gestao-movement-modal');
+    if (!modal) return;
+    document.getElementById('gestao-movement-type').value = 'entrada';
+    document.getElementById('gestao-movement-title').value = '';
+    document.getElementById('gestao-movement-amount').value = '';
+    document.getElementById('gestao-movement-observation').value = '';
+    document.getElementById('gestao-movement-error').style.display = 'none';
+    modal.style.display = 'flex';
+}
+
+function closeGestaoMovementModal() {
+    const modal = document.getElementById('gestao-movement-modal');
+    if (modal) modal.style.display = 'none';
+}
+
+async function submitGestaoMovement() {
+    const errorEl = document.getElementById('gestao-movement-error');
+    const type = document.getElementById('gestao-movement-type').value;
+    const title = document.getElementById('gestao-movement-title').value.trim();
+    const amount = parseFloat(document.getElementById('gestao-movement-amount').value);
+    const observation = document.getElementById('gestao-movement-observation').value.trim() || null;
+
+    if (!title) {
+        errorEl.textContent = 'Informe um título para a movimentação';
+        errorEl.style.display = 'block';
+        return;
+    }
+    if (!amount || amount <= 0) {
+        errorEl.textContent = 'Informe um valor maior que zero';
+        errorEl.style.display = 'block';
+        return;
+    }
+
+    try {
+        const res = await apiFetch(API_BASE + '/caixa/posicao/movimentacoes', {
+            method: 'POST',
+            body: JSON.stringify({ type, title, amount, observation })
+        });
+        const data = await res.json();
+        if (data.error) {
+            errorEl.textContent = data.error;
+            errorEl.style.display = 'block';
+            return;
+        }
+        closeGestaoMovementModal();
+        dashboardGestaoPage = 1;
+        loadDashboardData('gestao');
+    } catch (err) {
+        errorEl.textContent = 'Erro ao salvar movimentação';
+        errorEl.style.display = 'block';
+    }
+}
+
+async function deleteGestaoMovement(id) {
+    if (!confirm('Deseja excluir esta movimentação?')) return;
+    try {
+        const res = await apiFetch(API_BASE + '/caixa/posicao/movimentacoes/' + id, { method: 'DELETE' });
+        const data = await res.json();
+        if (data.error) {
+            alert(data.error);
+            return;
+        }
+        loadDashboardData('gestao');
+    } catch (err) {
+        alert('Erro ao excluir movimentação');
+    }
+}
+
 
 /* -------------------------------------------------------------
    Settings CRUDs: Tables, Users, Backup
@@ -7440,12 +7623,20 @@ async function loadSettingsTables() {
             list.innerHTML = '<div class="setting-description">Nenhuma mesa cadastrada.</div>';
             return;
         }
-        list.innerHTML = '<div class="table-grid">' + tables.map(t => `
+        list.innerHTML = '<div class="table-grid">' + tables.map(t => {
+            if (t.active) {
+                return `
             <div class="table-card">
                 <span class="table-number">${t.number}</span>
-                <button class="table-delete" onclick="deleteTable(${t.id})" title="Excluir"><i class="bi bi-x-lg"></i></button>
-            </div>
-        `).join('') + '</div>';
+                <button class="table-delete" onclick="deleteTable(${t.id})" title="Arquivar"><i class="bi bi-x-lg"></i></button>
+            </div>`;
+            }
+            return `
+            <div class="table-card archived">
+                <span class="table-number">${t.number}</span>
+                <button class="table-restore" onclick="restoreTable(${t.id})" title="Reativar"><i class="bi bi-arrow-counterclockwise"></i></button>
+            </div>`;
+        }).join('') + '</div>';
     } catch (err) {
         list.innerHTML = '<div class="error-msg">Erro ao carregar mesas</div>';
     }
@@ -7478,7 +7669,7 @@ async function addTable() {
 }
 
 async function deleteTable(id) {
-    if (!confirm('Deseja excluir esta mesa?')) return;
+    if (!confirm('Deseja arquivar esta mesa?')) return;
     try {
         const res = await apiFetch(API_BASE + '/mesas/' + id, { method: 'DELETE' });
         const data = await res.json();
@@ -7487,9 +7678,25 @@ async function deleteTable(id) {
             return;
         }
         loadSettingsTables();
-        showSettingsSuccess('Mesa excluída');
+        showSettingsSuccess('Mesa arquivada');
     } catch (err) {
-        showSettingsError('Erro ao excluir mesa');
+        showSettingsError('Erro ao arquivar mesa');
+    }
+}
+
+async function restoreTable(id) {
+    if (!confirm('Deseja reativar esta mesa?')) return;
+    try {
+        const res = await apiFetch(API_BASE + '/mesas/' + id + '/reativar', { method: 'POST' });
+        const data = await res.json();
+        if (data.error) {
+            showSettingsError(data.error);
+            return;
+        }
+        loadSettingsTables();
+        showSettingsSuccess('Mesa reativada');
+    } catch (err) {
+        showSettingsError('Erro ao reativar mesa');
     }
 }
 

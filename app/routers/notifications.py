@@ -18,6 +18,7 @@ from app.services.printer_service import (
     build_kitchen_ticket,
     build_bar_ticket,
     build_order_receipt,
+    build_ficha_ticket,
     get_printer_for_function,
     send_to_printer,
 )
@@ -146,6 +147,7 @@ async def _rebuild_printer_data(notification, printer_width: int, db) -> bytes |
     waiter_name = details.get("waiter_name") or ""
     order_id = details.get("order_id")
     observation = details.get("observation")
+    ficha_mode = bool(details.get("ficha_mode"))
 
     if function == "cozinha":
         return build_kitchen_ticket(
@@ -172,6 +174,16 @@ async def _rebuild_printer_data(notification, printer_width: int, db) -> bytes |
         )
 
     if function == "nota":
+        if ficha_mode:
+            store_name = await get_setting(db, "store_name", "Lads Beer")
+            tickets = bytearray()
+            for item in items:
+                qty = int(item.get("quantity", 1))
+                name = item.get("product_name") or item.get("name") or "Item"
+                for _ in range(qty):
+                    tickets.extend(build_ficha_ticket(store_name, name, printer_width))
+            return bytes(tickets) if tickets else None
+
         order_data = {
             "order_id": order_id,
             "table_label": details.get("table_label", "Balcão"),

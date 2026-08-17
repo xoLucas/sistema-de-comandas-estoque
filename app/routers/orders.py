@@ -24,7 +24,7 @@ from app.routers.auth_deps import get_current_user
 from app.services.promotion_service import get_discounted_price
 from app.services.settings_service import get_setting_as_float, get_setting
 from app.services.stock_service import is_pack, pack_stock_for_product, stock_status
-from app.services.printer_service import build_order_receipt, build_kitchen_ticket, build_bar_ticket, schedule_function_printer_send, get_printer_for_function
+from app.services.printer_service import build_order_receipt, build_kitchen_ticket, build_bar_ticket, build_ficha_ticket, schedule_function_printer_send, get_printer_for_function
 from app.services.notification_service import notify_stock_alert, broadcast_stock_notification
 
 router = APIRouter(prefix="/api", tags=["orders"])
@@ -295,6 +295,7 @@ class CloseOrderRequest(BaseModel):
     order_id: int | None = None
     amount: float | None = None
     waiter_id: int | None = None
+    ficha_mode: bool = False
 
 
 class PartialPaymentRequest(BaseModel):
@@ -428,6 +429,9 @@ async def open_order(
 
     if not table:
         return {"error": "Mesa não encontrada"}
+
+    if not table.active:
+        return {"error": "Mesa arquivada"}
 
     if not await _require_open_cash_register(db):
         return {"error": "caixa_fechado", "detail": "O caixa está fechado. Abra o caixa para abrir a mesa."}
@@ -871,7 +875,10 @@ async def close_order(
     user: User = Depends(get_current_user),
 ):
     order = await _get_open_order_for_table(
-        db, req.table_id, req.order_id, options=[selectinload(Order.items).selectinload(OrderItem.product)]
+        db, req.table_id, req.order_id, options=[
+            selectinload(Order.table),
+            selectinload(Order.items).selectinload(OrderItem.product),
+        ]
     )
 
     if not order:
@@ -938,7 +945,10 @@ async def close_order(
     if table.is_balcao:
         receipt_result = None
         try:
-            receipt_result = await _print_order_receipt(db, order, user, PrintReceiptRequest(payment_method=req.payment_method))
+            if req.ficha_mode:
+                receipt_result = await _print_ficha_tickets(db, order)
+            else:
+                receipt_result = await _print_order_receipt(db, order, user, PrintReceiptRequest(payment_method=req.payment_method))
         except Exception as exc:
             import traceback
             print("ERRO AO IMPRIMIR NOTA DO BALCAO:", exc)
@@ -1063,6 +1073,42 @@ async def update_order_customer(
         "customer_id": order.customer_id,
         "customer_name": order.customer_name,
     }
+
+
+async def _print_ficha_tickets(db: AsyncSession, order: Order) -> dict:
+    """Print one ficha per item unit (ficha mode), each with a paper cut."""
+    store_name = await get_setting(db, "store_name", "Lads Beer")
+    nota_printer = await get_printer_for_function("nota")
+    printer_width = nota_printer["width"] if nota_printer else 32
+
+    tickets = bytearray()
+    ficha_count = 0
+    for item in order.items:
+        product_name = item.product.name if item.product else "Item"
+        for _ in range(item.quantity):
+            tickets.extend(build_ficha_ticket(store_name, product_name, printer_width))
+            ficha_count += 1
+
+    if ficha_count == 0:
+        return {"error": "Nenhum item para imprimir"}
+
+    context = {
+        "function": "nota",
+        "failed_printer_id": nota_printer.get("id") if nota_printer else "",
+        "failed_printer_name": nota_printer.get("name") if nota_printer else "",
+        "order_id": order.id,
+        "table_id": order.table_id,
+        "table_number": 0,
+        "table_label": "Balcão",
+        "items": [{"name": item.product.name if item.product else "Item", "quantity": item.quantity} for item in order.items],
+        "waiter_name": "Balcão",
+        "ficha_mode": True,
+    }
+    schedule_function_printer_send(bytes(tickets), "nota", context)
+
+    if nota_printer:
+        return {"success": True, "message": f"{ficha_count} ficha(s) enviada(s) para {nota_printer.get('name', 'impressora')}"}
+    return {"success": True, "message": f"{ficha_count} ficha(s) exibida(s) no terminal (nenhuma impressora configurada)"}
 
 
 async def _print_order_receipt(

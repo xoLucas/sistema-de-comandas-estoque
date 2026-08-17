@@ -258,6 +258,7 @@ async def _background_send_to_function_printer(
                 customer_name=context.get("customer_name"),
                 waiter_name=context.get("waiter_name"),
                 observation=context.get("observation"),
+                ficha_mode=bool(context.get("ficha_mode")),
             )
             await broadcast_notification(notification_to_dict(notification))
     except Exception:
@@ -364,6 +365,41 @@ def build_order_receipt(
     if order_data.get("payment_method"):
         preview_lines.append(f"Pagamento: {order_data['payment_method']}")
     _print_terminal_preview("NOTA", preview_lines)
+
+    return b.build()
+
+
+def build_ficha_ticket(
+    store_name: str,
+    product_name: str,
+    printer_width: int = 32,
+) -> bytes:
+    """Build a minimal "ficha" ticket: store name, date/time and product."""
+    b = EscPosBuilder(width=printer_width)
+
+    b.align_center()
+    b.bold_on()
+    b.line(store_name)
+    b.bold_off()
+
+    now = datetime.now(ZoneInfo("America/Sao_Paulo"))
+    b.line(now.strftime("%d/%m/%Y %H:%M"))
+
+    b.line("")
+
+    b.bold_on()
+    b.line(product_name)
+    b.bold_off()
+    b.separator()
+
+    b.cut()
+
+    preview_lines = [
+        store_name,
+        now.strftime("%d/%m/%Y %H:%M"),
+        product_name,
+    ]
+    _print_terminal_preview("FICHA", preview_lines)
 
     return b.build()
 

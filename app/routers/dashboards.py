@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse, JSONResponse
-from sqlalchemy import select, func, cast, Date, or_, extract, case
+from sqlalchemy import select, func, cast, Date, or_, extract, case, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload, aliased
 
@@ -30,7 +30,9 @@ from app.models.cash_register_session import CashRegisterSession
 from app.models.cash_register_movement import CashRegisterMovement
 from app.models.expense import Expense
 from app.models.stock_history import StockHistory
+from app.models.cash_position_movement import CashPositionMovement
 from app.routers.auth_deps import get_current_user
+from app.routers.financial import compute_period_profit
 from app.services.stock_service import stock_status, is_pack, pack_stock_for_product
 
 router = APIRouter(prefix="/api/dashboards", tags=["dashboards"])
@@ -778,4 +780,84 @@ async def dashboard_funcionarios(
         "period": {"start": start_local.isoformat(), "end": end_local.isoformat()},
         "by_waiter": by_waiter,
         "by_hour": by_hour,
+    }
+
+
+@router.get("/gestao")
+async def dashboard_gestao(
+    start_date: str | None = Query(None),
+    end_date: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    format: str = Query("json"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if not _require_manager(user):
+        return {"error": "Acesso restrito ao gerente"}
+
+    start_dt, end_dt, start_local, end_local = _parse_dates(start_date, end_date, default_days=7)
+    profit = await compute_period_profit(start_dt, end_dt, db)
+
+    totals_result = await db.execute(
+        select(CashPositionMovement.type, func.sum(CashPositionMovement.amount))
+        .group_by(CashPositionMovement.type)
+    )
+    totals = {t: float(a or 0) for t, a in totals_result.all()}
+    cash_position = round(totals.get("entrada", 0.0) - totals.get("saida", 0.0), 2)
+
+    count_result = await db.execute(select(func.count(CashPositionMovement.id)))
+    total = int(count_result.scalar_one())
+
+    offset = (page - 1) * page_size
+    movements_result = await db.execute(
+        select(CashPositionMovement)
+        .options(selectinload(CashPositionMovement.created_by))
+        .order_by(desc(CashPositionMovement.created_at), desc(CashPositionMovement.id))
+        .offset(offset)
+        .limit(page_size)
+    )
+    movements = movements_result.scalars().all()
+
+    movements_payload = [
+        {
+            "id": m.id,
+            "type": m.type,
+            "source": m.source,
+            "title": m.title,
+            "amount": float(m.amount),
+            "observation": m.observation,
+            "created_by": m.created_by.name if m.created_by else None,
+            "created_at": m.created_at.isoformat() if m.created_at else None,
+        }
+        for m in movements
+    ]
+
+    if format.lower() == "csv":
+        headers = ["Tipo", "Origem", "Título", "Valor", "Observação", "Usuário", "Data"]
+        rows = [
+            [
+                m["type"], m["source"], m["title"], m["amount"],
+                m["observation"] or "", m["created_by"] or "", m["created_at"] or "",
+            ]
+            for m in movements_payload
+        ]
+        return _csv_response("dashboard_gestao.csv", headers, rows)
+
+    return {
+        "period": {"start": start_local.isoformat(), "end": end_local.isoformat()},
+        "net_profit": profit["net_profit"],
+        "gross_profit": profit["gross_profit"],
+        "total_sales": profit["total_sales"],
+        "total_cogs": profit["total_cogs"],
+        "total_card_fees": profit["total_card_fees"],
+        "total_expenses": profit["total_expenses"],
+        "cash_position": cash_position,
+        "movements": movements_payload,
+        "movements_pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": max(1, (total + page_size - 1) // page_size),
+        },
     }

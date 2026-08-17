@@ -21,6 +21,7 @@ from app.models.cash_register_movement import CashRegisterMovement
 from app.models.customer import Customer
 from app.models.notification import Notification
 from app.models.consignment import ConsignmentOrder, ConsignmentOrderItem, ConsignmentPayment
+from app.models.cash_position_movement import CashPositionMovement
 
 
 SEED_TABLES = [
@@ -312,6 +313,9 @@ async def _ensure_columns() -> None:
         )
         await conn.execute(
             text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE")
+        )
+        await conn.execute(
+            text("ALTER TABLE tables ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE")
         )
         await conn.execute(
             text("DROP TABLE IF EXISTS printer_category")

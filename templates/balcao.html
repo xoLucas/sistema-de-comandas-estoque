@@ -29,7 +29,10 @@
         <div class="balcao-cart-header">
             <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
                 <h2 style="margin:0;font-size:16px;">Comanda <span id="balcao-order-number"></span></h2>
-                <button onclick="openBalcaoCustomerModal()" class="btn-small" id="btn-balcao-customer">Cliente</button>
+                <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+                    <button onclick="toggleBalcaoFichaMode()" class="btn-small" id="btn-balcao-ficha-mode" title="Alternar modo ficha">Modo Ficha: OFF</button>
+                    <button onclick="openBalcaoCustomerModal()" class="btn-small" id="btn-balcao-customer">Cliente</button>
+                </div>
             </div>
             <div id="balcao-customer-display" style="display:none;font-size:12px;color:var(--text-muted);margin-top:4px;"></div>
         </div>
@@ -154,6 +157,7 @@ document.addEventListener('DOMContentLoaded', () => {
         highlightNav('mesas');
         hideCreateCustomerButtonsIfNoPermission();
         loadBalcaoDetail();
+        updateFichaModeButton();
         connectTablesWebSocket();
         connectBalcaoWebSocket();
     });

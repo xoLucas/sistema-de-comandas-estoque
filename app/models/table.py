@@ -12,6 +12,7 @@ class Table(Base):
     number: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="vazia", nullable=False)
     is_balcao: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

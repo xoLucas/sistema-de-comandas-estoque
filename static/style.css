@@ -5188,6 +5188,104 @@ header .subtitle {
     color: var(--text-muted);
 }
 
+.gestao-cash-position {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 20px;
+    margin: 16px 0;
+    text-align: center;
+}
+
+.gestao-cash-position.positive {
+    border-color: var(--green);
+}
+
+.gestao-cash-position.negative {
+    border-color: var(--red);
+}
+
+.gestao-cash-position-label {
+    font-size: 12px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.gestao-cash-position-value {
+    font-size: 32px;
+    font-weight: 800;
+    color: var(--text);
+    margin-top: 6px;
+}
+
+.gestao-cash-position.positive .gestao-cash-position-value {
+    color: var(--green);
+}
+
+.gestao-cash-position.negative .gestao-cash-position-value {
+    color: var(--red);
+}
+
+.gestao-cash-position-sub {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 4px;
+}
+
+.gestao-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.gestao-toolbar .dashboard-section-title {
+    margin: 0;
+}
+
+.mov-type-entrada {
+    background: rgba(34, 197, 94, 0.15);
+    color: var(--green);
+    padding: 2px 8px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.mov-type-saida {
+    background: rgba(239, 68, 68, 0.15);
+    color: var(--red);
+    padding: 2px 8px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.gestao-val-entrada {
+    color: var(--green);
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.gestao-val-saida {
+    color: var(--red);
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.gestao-auto-tag {
+    font-size: 10px;
+    color: var(--text-muted);
+    background: var(--border);
+    border-radius: 4px;
+    padding: 1px 5px;
+    margin-left: 4px;
+}
+
 .dashboard-charts-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
@@ -5542,6 +5640,35 @@ header .subtitle {
 
 .table-delete:hover {
     background: var(--red);
+    color: #fff;
+}
+
+.table-card.archived {
+    opacity: 0.5;
+    border-style: dashed;
+}
+
+.table-card.archived .table-number {
+    color: var(--text-muted);
+}
+
+.table-restore {
+    width: 26px;
+    height: 26px;
+    border: none;
+    border-radius: 50%;
+    background: rgba(34, 197, 94, 0.12);
+    color: var(--green);
+    font-size: 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, color 0.15s;
+}
+
+.table-restore:hover {
+    background: var(--green);
     color: #fff;
 }
 

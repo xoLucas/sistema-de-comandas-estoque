@@ -131,6 +131,155 @@ def serialize_order_sale(order: Order) -> dict:
     }
 
 
+async def compute_session_close_metrics(session, db: AsyncSession) -> dict:
+    """Compute the faturamento/card-fees/service-charge for a closed session.
+
+    Mirrors the summary computed by _build_session_report but returns only the
+    three values needed to feed the cash position movements on close.
+    """
+    start = session.opened_at
+    end = session.closed_at or datetime.now(timezone.utc)
+    card_fee_rates = await _get_card_fee_rates(db)
+
+    result = await db.execute(
+        select(Order).where(
+            Order.status == "finalizada",
+            Order.closed_at >= start,
+            Order.closed_at <= end,
+            or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
+        )
+    )
+    orders = result.scalars().all()
+
+    gross_total = 0.0
+    card_fees = 0.0
+    service_charge = 0.0
+
+    for o in orders:
+        product_remaining = max(0.0, o.total - o.partial_payment)
+        service_remaining = (
+            product_remaining * (o.service_charge_pct / 100)
+            if o.service_charge_applied
+            else 0.0
+        )
+        final = product_remaining + service_remaining
+        close_method = o.payment_method or "nao_informado"
+
+        gross_total += final
+        card_fees += await _card_fee_for_order_payment(
+            final, close_method, o.card_machine, db, card_fee_rates
+        )
+        service_charge += o.service_charge_amount
+
+        for pd in o.partial_payments_detail or []:
+            p_amount = float(pd.get("amount", 0))
+            if p_amount <= 0:
+                continue
+            gross_total += p_amount
+            card_fees += await _card_fee_for_order_payment(
+                p_amount, pd.get("method", "nao_informado"), pd.get("card_machine"), db, card_fee_rates
+            )
+
+    consignment_result = await db.execute(
+        select(ConsignmentPayment).where(
+            ConsignmentPayment.created_at >= start,
+            ConsignmentPayment.created_at <= end,
+        )
+    )
+    for payment in consignment_result.scalars().all():
+        amount = float(payment.amount)
+        gross_total += amount
+        card_fees += await _card_fee_for_order_payment(
+            amount, payment.payment_method or "nao_informado", payment.card_machine, db, card_fee_rates
+        )
+
+    return {
+        "gross_total": round(gross_total, 2),
+        "card_fees": round(card_fees, 2),
+        "service_charge": round(service_charge, 2),
+    }
+
+
+async def compute_period_profit(start: datetime, end: datetime, db: AsyncSession) -> dict:
+    """Compute profit metrics for an arbitrary period (same semantics as the reports)."""
+    card_fee_rates = await _get_card_fee_rates(db)
+
+    orders_result = await db.execute(
+        select(Order)
+        .where(
+            Order.status == "finalizada",
+            Order.closed_at >= start,
+            Order.closed_at <= end,
+            or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
+        )
+        .options(selectinload(Order.items).selectinload(OrderItem.product))
+    )
+    orders = orders_result.scalars().all()
+
+    total_sales = 0.0
+    total_cogs = 0.0
+    total_card_fees = 0.0
+
+    for o in orders:
+        total_sales += o.total
+        total_cogs += sum(
+            ((item.unit_cost if item.unit_cost is not None else (item.product.cost if item.product else 0.0)) * item.quantity)
+            for item in o.items
+        )
+
+        product_remaining = max(0.0, o.total - o.partial_payment)
+        service_remaining = (
+            product_remaining * (o.service_charge_pct / 100)
+            if o.service_charge_applied
+            else 0.0
+        )
+        final = product_remaining + service_remaining
+        close_method = o.payment_method or "nao_informado"
+        total_card_fees += await _card_fee_for_order_payment(
+            final, close_method, o.card_machine, db, card_fee_rates
+        )
+
+        for pd in o.partial_payments_detail or []:
+            p_amount = float(pd.get("amount", 0))
+            if p_amount <= 0:
+                continue
+            total_card_fees += await _card_fee_for_order_payment(
+                p_amount, pd.get("method", "nao_informado"), pd.get("card_machine"), db, card_fee_rates
+            )
+
+    consignment_result = await db.execute(
+        select(ConsignmentPayment).where(
+            ConsignmentPayment.created_at >= start,
+            ConsignmentPayment.created_at <= end,
+        )
+    )
+    for payment in consignment_result.scalars().all():
+        amount = float(payment.amount)
+        total_sales += amount
+        total_card_fees += await _card_fee_for_order_payment(
+            amount, payment.payment_method or "nao_informado", payment.card_machine, db, card_fee_rates
+        )
+
+    expenses_result = await db.execute(
+        select(Expense).where(Expense.expense_date >= start, Expense.expense_date <= end)
+    )
+    total_expenses = sum(float(e.amount) for e in expenses_result.scalars().all())
+    _, perdas_total = await _get_perdas(start, end, db)
+    total_expenses = round(total_expenses + perdas_total, 2)
+
+    gross_profit = round(total_sales - total_cogs, 2)
+    net_profit = round(gross_profit - total_card_fees - total_expenses, 2)
+
+    return {
+        "total_sales": round(total_sales, 2),
+        "total_cogs": round(total_cogs, 2),
+        "gross_profit": gross_profit,
+        "total_card_fees": round(total_card_fees, 2),
+        "total_expenses": total_expenses,
+        "net_profit": net_profit,
+    }
+
+
 async def _get_perdas(
     start: datetime,
     end: datetime,

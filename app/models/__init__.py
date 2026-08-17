@@ -6,5 +6,6 @@ from app.models.order_item import OrderItem
 from app.models.order_round import OrderRound
 from app.models.user import User
 from app.models.employee import Employee
+from app.models.cash_position_movement import CashPositionMovement
 
-__all__ = ["Table", "Product", "Category", "Order", "OrderItem", "OrderRound", "User", "Employee"]
+__all__ = ["Table", "Product", "Category", "Order", "OrderItem", "OrderRound", "User", "Employee", "CashPositionMovement"]

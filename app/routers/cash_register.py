@@ -256,15 +256,6 @@ async def close_cash_register(
             session_id=session.id,
             created_by_id=user.id,
         ))
-    if metrics["service_charge"] > 0:
-        db.add(CashPositionMovement(
-            type="saida",
-            source="automatico",
-            title="Taxa de serviço",
-            amount=metrics["service_charge"],
-            session_id=session.id,
-            created_by_id=user.id,
-        ))
 
     await db.commit()
     await db.refresh(session)

@@ -432,7 +432,7 @@ async def update_product(
         if is_pack(product):
             return {"error": "Não é permitido alterar o estoque de um engradado diretamente. Altere o estoque do produto unitário vinculado."}
         product.stock = req.stock
-        await _notify_stock_status(product)
+        await _notify_stock_status(db, product)
         stock_changed = True
 
     try:

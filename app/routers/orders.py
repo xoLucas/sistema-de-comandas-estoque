@@ -608,7 +608,7 @@ async def create_pedido(
     for product_id, stock, status in stock_broadcast_infos:
         await broadcast_stock_update(product_id, stock, status)
 
-    table_label = "Balcão" if table.is_balcao else f"Mesa {table.number}"
+    table_label = table.label
 
     if not table.is_balcao:
         if prep_items:
@@ -756,7 +756,7 @@ async def add_order_item(
     for product_id, stock, status in stock_broadcast_infos:
         await broadcast_stock_update(product_id, stock, status)
 
-    table_label = "Balcão" if table and table.is_balcao else f"Mesa {table.number if table else req.table_id}"
+    table_label = table.label if table else "Balcão"
 
     if not table.is_balcao and req.quantity > 0:
         printer = await _resolve_printer(db, product)
@@ -910,7 +910,7 @@ async def close_order(
         if req.amount < final_total:
             return {"error": f"Valor pago (R$ {req.amount:.2f}) é menor que o total final (R$ {final_total:.2f})"}
 
-    table_label = "Balcão" if table and table.is_balcao else f"Mesa {table.number if table else req.table_id}"
+    table_label = table.label if table else "Balcão"
     stock_broadcast_infos = await _release_pending_items(
         db,
         order,
@@ -1154,9 +1154,9 @@ async def _print_order_receipt(
     default_service_amount = remaining_product * (default_service_pct / 100)
     default_final = remaining_product + default_service_amount
     default_table_label = (
-        f"Mesa {order.table.number}"
+        order.table.label
         if order.table and not order.table.is_balcao
-        else "Balcão"
+        else ("Balcão" if order.table else "")
     )
 
     if req.items is not None and req.total is None:
@@ -1434,7 +1434,7 @@ async def confirm_pending_order(
     await db.commit()
     await broadcast_table_update(req.table_id)
 
-    table_label = "Balcão" if order.table and order.table.is_balcao else f"Mesa {order.table.number if order.table else req.table_id}"
+    table_label = order.table.label if order.table else "Balcão"
 
     if not order.table or not order.table.is_balcao:
         if prep_items:

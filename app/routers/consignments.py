@@ -582,7 +582,7 @@ async def convert_order_to_consignment(
         amount_paid=float(order.partial_payment),
         balance=max(0.0, float(order.total) - float(order.partial_payment)),
         waiter_id=user.id,
-        notes=f"Gerado da comanda da mesa {order.table.number if order.table else order.table_id}",
+        notes=f"Gerado da comanda da mesa {order.table.label if order.table else order.table_id}",
     )
     db.add(consignment)
     await db.flush()
@@ -620,7 +620,7 @@ async def convert_order_to_consignment(
             table_id=order.table_id,
             type="entrada",
             quantity=unit_quantity,
-            note=f"Cancelamento itens pendentes na conversão para consignado mesa {order.table.number if order.table else order.table_id}",
+            note=f"Cancelamento itens pendentes na conversão para consignado mesa {order.table.label if order.table else order.table_id}",
         ))
         await db.delete(item)
 

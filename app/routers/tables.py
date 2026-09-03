@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -19,7 +19,8 @@ router = APIRouter(prefix="/api", tags=["tables"])
 
 
 class TableCreate(BaseModel):
-    number: int
+    number: int | None = None
+    name: str | None = None
 
 
 @router.get("/mesas")
@@ -51,6 +52,7 @@ async def list_tables(
             {
                 "id": t.id,
                 "number": t.number,
+                "name": t.name,
                 "status": t.status,
                 "is_balcao": t.is_balcao,
                 "total": round(total, 2),
@@ -58,7 +60,7 @@ async def list_tables(
                 "partial_service_charge": round(partial_service_charge, 2),
                 "has_open_order": len(open_orders) > 0,
                 "open_orders_count": len(open_orders),
-                "label": "Balcão" if t.is_balcao else f"Mesa {t.number}",
+                "label": t.label,
             }
         )
 
@@ -156,8 +158,9 @@ async def get_table_detail(
     return {
         "id": table.id,
         "number": table.number,
+        "name": table.name,
         "is_balcao": table.is_balcao,
-        "label": "Balcão" if table.is_balcao else f"Mesa {table.number}",
+        "label": table.label,
         "status": table.status,
         "total": first_order["total"] if first_order else 0.0,
         "partial_payment": first_order["partial_payment"] if first_order else 0.0,
@@ -183,6 +186,8 @@ async def list_tables_admin(
         {
             "id": t.id,
             "number": t.number,
+            "name": t.name,
+            "label": t.label,
             "status": t.status,
             "is_balcao": t.is_balcao,
             "active": t.active,
@@ -197,20 +202,36 @@ async def create_table(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_role("gerente")),
 ):
-    if req.number <= 0:
-        return {"error": "Número da mesa deve ser maior que zero"}
+    name = (req.name or "").strip() if req.name else None
+    if req.number is None and not name:
+        return {"error": "Informe um número ou um nome para a mesa"}
 
-    existing = await db.execute(select(Table).where(Table.number == req.number))
-    if existing.scalars().first():
-        return {"error": "Já existe uma mesa com esse número"}
+    if req.number is not None:
+        if req.number <= 0:
+            return {"error": "Número da mesa deve ser maior que zero"}
+        existing = await db.execute(select(Table).where(Table.number == req.number))
+        if existing.scalars().first():
+            return {"error": "Já existe uma mesa com esse número"}
 
-    table = Table(number=req.number, status="vazia", is_balcao=False)
+    if name:
+        existing = await db.execute(select(Table).where(Table.name == name))
+        if existing.scalars().first():
+            return {"error": "Já existe uma mesa com esse nome"}
+
+    number = req.number
+    if number is None:
+        last = await db.execute(select(func.max(Table.number)))
+        number = (last.scalar() or 0) + 1
+
+    table = Table(number=number, name=name, status="vazia", is_balcao=False)
     db.add(table)
     await db.commit()
     await db.refresh(table)
     return {
         "id": table.id,
         "number": table.number,
+        "name": table.name,
+        "label": table.label,
         "status": table.status,
         "is_balcao": table.is_balcao,
     }

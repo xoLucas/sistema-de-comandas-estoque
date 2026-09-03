@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -41,6 +42,18 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Lads Beer - Sistema de Comandas", lifespan=lifespan)
+
+logger = logging.getLogger("uvicorn.error")
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Log unexpected errors and return a JSON response instead of an HTML stack page."""
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"error": "Erro interno no servidor"},
+    )
 
 
 @app.exception_handler(RequestValidationError)

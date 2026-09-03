@@ -303,6 +303,18 @@ async def _ensure_columns() -> None:
             text("ALTER TABLE products ADD COLUMN IF NOT EXISTS printer VARCHAR(20) DEFAULT NULL")
         )
         await conn.execute(
+            text(
+                "ALTER TABLE products ADD COLUMN IF NOT EXISTS pack_unit_product_id "
+                "INTEGER REFERENCES products(id)"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE products ADD COLUMN IF NOT EXISTS pack_size "
+                "INTEGER NOT NULL DEFAULT 1"
+            )
+        )
+        await conn.execute(
             text("ALTER TABLE order_items ADD COLUMN IF NOT EXISTS unit_cost FLOAT DEFAULT NULL")
         )
         await conn.execute(
@@ -316,6 +328,9 @@ async def _ensure_columns() -> None:
         )
         await conn.execute(
             text("ALTER TABLE tables ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE")
+        )
+        await conn.execute(
+            text("ALTER TABLE tables ADD COLUMN IF NOT EXISTS name VARCHAR(100) DEFAULT NULL")
         )
         await conn.execute(
             text("DROP TABLE IF EXISTS printer_category")

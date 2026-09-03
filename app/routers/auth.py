@@ -148,6 +148,76 @@ async def create_user(
     }
 
 
+class UpdateUserRequest(BaseModel):
+    username: str | None = None
+    password: str | None = None
+    name: str | None = None
+    role: str | None = None
+    is_active: bool | None = None
+
+
+@router.put("/users/{user_id}")
+async def update_user(
+    user_id: int,
+    req: UpdateUserRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if current_user.role != "gerente":
+        raise HTTPException(status_code=403, detail="Acesso restrito ao gerente")
+
+    result = await db.execute(select(User).where(User.id == user_id))
+    target = result.scalars().first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+
+    if req.username is not None:
+        username = req.username.strip()
+        if not username:
+            raise HTTPException(status_code=400, detail="O login não pode ficar vazio")
+        existing = await db.execute(
+            select(User).where(User.username == username, User.id != user_id)
+        )
+        if existing.scalars().first():
+            raise HTTPException(status_code=400, detail="Já existe um usuário com esse login")
+        target.username = username
+
+    if req.password is not None:
+        if not req.password.strip():
+            raise HTTPException(status_code=400, detail="A senha não pode ficar vazia")
+        target.password_hash = hash_password(req.password)
+
+    if req.name is not None:
+        name = req.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="O nome não pode ficar vazio")
+        target.name = name
+
+    if req.role is not None:
+        if req.role not in ("garcom", "caixa", "estoquista", "gerente"):
+            raise HTTPException(status_code=400, detail="Cargo inválido")
+        if current_user.id == user_id and req.role != "gerente":
+            raise HTTPException(status_code=400, detail="Não pode rebaixar a si mesmo")
+        target.role = req.role
+
+    if req.is_active is not None:
+        if current_user.id == user_id and not req.is_active:
+            raise HTTPException(status_code=400, detail="Não pode desativar a si mesmo")
+        target.is_active = req.is_active
+
+    await db.commit()
+    await db.refresh(target)
+
+    return {
+        "id": target.id,
+        "username": target.username,
+        "name": target.name,
+        "role": target.role,
+        "is_registered": target.is_registered,
+        "is_active": target.is_active,
+    }
+
+
 @router.patch("/users/{user_id}/ativo")
 async def toggle_user_active(
     user_id: int,

@@ -323,7 +323,7 @@ async def customer_dashboard(
         "orders": [
             {
                 "id": o.id,
-                "table": f"Mesa {o.table.number}" if o.table and not o.table.is_balcao else "Balcão",
+                "table": o.table.label if o.table else "Balcão",
                 "total": float(o.total),
                 "closed_at": o.closed_at.isoformat() if o.closed_at else None,
             }

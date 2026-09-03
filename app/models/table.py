@@ -10,6 +10,7 @@ class Table(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     number: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
+    name: Mapped[str | None] = mapped_column(String(100), nullable=True, default=None)
     status: Mapped[str] = mapped_column(String(20), default="vazia", nullable=False)
     is_balcao: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -21,3 +22,12 @@ class Table(Base):
     )
 
     orders = relationship("Order", back_populates="table")
+
+    @property
+    def label(self) -> str:
+        """Return the display label, preferring the custom name when set."""
+        if self.is_balcao:
+            return "Balcão"
+        if self.name:
+            return self.name
+        return f"Mesa {self.number}"

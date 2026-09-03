@@ -52,6 +52,7 @@ async def _build_table_payload(table_id: int) -> dict | None:
         return {
             "id": table.id,
             "number": table.number,
+            "name": table.name,
             "status": table.status,
             "is_balcao": table.is_balcao,
             "total": round(total, 2),
@@ -59,7 +60,7 @@ async def _build_table_payload(table_id: int) -> dict | None:
             "partial_service_charge": round(partial_service_charge, 2),
             "has_open_order": len(open_orders) > 0,
             "open_orders_count": len(open_orders),
-            "label": "Balcão" if table.is_balcao else f"Mesa {table.number}",
+            "label": table.label,
         }
 
 

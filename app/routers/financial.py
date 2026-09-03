@@ -103,6 +103,7 @@ def serialize_order_sale(order: Order) -> dict:
     return {
         "order_id": order.id,
         "table_number": order.table.number if order.table else 0,
+        "table_label": order.table.label if order.table else "",
         "is_balcao": order.table.is_balcao if order.table else False,
         "waiter_name": _resolve_waiter_name(order),
         "customer_id": order.customer_id,
@@ -587,7 +588,7 @@ async def _build_daily_report(
         waiter_totals[waiter_name]["orders"] += 1
         waiter_totals[waiter_name]["sales"] += o.total
 
-        table_label = f"Mesa {o.table.number}" if (o.table and not o.table.is_balcao) else "Balcão"
+        table_label = o.table.label if o.table else "Balcão"
         table_totals[table_label]["total"] += o.total
         table_totals[table_label]["orders"] += 1
 
@@ -868,7 +869,7 @@ async def _build_session_report(
         waiter_totals[waiter_name]["orders"] += 1
         waiter_totals[waiter_name]["sales"] += o.total
 
-        table_label = f"Mesa {o.table.number}" if (o.table and not o.table.is_balcao) else "Balcão"
+        table_label = o.table.label if o.table else "Balcão"
         table_totals[table_label]["total"] += o.total
         table_totals[table_label]["orders"] += 1
 

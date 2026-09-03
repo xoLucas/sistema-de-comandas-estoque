@@ -131,7 +131,9 @@ async def dashboard_geral(
 
     # Caixa aberto
     cash_result = await db.execute(
-        select(CashRegisterSession).where(CashRegisterSession.status == "open")
+        select(CashRegisterSession)
+        .where(CashRegisterSession.status == "open")
+        .options(selectinload(CashRegisterSession.opened_by))
     )
     cash_session = cash_result.scalar_one_or_none()
     cash_info = None
@@ -151,7 +153,9 @@ async def dashboard_geral(
         }
 
     # Produtos em falta/risco
-    products_result = await db.execute(select(Product))
+    products_result = await db.execute(
+        select(Product).options(selectinload(Product.pack_unit_product))
+    )
     products = products_result.scalars().all()
     stock_counts = {"em_conformidade": 0, "em_risco": 0, "em_falta": 0}
     stock_risk_items = []
@@ -412,6 +416,7 @@ async def dashboard_vendas(
         select(
             Table.id,
             Table.number,
+            Table.name,
             Table.is_balcao,
             func.coalesce(func.sum(Order.total), 0.0),
             func.count(Order.id),
@@ -423,12 +428,12 @@ async def dashboard_vendas(
             Order.closed_at <= end_dt,
             or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
         )
-        .group_by(Table.id, Table.number, Table.is_balcao)
+        .group_by(Table.id, Table.number, Table.name, Table.is_balcao)
         .order_by(func.coalesce(func.sum(Order.total), 0.0).desc())
     )
     by_table = []
-    for tid, number, is_balcao_flag, total, count in table_result.all():
-        label = "Balcão" if is_balcao_flag else f"Mesa {number}"
+    for tid, number, name, is_balcao_flag, total, count in table_result.all():
+        label = "Balcão" if is_balcao_flag else (name or f"Mesa {number}")
         by_table.append({
             "id": tid,
             "label": label,

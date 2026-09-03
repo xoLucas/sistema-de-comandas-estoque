@@ -3031,7 +3031,7 @@ async function loadSales() {
                 return `
                 <div class="sale-card" onclick="openSaleDetailModal(${idx})" style="cursor:pointer;">
                     <div class="sale-header">
-                        <span class="sale-table">${s.is_balcao ? 'Balcão' : 'Mesa ' + s.table_number}</span>
+                        <span class="sale-table">${s.is_balcao ? 'Balcão' : (s.table_label || 'Mesa ' + s.table_number)}</span>
                         <span class="sale-time">${s.closed_at ? _fmtDateTime(s.closed_at) : ''}</span>
                     </div>
                     <div class="sale-details">
@@ -3077,7 +3077,7 @@ function openSaleDetailModal(index) {
     `).join('');
     document.getElementById('sale-detail-content').innerHTML = `
         <div class="report-summary">
-            <div class="summary-row"><span>Mesa</span><span>${s.is_balcao ? 'Balcão' : 'Mesa ' + s.table_number}</span></div>
+            <div class="summary-row"><span>Mesa</span><span>${s.is_balcao ? 'Balcão' : (s.table_label || 'Mesa ' + s.table_number)}</span></div>
             <div class="summary-row"><span>Garçom</span><span>${s.waiter_name || 'N/A'}</span></div>
             ${s.customer_name ? `<div class="summary-row"><span>Cliente</span><span>${s.customer_name}</span></div>` : ''}
             <div class="summary-row"><span>Itens</span><span>${s.items_count}</span></div>
@@ -5039,7 +5039,7 @@ async function loadCustomerOrders(customerId, page) {
             return `
             <div class="sale-card" onclick="openCustomerOrderDetail(${idx})" style="cursor:pointer;">
                 <div class="sale-header">
-                    <span class="sale-table">Comanda #${s.order_id} - ${s.is_balcao ? 'Balcão' : 'Mesa ' + s.table_number}</span>
+                    <span class="sale-table">Comanda #${s.order_id} - ${s.is_balcao ? 'Balcão' : (s.table_label || 'Mesa ' + s.table_number)}</span>
                     <span class="sale-time">${s.closed_at ? _fmtDateTime(s.closed_at) : '-'}</span>
                 </div>
                 <div class="sale-total">${formatCurrency(orderTotal)}</div>
@@ -7624,16 +7624,17 @@ async function loadSettingsTables() {
             return;
         }
         list.innerHTML = '<div class="table-grid">' + tables.map(t => {
+            const label = t.label || ('Mesa ' + t.number);
             if (t.active) {
                 return `
             <div class="table-card">
-                <span class="table-number">${t.number}</span>
+                <span class="table-number">${label}</span>
                 <button class="table-delete" onclick="deleteTable(${t.id})" title="Arquivar"><i class="bi bi-x-lg"></i></button>
             </div>`;
             }
             return `
             <div class="table-card archived">
-                <span class="table-number">${t.number}</span>
+                <span class="table-number">${label}</span>
                 <button class="table-restore" onclick="restoreTable(${t.id})" title="Reativar"><i class="bi bi-arrow-counterclockwise"></i></button>
             </div>`;
         }).join('') + '</div>';
@@ -7645,15 +7646,18 @@ async function loadSettingsTables() {
 async function addTable() {
     const input = document.getElementById('settings-new-table-number');
     if (!input || !input.value) return;
-    const number = parseInt(input.value, 10);
-    if (isNaN(number) || number < 1) {
-        showSettingsError('Número de mesa inválido');
-        return;
+    const value = input.value.trim();
+    const payload = {};
+    const parsed = parseInt(value, 10);
+    if (/^\d+$/.test(value) && parsed > 0) {
+        payload.number = parsed;
+    } else {
+        payload.name = value;
     }
     try {
         const res = await apiFetch(API_BASE + '/mesas', {
             method: 'POST',
-            body: JSON.stringify({ number })
+            body: JSON.stringify(payload)
         });
         const data = await res.json();
         if (data.error) {
@@ -7706,6 +7710,7 @@ async function loadSettingsUsers() {
     try {
         const res = await apiFetch(API_BASE + '/auth/users');
         const users = await res.json();
+        settingsUsersCache = users || [];
         if (users.error) {
             list.innerHTML = '<div class="error-msg">' + users.error + '</div>';
             return;
@@ -7729,6 +7734,7 @@ async function loadSettingsUsers() {
                         <input type="checkbox" ${u.is_active ? 'checked' : ''} onchange="toggleUserActive(${u.id}, this.checked)">
                         <span class="toggle-switch-slider"></span>
                     </label>
+                    <button class="btn-icon" onclick="editUser(${u.id})" title="Editar"><i class="bi bi-pencil"></i></button>
                     <button class="btn-icon-danger" onclick="deleteUser(${u.id})" title="Excluir"><i class="bi bi-x-lg"></i></button>
                 </div>
             </div>
@@ -7739,16 +7745,23 @@ async function loadSettingsUsers() {
     }
 }
 
-function openUserModal() {
-    document.getElementById('settings-user-id').value = '';
-    document.getElementById('settings-user-name').value = '';
-    document.getElementById('settings-user-username').value = '';
+let settingsUsersCache = [];
+
+function openUserModal(user) {
+    document.getElementById('settings-user-id').value = user ? user.id : '';
+    document.getElementById('settings-user-name').value = user ? (user.name || '') : '';
+    document.getElementById('settings-user-username').value = user ? (user.username || '') : '';
     document.getElementById('settings-user-password').value = '';
-    document.getElementById('settings-user-role').value = 'garcom';
-    document.getElementById('settings-user-active').checked = true;
-    document.getElementById('settings-user-modal-title').textContent = 'Novo Usuário';
+    document.getElementById('settings-user-role').value = user ? (user.role || 'garcom') : 'garcom';
+    document.getElementById('settings-user-active').checked = user ? !!user.is_active : true;
+    document.getElementById('settings-user-modal-title').textContent = user ? 'Editar Usuário' : 'Novo Usuário';
     document.getElementById('settings-user-error').style.display = 'none';
     document.getElementById('settings-user-modal').style.display = 'flex';
+}
+
+function editUser(id) {
+    const user = (settingsUsersCache || []).find(u => String(u.id) === String(id));
+    openUserModal(user || null);
 }
 
 function closeUserModal() {
@@ -7771,8 +7784,10 @@ async function saveUser() {
     try {
         const payload = { name, username, role, is_active };
         if (password) payload.password = password;
-        const res = await apiFetch(API_BASE + '/auth/users', {
-            method: 'POST',
+        const method = id ? 'PUT' : 'POST';
+        const url = id ? API_BASE + '/auth/users/' + id : API_BASE + '/auth/users';
+        const res = await apiFetch(url, {
+            method,
             body: JSON.stringify(payload)
         });
         const data = await res.json();
@@ -7783,7 +7798,7 @@ async function saveUser() {
         }
         closeUserModal();
         loadSettingsUsers();
-        showSettingsSuccess('Usuário salvo');
+        showSettingsSuccess(id ? 'Usuário atualizado' : 'Usuário salvo');
     } catch (err) {
         errorEl.textContent = 'Erro ao salvar usuário.';
         errorEl.style.display = 'block';

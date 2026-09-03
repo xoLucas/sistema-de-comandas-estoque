@@ -52,9 +52,14 @@
     <input type="date" id="sale-date-filter" onchange="loadSales()" class="select-field">
     <button onclick="loadSales()" class="btn-small">Filtrar</button>
     <button onclick="dailyCloseReport()" class="btn-small">Fechamento Diário</button>
+    <button onclick="toggleEstornadas()" class="btn-small" id="btn-toggle-estornadas">Ver Estornadas</button>
 </div>
 
 <div id="sales-list" class="sales-list">
+    <div class="loading">Carregando...</div>
+</div>
+
+<div id="estornadas-list" class="sales-list" style="display:none;">
     <div class="loading">Carregando...</div>
 </div>
 
@@ -74,6 +79,8 @@
         <h3 id="sale-detail-title">Detalhes da Comanda</h3>
         <div id="sale-detail-content"></div>
         <div style="display:flex;gap:8px;margin-top:12px;">
+            <button onclick="estornarVenda()" id="btn-estornar-venda" class="btn-danger-full" style="display:none;">Estornar Venda</button>
+            <button onclick="reabrirVenda()" id="btn-reabrir-venda" class="btn-danger-full" style="display:none;">Reabrir Venda</button>
             <button onclick="closeSaleDetailModal()" class="btn-secondary-full" style="flex:1;">Fechar</button>
         </div>
     </div>

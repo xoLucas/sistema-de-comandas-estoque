@@ -25,6 +25,7 @@ class Order(Base):
     service_charge_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     payment_method: Mapped[str | None] = mapped_column(String(30), nullable=True)
     card_machine: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    is_estorno: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

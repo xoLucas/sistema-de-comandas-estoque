@@ -1465,13 +1465,18 @@ function countTotalItems() {
     return count;
 }
 
-function getRemainingAmount(includeServiceCharge = false) {
+function getRemainingAmount(includeServiceCharge = false, customService = null) {
     const order = getCurrentOrder() || currentTableData || {};
     const total = order.total || 0;
     const paid = order.partial_payment || 0;
     const serviceChargePct = getSettingFloat('service_charge_pct', 10);
     const remainingProduct = Math.max(0, total - paid);
-    const remainingService = includeServiceCharge ? remainingProduct * (serviceChargePct / 100) : 0;
+    let remainingService = 0;
+    if (includeServiceCharge) {
+        remainingService = (customService && customService > 0)
+            ? customService
+            : remainingProduct * (serviceChargePct / 100);
+    }
     return {
         product: remainingProduct,
         service: remainingService,
@@ -1591,6 +1596,10 @@ function showPartialPaymentModal() {
     document.getElementById('partial-tendered-amount').value = '';
     document.getElementById('partial-payment-method').value = 'dinheiro';
     document.getElementById('partial-service-charge').checked = false;
+    const partialCustomInput = document.getElementById('partial-service-custom');
+    if (partialCustomInput) partialCustomInput.value = '';
+    const partialCustomSection = document.getElementById('partial-custom-service-section');
+    if (partialCustomSection) partialCustomSection.style.display = 'none';
 
     populateCardMachineSelect('partial');
     renderPartialPaymentItems();
@@ -1600,7 +1609,24 @@ function showPartialPaymentModal() {
 
 function updatePartialPaymentSummary() {
     const applyService = document.getElementById('partial-service-charge')?.checked || false;
-    const remaining = getRemainingAmount(applyService);
+    const customSection = document.getElementById('partial-custom-service-section');
+    if (customSection) customSection.style.display = applyService ? 'block' : 'none';
+
+    const customInput = document.getElementById('partial-service-custom');
+    const customValue = applyService ? parseFloat(customInput?.value || 0) || 0 : 0;
+    const serviceRow = document.getElementById('partial-service-row');
+    const serviceDisplay = document.getElementById('partial-service-display');
+    if (applyService && serviceRow && serviceDisplay) {
+        const serviceChargePct = getSettingFloat('service_charge_pct', 10);
+        const remaining = getRemainingAmount(false);
+        const shownService = customValue > 0 ? customValue : remaining.product * (serviceChargePct / 100);
+        serviceRow.style.display = '';
+        serviceDisplay.textContent = formatCurrency(shownService);
+    } else if (serviceRow) {
+        serviceRow.style.display = 'none';
+    }
+
+    const remaining = getRemainingAmount(applyService, customValue);
     document.getElementById('partial-remaining').textContent = formatCurrency(remaining.total);
 
     let amount = 0;
@@ -1609,7 +1635,7 @@ function updatePartialPaymentSummary() {
     } else {
         const { subtotal } = getItemsPaymentSubtotal();
         const serviceChargePct = getSettingFloat('service_charge_pct', 10);
-        amount = applyService ? subtotal * (1 + serviceChargePct / 100) : subtotal;
+        amount = applyService ? (customValue > 0 ? subtotal + customValue : subtotal * (1 + serviceChargePct / 100)) : subtotal;
         document.getElementById('partial-selected-total').textContent = formatCurrency(amount);
     }
 
@@ -1636,6 +1662,8 @@ async function submitPartialPayment() {
     const method = document.getElementById('partial-payment-method')?.value || 'dinheiro';
     const tenderedInput = document.getElementById('partial-tendered-amount');
     const applyService = document.getElementById('partial-service-charge')?.checked || false;
+    const customInput = document.getElementById('partial-service-custom');
+    const customService = applyService ? (parseFloat(customInput?.value || 0) || 0) : 0;
     const cardMachine = isCardMethod(method) ? (document.getElementById('partial-card-machine')?.value || '1') : null;
     const errorEl = document.getElementById('partial-payment-error');
 
@@ -1646,6 +1674,11 @@ async function submitPartialPayment() {
         amount = parseFloat(document.getElementById('partial-deduct-amount')?.value || 0);
         if (amount <= 0) {
             errorEl.textContent = 'Informe o valor a abater';
+            errorEl.style.display = 'block';
+            return;
+        }
+        if (customService > 0 && amount <= customService) {
+            errorEl.textContent = 'A gorjeta personalizada não pode ser maior ou igual ao valor a abater';
             errorEl.style.display = 'block';
             return;
         }
@@ -1660,12 +1693,12 @@ async function submitPartialPayment() {
         }
         if (applyService) {
             const serviceChargePct = getSettingFloat('service_charge_pct', 10);
-            amount = amount * (1 + serviceChargePct / 100);
+            amount = customService > 0 ? amount + customService : amount * (1 + serviceChargePct / 100);
         }
     }
 
     const tendered = parseFloat(tenderedInput?.value || 0);
-    const remaining = getRemainingAmount(applyService);
+    const remaining = getRemainingAmount(applyService, customService || null);
 
     if (amount > remaining.total + 0.01) {
         errorEl.textContent = 'O valor não pode ser maior que o restante da conta';
@@ -1688,7 +1721,8 @@ async function submitPartialPayment() {
                 amount: round(amount, 2),
                 payment_method: method,
                 card_machine: cardMachine,
-                apply_service_charge: applyService
+                apply_service_charge: applyService,
+                service_charge_custom: applyService ? (customService > 0 ? customService : null) : null
             })
         });
         const rawText = await res.text();
@@ -1913,6 +1947,10 @@ async function showCloseModal() {
     `;
 
     document.getElementById('apply-service-charge').checked = false;
+    const customServiceInput = document.getElementById('close-service-custom');
+    if (customServiceInput) customServiceInput.value = '';
+    const customSection = document.getElementById('close-custom-service-section');
+    if (customSection) customSection.style.display = 'none';
     document.getElementById('close-payment-method').value = 'dinheiro';
 
     populateCardMachineSelect('close');
@@ -1937,9 +1975,12 @@ function updateCloseTotal() {
     const total = order.total || 0;
     const paid = order.partial_payment || 0;
     const apply = document.getElementById('apply-service-charge').checked;
+    const customSection = document.getElementById('close-custom-service-section');
+    if (customSection) customSection.style.display = apply ? 'block' : 'none';
     const serviceChargePct = getSettingFloat('service_charge_pct', 10);
     const remainingProduct = Math.max(0, total - paid);
-    const service = apply ? remainingProduct * (serviceChargePct / 100) : 0;
+    const customValue = apply ? parseFloat(document.getElementById('close-service-custom')?.value || 0) : 0;
+    const service = apply ? (customValue > 0 ? customValue : remainingProduct * (serviceChargePct / 100)) : 0;
     const final = remainingProduct + service;
 
     document.getElementById('close-service-display').textContent = formatCurrency(service);
@@ -2332,6 +2373,8 @@ async function openCashRegisterFromTable() {
 
 async function confirmClose() {
     const applyServiceCharge = document.getElementById('apply-service-charge').checked;
+    const customServiceInput = document.getElementById('close-service-custom');
+    const customService = customServiceInput && customServiceInput.value ? parseFloat(customServiceInput.value) : null;
     const paymentMethod = document.getElementById('close-payment-method').value;
     const cardMachine = isCardMethod(paymentMethod) ? (document.getElementById('close-card-machine')?.value || '1') : null;
     const errorEl = document.getElementById('close-error');
@@ -2345,6 +2388,7 @@ async function confirmClose() {
                 table_id: TABLE_ID,
                 order_id: currentOrderId,
                 apply_service_charge: applyServiceCharge,
+                service_charge_custom: applyServiceCharge ? customService : null,
                 payment_method: paymentMethod,
                 card_machine: cardMachine,
                 amount: paymentMethod === 'dinheiro' ? tendered : null,
@@ -3017,12 +3061,17 @@ async function loadSales() {
         const res = await apiFetch(API_BASE + '/financeiro/vendas' + params);
         const data = await res.json();
         if (data.error) { container.innerHTML = '<div class="error-msg">' + data.error + '</div>'; return; }
-        if (data.sales.length === 0) { container.innerHTML = '<p class="empty-msg">Nenhuma venda no período</p>'; return; }
+        const hasConsignmentPaid = (data.summary && data.summary.consignment_paid > 0);
+        if (data.sales.length === 0 && !hasConsignmentPaid) { container.innerHTML = '<p class="empty-msg">Nenhuma venda no período</p>'; return; }
+        const consignmentLine = hasConsignmentPaid
+            ? `<div style="margin-top:4px;font-size:12px;color:var(--green);">Pagamentos de consignados: ${formatCurrency(data.summary.consignment_paid)}</div>`
+            : '';
         container.innerHTML = `
             <div style="background:var(--color-secondary);border-radius:var(--radius);padding:12px;margin-bottom:12px;text-align:center;">
                 <span style="font-size:13px;color:#888;">Total do dia: </span>
                 <span style="font-size:18px;font-weight:700;color:var(--color-accent);">${formatCurrency(data.summary.total_sales)}</span>
                 <span style="font-size:12px;color:#888;margin-left:8px;">(${data.summary.orders_count} comandas)</span>
+                ${consignmentLine}
             </div>
             ${data.sales.map((s, idx) => {
                 const orderTotal = round(s.total + s.service_charge_amount, 2);
@@ -3048,7 +3097,59 @@ async function loadSales() {
             }).join('')}
         `;
         window._lastSalesData = data.sales;
+        window._lastSalesMode = 'vendas';
     } catch (err) { container.innerHTML = '<div class="error-msg">Erro ao carregar vendas</div>'; }
+}
+
+async function loadEstornadas() {
+    const container = document.getElementById('estornadas-list');
+    if (!container) return;
+    const dateFilter = document.getElementById('sale-date-filter')?.value || '';
+    try {
+        const params = dateFilter ? '?date_filter=' + dateFilter : '';
+        const res = await apiFetch(API_BASE + '/financeiro/vendas/estornadas' + params);
+        const data = await res.json();
+        if (data.error) { container.innerHTML = '<div class="error-msg">' + data.error + '</div>'; return; }
+        if (data.estornadas.length === 0) { container.innerHTML = '<p class="empty-msg">Nenhuma venda estornada no período</p>'; return; }
+        container.innerHTML = data.estornadas.map((s, idx) => {
+            const orderTotal = round(s.total + s.service_charge_amount, 2);
+            return `
+            <div class="sale-card" style="border-color:var(--red);" onclick="openSaleDetailModal(${idx})" style="cursor:pointer;">
+                <div class="sale-header">
+                    <span class="sale-table">${s.is_balcao ? 'Balcão' : (s.table_label || 'Mesa ' + s.table_number)}</span>
+                    <span class="sale-time">${s.closed_at ? _fmtDateTime(s.closed_at) : ''}</span>
+                </div>
+                <div class="sale-details">
+                    <div class="sale-detail"><span>Garçom: ${s.waiter_name || 'N/A'}</span><span>${s.items_count} itens</span></div>
+                    ${s.customer_name ? `<div class="sale-detail"><span>Cliente: ${s.customer_name}</span></div>` : ''}
+                    <div class="sale-detail" style="color:var(--red);"><span>ESTORNADA</span></div>
+                </div>
+                <div class="sale-total">${formatCurrency(orderTotal)}</div>
+            </div>
+            `;
+        }).join('');
+        window._lastSalesData = data.estornadas;
+        window._lastSalesMode = 'estornadas';
+    } catch (err) { container.innerHTML = '<div class="error-msg">Erro ao carregar estornadas</div>'; }
+}
+
+function toggleEstornadas() {
+    const salesList = document.getElementById('sales-list');
+    const estornadasList = document.getElementById('estornadas-list');
+    const btn = document.getElementById('btn-toggle-estornadas');
+    if (!salesList || !estornadasList) return;
+    const showingEstornadas = salesList.style.display === 'none';
+    if (showingEstornadas) {
+        salesList.style.display = '';
+        estornadasList.style.display = 'none';
+        btn.textContent = 'Ver Estornadas';
+        loadSales();
+    } else {
+        salesList.style.display = 'none';
+        estornadasList.style.display = '';
+        btn.textContent = 'Ver Vendas';
+        loadEstornadas();
+    }
 }
 
 function openSaleDetailModal(index) {
@@ -3108,6 +3209,59 @@ function openSaleDetailModal(index) {
         </div>
     `;
     document.getElementById('sale-detail-modal').style.display = 'flex';
+    window._lastSelectedSale = s;
+    const btnEstornar = document.getElementById('btn-estornar-venda');
+    const btnReabrir = document.getElementById('btn-reabrir-venda');
+    if (btnEstornar) {
+        btnEstornar.style.display = (hasRole('gerente') && window._lastSalesMode === 'vendas' && s.can_estornar && !s.can_reabrir) ? '' : 'none';
+    }
+    if (btnReabrir) {
+        btnReabrir.style.display = (hasRole('gerente') && window._lastSalesMode === 'estornadas' && s.can_reabrir) ? '' : 'none';
+    }
+}
+
+async function estornarVenda() {
+    const s = window._lastSelectedSale;
+    if (!s || !s.order_id) return;
+    if (!confirm(
+        s.payment_method === 'fiado'
+            ? 'Estornar esta venda? A consignação (fiado) vinculada será cancelada junto e o estoque devolvido.'
+            : 'Estornar esta venda? O estoque será devolvido e a venda sairá dos relatórios.'
+    )) return;
+    try {
+        const res = await apiFetch(API_BASE + '/financeiro/vendas/' + s.order_id, { method: 'DELETE' });
+        const data = await res.json();
+        if (data.error || data.detail) {
+            alert(data.error || data.detail);
+            return;
+        }
+        closeSaleDetailModal();
+        loadSales();
+        loadCashRegisterStatus();
+        alert(data.message || 'Venda estornada');
+    } catch (err) {
+        alert('Erro ao estornar venda');
+    }
+}
+
+async function reabrirVenda() {
+    const s = window._lastSelectedSale;
+    if (!s || !s.order_id) return;
+    if (!confirm('Reabrir esta venda? Ela voltará a contar nos relatórios e o estoque será baixado novamente.')) return;
+    try {
+        const res = await apiFetch(API_BASE + '/financeiro/vendas/' + s.order_id + '/reabrir', { method: 'POST' });
+        const data = await res.json();
+        if (data.error || data.detail) {
+            alert(data.error || data.detail);
+            return;
+        }
+        closeSaleDetailModal();
+        loadEstornadas();
+        toggleEstornadas();
+        alert(data.message || 'Venda reaberta');
+    } catch (err) {
+        alert('Erro ao reabrir venda');
+    }
 }
 
 function closeSaleDetailModal() {
@@ -6979,6 +7133,7 @@ function renderDashboardGeral(data) {
         createDashboardCard('Comandas Abertas', data.open_orders?.count || 0, formatCurrency(data.open_orders?.total || 0)),
         createDashboardCard('Consignados Pendentes', data.consignments?.pending_count || 0, formatCurrency(data.consignments?.pending_total || 0)),
         createDashboardCard('Consignados no Período', data.consignments?.period_count || 0, formatCurrency(data.consignments?.period_total || 0)),
+        createDashboardCard('Consignados Pagos', formatCurrency(data.sales?.consignment_paid || 0), 'recebido no período'),
         createDashboardCard('Produtos em Falta', data.stock?.counts?.em_falta || 0, `${data.stock?.counts?.em_risco || 0} em risco`),
     ];
 
@@ -7478,7 +7633,7 @@ function renderDashboardGestao(data) {
         <div class="dashboard-section-title">Período: ${data.period?.start || ''} a ${data.period?.end || ''}</div>
         <div class="dashboard-cards-grid">
             <div class="dashboards-card">
-                <div class="dashboards-label">Lucro Líquido do Período</div>
+                <div class="dashboards-label">Faturamento líquido do período</div>
                 <div class="dashboards-value">${formatCurrency(data.net_profit || 0)}</div>
                 <div class="dashboards-sub">Faturamento: ${formatCurrency(data.total_sales || 0)}</div>
             </div>

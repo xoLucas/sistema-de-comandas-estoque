@@ -290,6 +290,7 @@ class OrderItemRequest(BaseModel):
 class CloseOrderRequest(BaseModel):
     table_id: int
     apply_service_charge: bool = False
+    service_charge_custom: float | None = None
     payment_method: str | None = None
     card_machine: str | None = None
     order_id: int | None = None
@@ -304,6 +305,7 @@ class PartialPaymentRequest(BaseModel):
     payment_method: str | None = None
     card_machine: str | None = None
     apply_service_charge: bool = False
+    service_charge_custom: float | None = None
     order_id: int | None = None
 
 
@@ -828,7 +830,13 @@ async def partial_payment(
 
     remaining_product = max(0.0, order.total - order.partial_payment)
 
-    if req.apply_service_charge:
+    custom = req.service_charge_custom
+    if req.apply_service_charge and custom is not None and custom > 0:
+        if custom >= req.amount:
+            return {"error": "A gorjeta personalizada não pode ser maior ou igual ao valor a abater"}
+        product_portion = round(max(0.0, req.amount - custom), 2)
+        service_portion = round(custom, 2)
+    elif req.apply_service_charge:
         service_charge_pct = await get_setting_as_float(db, "service_charge_pct", 10.0)
         divisor = 1 + (service_charge_pct / 100)
         product_portion = round(req.amount / divisor, 2)
@@ -888,15 +896,21 @@ async def close_order(
     table = table_result.scalars().first()
 
     service_charge_pct = await get_setting_as_float(db, "service_charge_pct", 10.0)
+    remaining_product = max(0.0, order.total - order.partial_payment)
     if req.apply_service_charge:
-        order.service_charge_pct = service_charge_pct
         order.service_charge_applied = True
+        custom = req.service_charge_custom
+        if custom is not None and custom > 0:
+            order.service_charge_pct = round(custom / remaining_product * 100, 2) if remaining_product > 0 else 0.0
+            service_charge_amount = round(custom, 2)
+        else:
+            order.service_charge_pct = service_charge_pct
+            service_charge_amount = remaining_product * (order.service_charge_pct / 100)
     else:
         order.service_charge_pct = 0.0
         order.service_charge_applied = False
+        service_charge_amount = 0.0
 
-    remaining_product = max(0.0, order.total - order.partial_payment)
-    service_charge_amount = remaining_product * (order.service_charge_pct / 100)
     remaining_service = max(0.0, service_charge_amount)
     final_total = remaining_product + remaining_service
 

@@ -6,7 +6,7 @@ All datetimes are stored in UTC. Business logic here works with the period
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.cash_register_session import CashRegisterSession
@@ -54,10 +54,13 @@ async def compute_cash_inflows(
             cash_inflows += Decimal(str(remaining_product + remaining_service))
 
     # Partial cash payments recorded in the period.
+    # Orders converted to consignment (fiado) have their partials registered as
+    # ConsignmentPayment rows, so they must not be double-counted here.
     partial_orders_result = await db.execute(
         select(Order).where(
             Order.partial_payments_detail.is_not(None),
             Order.status.in_(["aberta", "finalizada"]),
+            or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
         )
     )
     for order in partial_orders_result.scalars().all():

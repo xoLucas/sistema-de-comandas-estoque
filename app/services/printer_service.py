@@ -294,11 +294,6 @@ def build_order_receipt(
     b.line(store_info.get("name", "LADS BEER"))
     b.bold_off()
 
-    for field in ["address", "phone", "cnpj"]:
-        value = store_info.get(field)
-        if value:
-            b.line(value)
-
     b.separator()
 
     b.align_left()

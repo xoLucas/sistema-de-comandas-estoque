@@ -596,6 +596,26 @@ async def convert_order_to_consignment(
             unit_price=float(item.unit_price),
         ))
 
+    # Registra como pagamentos de consignação os pagamentos parciais já feitos na
+    # comanda. Sem isso, o valor já pago não entra no faturamento (que lê
+    # ConsignmentPayment.amount) e ficaria fora dos relatórios e dashboards.
+    for partial in order.partial_payments_detail or []:
+        paid_at = None
+        if partial.get("created_at"):
+            try:
+                paid_at = datetime.fromisoformat(partial["created_at"])
+            except ValueError:
+                paid_at = None
+        db.add(ConsignmentPayment(
+            consignment_order_id=consignment.id,
+            user_id=user.id,
+            amount=round(float(partial.get("amount", 0)), 2),
+            payment_method=partial.get("method") or "nao_informado",
+            card_machine=partial.get("card_machine"),
+            notes=f"Pagamento parcial da comanda #{order.id}",
+            created_at=paid_at,
+        ))
+
     await _recalculate_totals(db, consignment.id)
 
     # Return stock for any pending items and remove them before finalizing the order

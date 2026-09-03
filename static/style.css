@@ -790,6 +790,24 @@ header .subtitle {
     color: var(--text);
 }
 
+.btn-danger-full {
+    display: block;
+    width: 100%;
+    padding: 14px;
+    border: none;
+    border-radius: var(--radius);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    color: #fff;
+    text-align: center;
+    background: var(--red);
+    transition: opacity 0.15s;
+}
+.btn-danger-full:active {
+    opacity: 0.85;
+}
+
 .btn-small {
     padding: 10px 16px;
     border: 1px solid var(--border-accent);

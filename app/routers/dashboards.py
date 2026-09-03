@@ -34,6 +34,7 @@ from app.models.cash_position_movement import CashPositionMovement
 from app.routers.auth_deps import get_current_user
 from app.routers.financial import compute_period_profit
 from app.services.stock_service import stock_status, is_pack, pack_stock_for_product
+from app.services.consignment_service import fetch_consignment_payments
 
 router = APIRouter(prefix="/api/dashboards", tags=["dashboards"])
 
@@ -95,6 +96,10 @@ async def dashboard_geral(
         )
     )
     sales_total, service_charge, sales_count = sales_result.one()
+
+    # Pagamentos de consignação recebidos no período (só contam como faturamento)
+    consignment_payments = await fetch_consignment_payments(start_dt, end_dt, db)
+    consignment_paid_total = sum(float(p.amount) for p in consignment_payments)
 
     # Comandas abertas agora
     open_orders_result = await db.execute(
@@ -198,6 +203,20 @@ async def dashboard_geral(
         for hour, total, count in orders_by_hour_result.all()
     ]
 
+    # Merge pagamentos de consignação nas vendas por hora
+    consignment_hours: dict[str, float] = {}
+    for p in consignment_payments:
+        if p.created_at:
+            hour_key = as_local(p.created_at).strftime("%H:00")
+            consignment_hours[hour_key] = consignment_hours.get(hour_key, 0.0) + float(p.amount)
+    sales_by_hour_map = {item["hour"]: item for item in sales_by_hour}
+    for hour_key, amount in consignment_hours.items():
+        if hour_key in sales_by_hour_map:
+            sales_by_hour_map[hour_key]["total"] = round(sales_by_hour_map[hour_key]["total"] + amount, 2)
+        else:
+            sales_by_hour_map[hour_key] = {"hour": hour_key, "total": round(amount, 2), "orders": 0}
+    sales_by_hour = [sales_by_hour_map[k] for k in sorted(sales_by_hour_map.keys())]
+
     # Formas de pagamento
     payments_result = await db.execute(
         select(
@@ -227,6 +246,24 @@ async def dashboard_geral(
             "count": count,
         })
 
+    # Merge pagamentos de consignação nas formas de pagamento
+    consignment_methods: dict[str, float] = {}
+    for p in consignment_payments:
+        method = p.payment_method or "nao_informado"
+        consignment_methods[method] = consignment_methods.get(method, 0.0) + float(p.amount)
+    for method, amount in consignment_methods.items():
+        existing = next((pm for pm in payment_methods if pm["method"] == method), None)
+        if existing:
+            existing["total"] = round(existing["total"] + amount, 2)
+            existing["count"] += 1
+        else:
+            payment_methods.append({
+                "method": method,
+                "label": payment_labels.get(method, method or "Não Informado"),
+                "total": round(amount, 2),
+                "count": 1,
+            })
+
     # Top produtos
     items_result = await db.execute(
         select(
@@ -251,12 +288,41 @@ async def dashboard_geral(
         for name, quantity, total in items_result.all()
     ]
 
+    # Merge itens dos consignados pagos no top produtos
+    processed_consignment_ids: set[int] = set()
+    consignment_product_totals: dict[str, dict] = {}
+    for p in consignment_payments:
+        consignment = p.consignment_order
+        if not consignment or consignment.id in processed_consignment_ids:
+            continue
+        processed_consignment_ids.add(consignment.id)
+        for item in consignment.items:
+            product = item.product
+            if not product:
+                continue
+            entry = consignment_product_totals.setdefault(product.name, {"quantity": 0, "total": 0.0})
+            entry["quantity"] += item.quantity
+            entry["total"] += float(item.unit_price or 0) * item.quantity
+    top_product_map = {item["name"]: item for item in top_products}
+    for name, entry in consignment_product_totals.items():
+        if name in top_product_map:
+            top_product_map[name]["quantity"] += entry["quantity"]
+            top_product_map[name]["total"] = round(top_product_map[name]["total"] + entry["total"], 2)
+        else:
+            top_product_map[name] = {
+                "name": name,
+                "quantity": entry["quantity"],
+                "total": round(entry["total"], 2),
+            }
+    top_products = sorted(top_product_map.values(), key=lambda x: x["total"], reverse=True)[:10]
+
     if format.lower() == "csv":
         headers = [
             "Indicador", "Valor", "Periodo Inicio", "Periodo Fim"
         ]
         rows = [
-            ["Faturamento", round(float(sales_total), 2), start_local.isoformat(), end_local.isoformat()],
+            ["Faturamento", round(float(sales_total) + consignment_paid_total, 2), start_local.isoformat(), end_local.isoformat()],
+            ["Pagamentos de Consignados", round(float(consignment_paid_total), 2), start_local.isoformat(), end_local.isoformat()],
             ["Taxa de Servico", round(float(service_charge), 2), start_local.isoformat(), end_local.isoformat()],
             ["Comandas Finalizadas", sales_count, start_local.isoformat(), end_local.isoformat()],
             ["Comandas Abertas", open_count, start_local.isoformat(), end_local.isoformat()],
@@ -273,9 +339,10 @@ async def dashboard_geral(
     return {
         "period": {"start": start_local.isoformat(), "end": end_local.isoformat()},
         "sales": {
-            "total": round(float(sales_total), 2),
+            "total": round(float(sales_total) + consignment_paid_total, 2),
             "service_charge": round(float(service_charge), 2),
             "orders_count": sales_count,
+            "consignment_paid": round(float(consignment_paid_total), 2),
         },
         "open_orders": {
             "count": open_count,
@@ -312,6 +379,10 @@ async def dashboard_vendas(
 
     start_dt, end_dt, start_local, end_local = _parse_dates(start_date, end_date, default_days=7)
 
+    # Pagamentos de consignação recebidos no período (só pagos contam como faturamento)
+    consignment_payments = await fetch_consignment_payments(start_dt, end_dt, db)
+    consignment_paid_total = sum(float(p.amount) for p in consignment_payments)
+
     # Vendas por dia
     daily_expr = cast(func.timezone("America/Sao_Paulo", Order.closed_at), Date)
     daily_result = await db.execute(
@@ -331,6 +402,20 @@ async def dashboard_vendas(
         {"date": str(day), "total": round(float(total), 2), "orders": count}
         for day, total, count in daily_result.all()
     ]
+
+    # Merge pagamentos de consignação nas vendas por dia
+    consignment_by_day: dict[str, float] = {}
+    for p in consignment_payments:
+        if p.created_at:
+            day_key = as_local(p.created_at).date().isoformat()
+            consignment_by_day[day_key] = consignment_by_day.get(day_key, 0.0) + float(p.amount)
+    sales_by_day_map = {item["date"]: item for item in sales_by_day}
+    for day_key, amount in consignment_by_day.items():
+        if day_key in sales_by_day_map:
+            sales_by_day_map[day_key]["total"] = round(sales_by_day_map[day_key]["total"] + amount, 2)
+        else:
+            sales_by_day_map[day_key] = {"date": day_key, "total": round(amount, 2), "orders": 0}
+    sales_by_day = [sales_by_day_map[k] for k in sorted(sales_by_day_map.keys())]
 
     # Por categoria
     category_result = await db.execute(
@@ -471,6 +556,85 @@ async def dashboard_vendas(
         for method, total, count in payment_result.all()
     ]
 
+    # Merge pagamentos de consignação nas agregações (só pagamentos contam)
+    processed_consignment_ids: set[int] = set()
+    consignment_product_totals: dict[str, dict] = {}
+    for p in consignment_payments:
+        method = p.payment_method or "nao_informado"
+        existing_payment = next((b for b in by_payment if b["method"] == method), None)
+        if existing_payment:
+            existing_payment["total"] = round(existing_payment["total"] + float(p.amount), 2)
+            existing_payment["count"] += 1
+        else:
+            by_payment.append({
+                "method": method,
+                "label": payment_labels.get(method, method or "Não Informado"),
+                "total": round(float(p.amount), 2),
+                "count": 1,
+            })
+        consignment = p.consignment_order
+        if not consignment or consignment.id in processed_consignment_ids:
+            continue
+        processed_consignment_ids.add(consignment.id)
+        for item in consignment.items:
+            product = item.product
+            if not product:
+                continue
+            entry = consignment_product_totals.setdefault(product.name, {"quantity": 0, "total": 0.0, "category": product.category})
+            entry["quantity"] += item.quantity
+            entry["total"] += float(item.unit_price or 0) * item.quantity
+
+    # Merge em by_product
+    by_product_map = {prod["name"]: prod for prod in by_product}
+    for name, entry in consignment_product_totals.items():
+        if name in by_product_map:
+            by_product_map[name]["quantity"] += entry["quantity"]
+            by_product_map[name]["total"] = round(by_product_map[name]["total"] + entry["total"], 2)
+        else:
+            by_product_map[name] = {
+                "name": name,
+                "quantity": entry["quantity"],
+                "total": round(entry["total"], 2),
+            }
+    by_product = sorted(by_product_map.values(), key=lambda x: x["total"], reverse=True)
+
+    # Merge em by_category
+    consignment_category_totals: dict[str, dict] = {}
+    for entry in consignment_product_totals.values():
+        cat = entry["category"]
+        cat_entry = consignment_category_totals.setdefault(cat, {"quantity": 0, "total": 0.0})
+        cat_entry["quantity"] += entry["quantity"]
+        cat_entry["total"] += entry["total"]
+    by_category_map = {c["category"]: c for c in by_category}
+    for cat, entry in consignment_category_totals.items():
+        if cat in by_category_map:
+            by_category_map[cat]["quantity"] += entry["quantity"]
+            by_category_map[cat]["total"] = round(by_category_map[cat]["total"] + entry["total"], 2)
+        else:
+            by_category_map[cat] = {
+                "category": cat,
+                "quantity": entry["quantity"],
+                "total": round(entry["total"], 2),
+            }
+    by_category = sorted(by_category_map.values(), key=lambda x: x["total"], reverse=True)
+
+    # Merge em by_waiter (atribuído ao garçom do consignado)
+    consignment_waiter_totals: dict[str, float] = {}
+    for p in consignment_payments:
+        consignment = p.consignment_order
+        if not consignment or not consignment.waiter:
+            consignment_waiter_totals["N/A"] = consignment_waiter_totals.get("N/A", 0.0) + float(p.amount)
+            continue
+        waiter_name = consignment.waiter.name or "N/A"
+        consignment_waiter_totals[waiter_name] = consignment_waiter_totals.get(waiter_name, 0.0) + float(p.amount)
+    by_waiter_map = {w["name"]: w for w in by_waiter}
+    for waiter_name, amount in consignment_waiter_totals.items():
+        if waiter_name in by_waiter_map:
+            by_waiter_map[waiter_name]["total"] = round(by_waiter_map[waiter_name]["total"] + amount, 2)
+        else:
+            by_waiter_map[waiter_name] = {"name": waiter_name, "total": round(amount, 2), "orders": 0}
+    by_waiter = sorted(by_waiter_map.values(), key=lambda x: x["total"], reverse=True)
+
     # Resumo
     summary_result = await db.execute(
         select(
@@ -494,9 +658,10 @@ async def dashboard_vendas(
     return {
         "period": {"start": start_local.isoformat(), "end": end_local.isoformat()},
         "summary": {
-            "total_sales": round(float(total_sales), 2),
+            "total_sales": round(float(total_sales) + consignment_paid_total, 2),
             "orders_count": orders_count,
             "ticket_medio": ticket_medio,
+            "consignment_paid": round(float(consignment_paid_total), 2),
         },
         "sales_by_day": sales_by_day,
         "by_category": by_category,
@@ -661,6 +826,36 @@ async def dashboard_clientes(
         for cid, name, total, count in top_customers_result.all()
     ]
 
+    # Merge pagamentos de consignação por cliente (só pagamentos contam)
+    consignment_payments = await fetch_consignment_payments(
+        datetime.min.replace(tzinfo=timezone.utc),
+        datetime.max.replace(tzinfo=timezone.utc),
+        db,
+    )
+    consignment_customer_totals: dict[int, float] = {}
+    for p in consignment_payments:
+        consignment = p.consignment_order
+        if not consignment or not consignment.customer_id:
+            continue
+        consignment_customer_totals[consignment.customer_id] = (
+            consignment_customer_totals.get(consignment.customer_id, 0.0) + float(p.amount)
+        )
+    top_customers_map = {c["id"]: c for c in top_customers}
+    for customer_id, amount in consignment_customer_totals.items():
+        if customer_id in top_customers_map:
+            top_customers_map[customer_id]["total"] = round(top_customers_map[customer_id]["total"] + amount, 2)
+        else:
+            customer_result = await db.execute(select(Customer).where(Customer.id == customer_id))
+            customer = customer_result.scalars().first()
+            if customer:
+                top_customers_map[customer_id] = {
+                    "id": customer.id,
+                    "name": customer.name,
+                    "total": round(amount, 2),
+                    "orders": 0,
+                }
+    top_customers = sorted(top_customers_map.values(), key=lambda x: x["total"], reverse=True)[:10]
+
     # Aniversariantes do mês
     today = date.today()
     month = today.month
@@ -710,6 +905,9 @@ async def dashboard_funcionarios(
 
     start_dt, end_dt, start_local, end_local = _parse_dates(start_date, end_date, default_days=7)
 
+    # Pagamentos de consignação recebidos no período
+    consignment_payments = await fetch_consignment_payments(start_dt, end_dt, db)
+
     # Vendas por garçom
     waiter_user = aliased(User)
     closer_user = aliased(User)
@@ -756,6 +954,29 @@ async def dashboard_funcionarios(
             "ticket_medio": round(float(total) / count, 2) if count else 0.0,
         })
 
+    # Merge pagamentos de consignação por garçom
+    consignment_waiter_totals: dict[str, float] = {}
+    for p in consignment_payments:
+        consignment = p.consignment_order
+        if not consignment or not consignment.waiter:
+            consignment_waiter_totals["N/A"] = consignment_waiter_totals.get("N/A", 0.0) + float(p.amount)
+            continue
+        waiter_name = consignment.waiter.name or "N/A"
+        consignment_waiter_totals[waiter_name] = consignment_waiter_totals.get(waiter_name, 0.0) + float(p.amount)
+    by_waiter_map = {w["name"]: w for w in by_waiter}
+    for waiter_name, amount in consignment_waiter_totals.items():
+        if waiter_name in by_waiter_map:
+            by_waiter_map[waiter_name]["total"] = round(by_waiter_map[waiter_name]["total"] + amount, 2)
+        else:
+            by_waiter_map[waiter_name] = {
+                "id": None,
+                "name": waiter_name,
+                "total": round(amount, 2),
+                "orders": 0,
+                "ticket_medio": 0.0,
+            }
+    by_waiter = sorted(by_waiter_map.values(), key=lambda x: x["total"], reverse=True)
+
     # Vendas por hora (horário de pico)
     hour_expr = func.to_char(func.timezone("America/Sao_Paulo", Order.closed_at), "HH24:00").label("hour")
     hour_result = await db.execute(
@@ -775,6 +996,20 @@ async def dashboard_funcionarios(
         {"hour": hour, "total": round(float(total), 2), "orders": count}
         for hour, total, count in hour_result.all()
     ]
+
+    # Merge pagamentos de consignação por hora
+    consignment_hours: dict[str, float] = {}
+    for p in consignment_payments:
+        if p.created_at:
+            hour_key = as_local(p.created_at).strftime("%H:00")
+            consignment_hours[hour_key] = consignment_hours.get(hour_key, 0.0) + float(p.amount)
+    by_hour_map = {item["hour"]: item for item in by_hour}
+    for hour_key, amount in consignment_hours.items():
+        if hour_key in by_hour_map:
+            by_hour_map[hour_key]["total"] = round(by_hour_map[hour_key]["total"] + amount, 2)
+        else:
+            by_hour_map[hour_key] = {"hour": hour_key, "total": round(amount, 2), "orders": 0}
+    by_hour = [by_hour_map[k] for k in sorted(by_hour_map.keys())]
 
     if format.lower() == "csv":
         headers = ["ID", "Nome", "Total", "Comandas", "Ticket Medio"]

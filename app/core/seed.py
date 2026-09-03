@@ -249,7 +249,12 @@ async def _ensure_columns() -> None:
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS partial_service_charge FLOAT NOT NULL DEFAULT 0.0"
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS service_charge_amount FLOAT NOT NULL DEFAULT 0.0"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_estorno BOOLEAN NOT NULL DEFAULT FALSE"
             )
         )
         await conn.execute(

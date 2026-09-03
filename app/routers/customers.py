@@ -1,7 +1,7 @@
 from datetime import datetime, date
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
-from sqlalchemy import select, func, extract, cast, Date
+from sqlalchemy import select, func, extract, cast, Date, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -11,8 +11,10 @@ from app.models.order import Order
 from app.models.order_item import OrderItem
 from app.models.product import Product
 from app.models.user import User
+from app.models.consignment import ConsignmentOrder, ConsignmentOrderItem
 from app.core.timezone import as_local
 from app.routers.auth_deps import get_current_user, require_role
+from app.services.consignment_service import fetch_consignment_payments_for_customer
 from app.routers.financial import serialize_order_sale
 from app.validators.pydantic_mixins import CustomerValidationMixin
 
@@ -241,10 +243,15 @@ async def customer_summary(
     )
     total_spent, visit_count, last_visit = result.one()
 
+    consignment_payments = await fetch_consignment_payments_for_customer(customer_id, db)
+    total_consignment_paid = sum(
+        float(p.amount) for p in consignment_payments
+    )
+
     return {
         "customer_id": customer.id,
         "name": customer.name,
-        "total_spent": round(float(total_spent), 2),
+        "total_spent": round(float(total_spent) + total_consignment_paid, 2),
         "visit_count": int(visit_count),
         "last_visit": last_visit.isoformat() if last_visit else None,
     }
@@ -268,25 +275,50 @@ async def customer_dashboard(
         return {"error": "Cliente não encontrado"}
 
     if not year:
-        result = await db.execute(
-            select(func.coalesce(func.max(extract("year", func.timezone("America/Sao_Paulo", Order.closed_at))), 0)).where(
+        year_max_result = await db.execute(
+            select(
+                func.coalesce(func.max(extract("year", func.timezone("America/Sao_Paulo", Order.closed_at))), 0)
+            ).where(
                 Order.customer_id == customer_id,
                 Order.status == "finalizada",
             )
         )
-        year = int(result.scalar_one()) or as_local(datetime.now(timezone.utc)).year
+        year_max_value = year_max_result.scalar_one()
+        consignment_year_result = await db.execute(
+            select(
+                func.coalesce(func.max(extract("year", func.timezone("America/Sao_Paulo", ConsignmentOrder.created_at))), 0)
+            ).where(
+                ConsignmentOrder.customer_id == customer_id,
+                ConsignmentOrder.status != "cancelado",
+            )
+        )
+        consignment_year_value = consignment_year_result.scalar_one()
+        year = int(max(year_max_value or 0, consignment_year_value or 0)) or as_local(datetime.now(timezone.utc)).year
 
     orders_result = await db.execute(
         select(Order)
         .where(
             Order.customer_id == customer_id,
             Order.status == "finalizada",
+            or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
             extract("year", func.timezone("America/Sao_Paulo", Order.closed_at)) == year,
         )
         .options(selectinload(Order.table))
         .order_by(Order.closed_at)
     )
     orders = orders_result.scalars().all()
+
+    consignment_result = await db.execute(
+        select(ConsignmentOrder)
+        .where(
+            ConsignmentOrder.customer_id == customer_id,
+            ConsignmentOrder.status != "cancelado",
+            extract("year", func.timezone("America/Sao_Paulo", ConsignmentOrder.created_at)) == year,
+        )
+        .options(selectinload(ConsignmentOrder.items))
+        .order_by(ConsignmentOrder.created_at)
+    )
+    consignments = consignment_result.scalars().all()
 
     months = {i: {"count": 0, "total": 0.0, "label": _month_label(i)} for i in range(1, 13)}
     weekdays = {i: {"count": 0, "total": 0.0, "label": _weekday_label(i)} for i in range(7)}
@@ -306,12 +338,26 @@ async def customer_dashboard(
         weekdays[weekday]["total"] += total
         yearly_total += total
 
+    for consignment in consignments:
+        if not consignment.created_at:
+            continue
+        created_local = as_local(consignment.created_at)
+        month = created_local.month
+        weekday = created_local.weekday()
+        total = float(consignment.total)
+
+        months[month]["count"] += 1
+        months[month]["total"] += total
+        weekdays[weekday]["count"] += 1
+        weekdays[weekday]["total"] += total
+        yearly_total += total
+
     return {
         "customer_id": customer.id,
         "name": customer.name,
         "year": year,
         "yearly_total": round(yearly_total, 2),
-        "yearly_visits": len(orders),
+        "yearly_visits": len(orders) + len(consignments),
         "by_month": [
             {"month": i, "label": months[i]["label"], "count": months[i]["count"], "total": round(months[i]["total"], 2)}
             for i in range(1, 13)
@@ -328,6 +374,16 @@ async def customer_dashboard(
                 "closed_at": o.closed_at.isoformat() if o.closed_at else None,
             }
             for o in orders
+        ],
+        "consignments": [
+            {
+                "id": c.id,
+                "total": float(c.total),
+                "balance": float(c.balance),
+                "status": c.status,
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+            }
+            for c in consignments
         ],
     }
 
@@ -426,6 +482,7 @@ async def customer_item_ranking(
         .where(
             Order.customer_id == customer_id,
             Order.status == "finalizada",
+            or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
         )
         .group_by(Product.name)
         .order_by(
@@ -442,6 +499,38 @@ async def customer_item_ranking(
         }
         for name, qty, total in items_result.all()
     ]
+
+    consignment_items_result = await db.execute(
+        select(
+            Product.name,
+            func.sum(ConsignmentOrderItem.quantity),
+            func.sum(ConsignmentOrderItem.unit_price * ConsignmentOrderItem.quantity),
+        )
+        .join(ConsignmentOrderItem, ConsignmentOrderItem.product_id == Product.id)
+        .join(ConsignmentOrder, ConsignmentOrder.id == ConsignmentOrderItem.consignment_order_id)
+        .where(
+            ConsignmentOrder.customer_id == customer_id,
+            ConsignmentOrder.status != "cancelado",
+        )
+        .group_by(Product.name)
+        .order_by(
+            func.sum(ConsignmentOrderItem.quantity).desc(),
+            func.sum(ConsignmentOrderItem.unit_price * ConsignmentOrderItem.quantity).desc(),
+        )
+    )
+    for name, qty, total in consignment_items_result.all():
+        existing = next((item for item in items if item["product_name"] == name), None)
+        if existing:
+            existing["quantity"] += int(qty or 0)
+            existing["total"] = round(existing["total"] + float(total or 0), 2)
+        else:
+            items.append({
+                "product_name": name,
+                "quantity": int(qty or 0),
+                "total": round(float(total or 0), 2),
+            })
+
+    items.sort(key=lambda x: (x["quantity"], x["total"]), reverse=True)
 
     return {
         "customer_id": customer.id,

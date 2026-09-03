@@ -3,7 +3,7 @@ from collections import defaultdict
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import select, func, extract, cast, Date, or_
+from sqlalchemy import select, func, extract, cast, Date, or_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from fpdf import FPDF
@@ -28,11 +28,17 @@ from app.models.customer import Customer
 from app.models.expense import Expense
 from app.models.cash_register_session import CashRegisterSession
 from app.models.cash_register_movement import CashRegisterMovement
+from app.models.cash_position_movement import CashPositionMovement
 from app.models.stock_history import StockHistory
 from app.models.consignment import ConsignmentOrder, ConsignmentOrderItem, ConsignmentPayment
 from app.routers.auth_deps import get_current_user, can_view_financial
+from app.routers.ws import broadcast_table_update, broadcast_stock_update
+from app.routers.orders import _resolve_pack_stock, _build_stock_broadcast_info
+from app.routers.consignments import _return_stock_for_items
 from app.services.settings_service import get_setting_as_float, get_card_fee_for_machine
 from app.services.cash_service import compute_session_cash_summary
+from app.services.stock_service import is_pack
+from app.services.consignment_service import fetch_consignment_payments
 
 router = APIRouter(prefix="/api/financeiro", tags=["financeiro"])
 
@@ -119,6 +125,7 @@ def serialize_order_sale(order: Order) -> dict:
         "payment_method_label": payment_method_label,
         "card_machine": order.card_machine,
         "closed_at": order.closed_at.isoformat() if order.closed_at else None,
+        "can_estornar": order.status == "finalizada",
         "items": [
             {
                 "product_name": item.product.name if item.product else "N/A",
@@ -1002,6 +1009,85 @@ async def _build_session_report(
     return report
 
 
+async def _sync_session_cash_position(
+    order_closed_at: datetime | None,
+    db: AsyncSession,
+) -> None:
+    """Recalculate the automatic cash position movements for a closed session.
+
+    After a sale is reversed (estorno) or reopened, the automatic movements
+    ("Fechamento de caixa" and "Taxa de cartão") persisted when the session was
+    closed are updated to reflect the current state of that session.
+    """
+    if not order_closed_at:
+        return
+    session_result = await db.execute(
+        select(CashRegisterSession).where(
+            CashRegisterSession.status == "closed",
+            CashRegisterSession.opened_at <= order_closed_at,
+            CashRegisterSession.closed_at >= order_closed_at,
+        )
+    )
+    session = session_result.scalar_one_or_none()
+    if not session:
+        return
+
+    metrics = await compute_session_close_metrics(session, db)
+
+    movements_result = await db.execute(
+        select(CashPositionMovement).where(
+            CashPositionMovement.session_id == session.id,
+            CashPositionMovement.source == "automatico",
+        )
+    )
+    movements = movements_result.scalars().all()
+    close_movement = next((m for m in movements if m.title == "Fechamento de caixa"), None)
+    fee_movement = next((m for m in movements if m.title == "Taxa de cartão"), None)
+
+    target_gross = metrics["gross_total"]
+    target_fees = metrics["card_fees"]
+
+    if close_movement:
+        if target_gross > 0:
+            close_movement.amount = target_gross
+        else:
+            await db.delete(close_movement)
+    elif target_gross > 0:
+        db.add(CashPositionMovement(
+            type="entrada",
+            source="automatico",
+            title="Fechamento de caixa",
+            amount=target_gross,
+            session_id=session.id,
+        ))
+
+    if fee_movement:
+        if target_fees > 0:
+            fee_movement.amount = target_fees
+        else:
+            await db.delete(fee_movement)
+    elif target_fees > 0:
+        db.add(CashPositionMovement(
+            type="saida",
+            source="automatico",
+            title="Taxa de cartão",
+            amount=target_fees,
+            session_id=session.id,
+        ))
+
+
+async def _load_reversal_order(order_id: int, db: AsyncSession) -> Order | None:
+    result = await db.execute(
+        select(Order)
+        .where(Order.id == order_id)
+        .options(
+            selectinload(Order.table),
+            selectinload(Order.items).selectinload(OrderItem.product),
+        )
+    )
+    return result.scalars().first()
+
+
 @router.get("/vendas")
 async def list_sales(
     date_filter: str | None = Query(None),
@@ -1025,6 +1111,7 @@ async def list_sales(
         .order_by(Order.closed_at.desc())
     )
 
+    day_start, day_end = None, None
     if date_filter:
         filter_date = parse_local_date(date_filter)
         if filter_date:
@@ -1037,20 +1124,227 @@ async def list_sales(
     data = []
     total_day = 0.0
     total_service = 0.0
+    counted_orders = 0
 
     for o in orders:
-        total_day += o.total
         total_service += o.service_charge_amount
         data.append(serialize_order_sale(o))
+        if o.payment_method != "fiado":
+            total_day += o.total
+            counted_orders += 1
+
+    consignment_paid_total = 0.0
+    if day_start is not None and day_end is not None:
+        consignment_payments = await fetch_consignment_payments(day_start, day_end, db)
+        consignment_paid_total = sum(float(p.amount) for p in consignment_payments)
+        total_day += consignment_paid_total
 
     return {
         "sales": data,
         "summary": {
             "total_sales": round(total_day, 2),
             "total_service_charge": round(total_service, 2),
-            "orders_count": len(data),
+            "orders_count": counted_orders,
+            "consignment_paid": round(consignment_paid_total, 2),
         },
     }
+
+
+@router.delete("/vendas/{order_id}")
+async def estornar_venda(
+    order_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if user.role != "gerente":
+        raise HTTPException(status_code=403, detail="Acesso restrito ao gerente")
+
+    order = await _load_reversal_order(order_id, db)
+    if not order:
+        raise HTTPException(status_code=404, detail="Venda não encontrada")
+
+    if order.status != "finalizada":
+        return {"error": "Apenas vendas finalizadas podem ser estornadas"}
+
+    linked_consignment = None
+    consignment_result = await db.execute(
+        select(ConsignmentOrder).where(ConsignmentOrder.source_order_id == order_id)
+    )
+    linked_consignment = consignment_result.scalars().first()
+
+    stock_broadcast_infos = []
+
+    if linked_consignment is not None:
+        if linked_consignment.status == "pago" or linked_consignment.amount_paid > 0:
+            return {
+                "error": (
+                    "A consignação (fiado) vinculada a esta venda já recebeu pagamentos. "
+                    "Não é possível estornar automaticamente."
+                )
+            }
+        if linked_consignment.status != "cancelado":
+            products_to_broadcast = await _return_stock_for_items(db, linked_consignment.id)
+            for p in products_to_broadcast:
+                stock_broadcast_infos.append(_build_stock_broadcast_info(p))
+            linked_consignment.status = "cancelado"
+            linked_consignment.closed_at = datetime.now(timezone.utc)
+            linked_consignment.balance = 0.0
+    else:
+        for item in order.items:
+            product = item.product
+            if not product:
+                continue
+            try:
+                stock_product, unit_quantity = await _resolve_pack_stock(db, product, item.quantity)
+            except ValueError:
+                stock_product = product
+                unit_quantity = item.quantity
+            stock_product.stock += unit_quantity
+            stock_broadcast_infos.append(_build_stock_broadcast_info(product))
+            if is_pack(product):
+                stock_broadcast_infos.append(_build_stock_broadcast_info(stock_product))
+            db.add(StockHistory(
+                product_id=stock_product.id,
+                order_id=order.id,
+                table_id=order.table_id,
+                type="entrada",
+                quantity=unit_quantity,
+                note=f"Estorno da venda #{order.id}",
+            ))
+
+    order.status = "cancelada"
+    order.is_estorno = True
+    await _sync_session_cash_position(order.closed_at, db)
+    await db.commit()
+
+    seen = set()
+    for pid, pstock, pstatus in stock_broadcast_infos:
+        if pid in seen:
+            continue
+        seen.add(pid)
+        await broadcast_stock_update(pid, pstock, pstatus)
+
+    return {"message": "Venda estornada com sucesso", "order_id": order.id}
+
+
+@router.post("/vendas/{order_id}/reabrir")
+async def reabrir_venda(
+    order_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if user.role != "gerente":
+        raise HTTPException(status_code=403, detail="Acesso restrito ao gerente")
+
+    order = await _load_reversal_order(order_id, db)
+    if not order:
+        raise HTTPException(status_code=404, detail="Venda não encontrada")
+
+    if order.status != "cancelada" or not order.is_estorno:
+        return {"error": "Apenas vendas estornadas podem ser reabertas"}
+
+    consignment_result = await db.execute(
+        select(ConsignmentOrder.id).where(ConsignmentOrder.source_order_id == order_id)
+    )
+    if consignment_result.scalars().first() is not None:
+        return {
+            "error": (
+                "Esta venda foi estornada junto com a consignação (fiado) vinculada. "
+                "Não é possível reabrir; registre uma nova venda se necessário."
+            )
+        }
+
+    stock_broadcast_infos = []
+    for item in order.items:
+        product = item.product
+        if not product:
+            continue
+        try:
+            stock_product, unit_quantity = await _resolve_pack_stock(db, product, item.quantity)
+        except ValueError:
+            stock_product = product
+            unit_quantity = item.quantity
+        if stock_product.stock < unit_quantity:
+            available = (
+                stock_product.stock // (product.pack_size or 1)
+                if product.pack_unit_product_id
+                else stock_product.stock
+            )
+            return {
+                "error": (
+                    f"Estoque insuficiente para reabrir a venda. "
+                    f"{product.name} disponível: {available}"
+                )
+            }
+        stock_product.stock -= unit_quantity
+        stock_broadcast_infos.append(_build_stock_broadcast_info(product))
+        if is_pack(product):
+            stock_broadcast_infos.append(_build_stock_broadcast_info(stock_product))
+        db.add(StockHistory(
+            product_id=stock_product.id,
+            order_id=order.id,
+            table_id=order.table_id,
+            type="saida",
+            quantity=unit_quantity,
+            note=f"Reabertura da venda #{order.id}",
+        ))
+
+    order.status = "finalizada"
+    order.is_estorno = False
+    await _sync_session_cash_position(order.closed_at, db)
+    await db.commit()
+
+    for pid, pstock, pstatus in stock_broadcast_infos:
+        await broadcast_stock_update(pid, pstock, pstatus)
+
+    return {"message": "Venda reaberta com sucesso", "order_id": order.id}
+
+
+@router.get("/vendas/estornadas")
+async def list_estornadas(
+    date_filter: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if not can_view_financial(user):
+        return {"error": "Acesso restrito ao caixa ou gerente"}
+
+    query = (
+        select(Order)
+        .where(Order.status == "cancelada", Order.is_estorno == True)
+        .options(
+            selectinload(Order.table),
+            selectinload(Order.waiter),
+            selectinload(Order.closed_by),
+            selectinload(Order.closed_waiter),
+            selectinload(Order.customer),
+            selectinload(Order.items).selectinload(OrderItem.product),
+        )
+        .order_by(desc(Order.closed_at))
+    )
+
+    if date_filter:
+        filter_date = parse_local_date(date_filter)
+        if filter_date:
+            day_start, day_end = local_day_to_utc_range(filter_date)
+            query = query.where(Order.closed_at >= day_start, Order.closed_at <= day_end)
+
+    result = await db.execute(query)
+    orders = result.scalars().all()
+
+    data = []
+    consignment_order_ids = set()
+    consignment_result = await db.execute(
+        select(ConsignmentOrder.source_order_id).where(ConsignmentOrder.source_order_id.is_not(None))
+    )
+    consignment_order_ids = {row[0] for row in consignment_result.all()}
+    for o in orders:
+        payload = serialize_order_sale(o)
+        payload["can_estornar"] = False
+        payload["can_reabrir"] = o.id not in consignment_order_ids
+        data.append(payload)
+
+    return {"estornadas": data}
 
 
 @router.get("/dashboard")

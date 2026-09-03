@@ -99,6 +99,7 @@
             <div class="summary-row"><span>Total da conta</span><span id="partial-total-account">R$ 0,00</span></div>
             <div class="summary-row"><span>Já pago</span><span id="partial-already-paid">R$ 0,00</span></div>
             <div class="summary-row" style="font-weight:700;border-top:1px solid var(--border);padding-top:6px;margin-top:6px;"><span>Restante</span><span id="partial-remaining">R$ 0,00</span></div>
+            <div class="summary-row" id="partial-service-row" style="display:none;color:var(--accent);"><span>Taxa de serviço / Gorjeta</span><span id="partial-service-display">R$ 0,00</span></div>
         </div>
 
         <div class="tabs" style="margin-bottom:14px;">
@@ -155,6 +156,10 @@
                 Acrescentar taxa de serviço
             </label>
         </div>
+        <div id="partial-custom-service-section" style="display:none;margin-top:8px;">
+            <label class="input-label">Gorjeta personalizada (opcional)</label>
+            <input type="number" id="partial-service-custom" class="input-field" step="0.01" min="0" placeholder="Deixe em branco para usar a taxa padrão" oninput="updatePartialPaymentSummary()">
+        </div>
         <div style="display:flex;gap:8px;margin-top:12px;">
             <button onclick="submitPartialPayment()" class="btn-primary-full" style="flex:1;">Confirmar Pagamento</button>
             <button onclick="closePartialPaymentModal()" class="btn-secondary-full" style="flex:1;">Cancelar</button>
@@ -181,6 +186,10 @@
                 <input type="checkbox" id="apply-service-charge" onchange="updateCloseTotal()" style="width:18px;height:18px;accent-color:var(--accent);">
                 Acrescentar taxa de serviço
             </label>
+        </div>
+        <div id="close-custom-service-section" style="display:none;margin-bottom:10px;">
+            <label class="input-label">Gorjeta personalizada (opcional)</label>
+            <input type="number" id="close-service-custom" class="input-field" step="0.01" min="0" placeholder="Deixe em branco para usar a taxa padrão" oninput="updateCloseTotal()">
         </div>
         <div style="margin-bottom:14px;">
             <label class="input-label">Forma de Pagamento</label>

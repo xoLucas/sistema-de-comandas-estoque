@@ -159,6 +159,7 @@ async def _rebuild_printer_data(notification, printer_width: int, db) -> bytes |
             order_id,
             printer_width,
             observation,
+            details.get("table_label"),
         )
 
     if function == "bar":
@@ -171,6 +172,7 @@ async def _rebuild_printer_data(notification, printer_width: int, db) -> bytes |
             order_id,
             printer_width,
             observation,
+            details.get("table_label"),
         )
 
     if function == "nota":

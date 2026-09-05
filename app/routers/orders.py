@@ -365,7 +365,7 @@ async def _send_kitchen_ticket(
     printer = await get_printer_for_function("cozinha")
     width = printer["width"] if printer else 32
     data = build_kitchen_ticket(
-        table_number, round_number, prep_items, waiter_name, customer_name, order_id, width, observation
+        table_number, round_number, prep_items, waiter_name, customer_name, order_id, width, observation, table_label
     )
     context = {
         "function": "cozinha",
@@ -401,7 +401,7 @@ async def _send_bar_ticket(
     printer = await get_printer_for_function("bar")
     width = printer["width"] if printer else 32
     data = build_bar_ticket(
-        table_number, round_number, bar_items, waiter_name, customer_name, order_id, width, observation
+        table_number, round_number, bar_items, waiter_name, customer_name, order_id, width, observation, table_label
     )
     context = {
         "function": "bar",

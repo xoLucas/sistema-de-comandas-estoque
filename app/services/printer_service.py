@@ -325,25 +325,35 @@ def build_order_receipt(
     total = order_data.get("total", 0.0)
     service_charge = order_data.get("service_charge_amount", 0.0)
     final_total = order_data.get("final_total", total)
+    partial_payment = order_data.get("partial_payment", 0.0)
+    valor_total_real = total + service_charge
 
     if service_charge > 0:
         b.total_line("Subtotal", total)
         b.total_line(f"Taxa Servico ({order_data.get('service_charge_pct', 0):.0f}%)", service_charge)
         b.double_separator()
         b.bold_on()
-        b.total_line("TOTAL", final_total)
+        b.total_line("TOTAL", valor_total_real)
         b.bold_off()
     else:
         b.bold_on()
-        b.total_line("TOTAL", total)
+        b.total_line("TOTAL", valor_total_real)
         b.bold_off()
 
     if order_data.get("payment_method"):
-        b.line(f"Forma de pagamento: {order_data['payment_method']}")
+            b.line(f"Forma de pagamento: {order_data['payment_method']}")
 
-    if order_data.get("partial_payment", 0) > 0:
-        b.total_line("Pago anteriormente", order_data["partial_payment"])
-        b.total_line("Restante a pagar", max(0, final_total - order_data["partial_payment"]))
+    if partial_payment > 0:
+        b.total_line("Pago anteriormente", partial_payment)
+        
+        # Se houver taxa de serviço, exibe as duas opções de restante
+        if service_charge > 0:
+            restante_sem_taxa = max(0, total - partial_payment)
+            b.total_line("Restante (SEM taxa de serviço)", restante_sem_taxa)
+            b.total_line("Restante (COM taxa de serviço)", final_total)
+        else:
+            # Se não tiver taxa na comanda, exibe o restante normal
+            b.total_line("Restante a pagar", final_total)
 
     b.separator()
     b.align_center()
@@ -365,7 +375,8 @@ def build_order_receipt(
     for item in order_data.get("items", []):
         preview_lines.append(f"{item.get('quantity', 1)}x {item.get('product_name', '')} - {_format_money(item.get('subtotal', 0.0))}")
     preview_lines.append("-" * 32)
-    preview_lines.append(f"TOTAL: {_format_money(total if service_charge <= 0 else final_total)}")
+    preview_lines.append(f"TOTAL: {_format_money(valor_total_real)}")
+    
     if order_data.get("payment_method"):
         preview_lines.append(f"Pagamento: {order_data['payment_method']}")
     _print_terminal_preview("NOTA", preview_lines)
@@ -420,6 +431,7 @@ def build_kitchen_ticket(
     order_id: int | None,
     printer_width: int = 32,
     observation: str | None = None,
+    table_label: str | None = None,
 ) -> bytes:
     b = EscPosBuilder(width=printer_width)
 
@@ -430,7 +442,8 @@ def build_kitchen_ticket(
     b.separator()
 
     b.align_left()
-    b.line(f"MESA: {table_number}")
+    display_table = table_label if table_label else f"Mesa {table_number}"
+    b.line(f"MESA: {display_table}")
     if order_id:
         b.line(f"COMANDA: {order_id}")
     b.line(f"PEDIDO: {round_number}")
@@ -459,7 +472,7 @@ def build_kitchen_ticket(
 
     preview_lines = [
         "COZINHA",
-        f"MESA: {table_number}",
+        f"MESA: {display_table}",
     ]
     if order_id:
         preview_lines.append(f"COMANDA: {order_id}")
@@ -489,6 +502,7 @@ def build_bar_ticket(
     order_id: int | None,
     printer_width: int = 32,
     observation: str | None = None,
+    table_label: str | None = None,
 ) -> bytes:
     b = EscPosBuilder(width=printer_width)
 
@@ -499,7 +513,8 @@ def build_bar_ticket(
     b.separator()
 
     b.align_left()
-    b.line(f"MESA: {table_number}")
+    display_table = table_label if table_label else f"Mesa {table_number}"
+    b.line(f"MESA: {display_table}")
     if order_id:
         b.line(f"COMANDA: {order_id}")
     b.line(f"PEDIDO: {round_number}")
@@ -528,7 +543,7 @@ def build_bar_ticket(
 
     preview_lines = [
         "BAR",
-        f"MESA: {table_number}",
+        f"MESA: {display_table}",
     ]
     if order_id:
         preview_lines.append(f"COMANDA: {order_id}")

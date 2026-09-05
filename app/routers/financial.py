@@ -1347,6 +1347,57 @@ async def list_estornadas(
     return {"estornadas": data}
 
 
+@router.get("/vendas/consignados-pagos")
+async def list_consignment_payments(
+    date_filter: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if not can_view_financial(user):
+        return {"error": "Acesso restrito ao caixa ou gerente"}
+
+    if date_filter:
+        filter_date = parse_local_date(date_filter)
+        if filter_date:
+            day_start, day_end = local_day_to_utc_range(filter_date)
+        else:
+            day_start, day_end = local_day_to_utc_range(today_local())
+    else:
+        day_start, day_end = local_day_to_utc_range(today_local())
+
+    payments = await fetch_consignment_payments(day_start, day_end, db)
+
+    data = []
+    for p in payments:
+        if p.notes and p.notes.startswith("Pagamento parcial da comanda"):
+            continue
+        consignment = p.consignment_order
+        method = p.payment_method or "nao_informado"
+        data.append({
+            "payment_id": p.id,
+            "consignment_id": p.consignment_order_id,
+            "customer_name": (
+                consignment.customer.name
+                if consignment and consignment.customer
+                else None
+            ),
+            "waiter_name": (
+                consignment.waiter.name
+                if consignment and consignment.waiter
+                else None
+            ),
+            "amount": round(float(p.amount), 2),
+            "payment_method": method,
+            "payment_method_label": PAYMENT_LABELS.get(method, method),
+            "card_machine": p.card_machine,
+            "created_at": p.created_at.isoformat() if p.created_at else None,
+            "consignment_total": round(float(consignment.total), 2) if consignment else 0.0,
+            "consignment_balance": round(float(consignment.balance), 2) if consignment else 0.0,
+        })
+
+    return {"pagamentos": data}
+
+
 @router.get("/dashboard")
 async def dashboard(
     period: str = Query("daily"),

@@ -3058,46 +3058,80 @@ async function loadSales() {
     const dateFilter = document.getElementById('sale-date-filter')?.value || '';
     try {
         const params = dateFilter ? '?date_filter=' + dateFilter : '';
-        const res = await apiFetch(API_BASE + '/financeiro/vendas' + params);
-        const data = await res.json();
-        if (data.error) { container.innerHTML = '<div class="error-msg">' + data.error + '</div>'; return; }
-        const hasConsignmentPaid = (data.summary && data.summary.consignment_paid > 0);
-        if (data.sales.length === 0 && !hasConsignmentPaid) { container.innerHTML = '<p class="empty-msg">Nenhuma venda no período</p>'; return; }
-        const consignmentLine = hasConsignmentPaid
-            ? `<div style="margin-top:4px;font-size:12px;color:var(--green);">Pagamentos de consignados: ${formatCurrency(data.summary.consignment_paid)}</div>`
-            : '';
+        const [salesRes, consigRes] = await Promise.all([
+            apiFetch(API_BASE + '/financeiro/vendas' + params),
+            apiFetch(API_BASE + '/financeiro/vendas/consignados-pagos' + params),
+        ]);
+        const salesData = await salesRes.json();
+        const consigData = await consigRes.json();
+        if (salesData.error) { container.innerHTML = '<div class="error-msg">' + salesData.error + '</div>'; return; }
+
+        const sales = (salesData.sales || []).map(s => ({ _type: 'order', ...s }));
+        const consigs = (consigData.pagamentos || []).map(p => ({ _type: 'consig', ...p }));
+        const all = sales.concat(consigs).sort((a, b) => {
+            const da = a.closed_at || a.created_at || '';
+            const db = b.closed_at || b.created_at || '';
+            return da < db ? 1 : da > db ? -1 : 0;
+        });
+
+        if (all.length === 0) { container.innerHTML = '<p class="empty-msg">Nenhum registro no período</p>'; return; }
+
+        window._lastSalesData = sales;
+        window._lastSalesMode = 'vendas';
+
+        const methodLabels = { dinheiro: 'Dinheiro', pix: 'Pix', cartao_debito: 'Cartão Débito', cartao_credito: 'Cartão Crédito', nao_informado: 'Não Informado' };
+        const totalConsignado = consigs.reduce((s, c) => s + c.amount, 0);
+
         container.innerHTML = `
             <div style="background:var(--color-secondary);border-radius:var(--radius);padding:12px;margin-bottom:12px;text-align:center;">
                 <span style="font-size:13px;color:#888;">Total do dia: </span>
-                <span style="font-size:18px;font-weight:700;color:var(--color-accent);">${formatCurrency(data.summary.total_sales)}</span>
-                <span style="font-size:12px;color:#888;margin-left:8px;">(${data.summary.orders_count} comandas)</span>
-                ${consignmentLine}
+                <span style="font-size:18px;font-weight:700;color:var(--color-accent);">${formatCurrency(salesData.summary?.total_sales || 0)}</span>
+                <span style="font-size:12px;color:#888;margin-left:8px;">(${salesData.summary?.orders_count || 0} comandas)</span>
+                ${totalConsignado > 0 ? `<div style="margin-top:4px;font-size:12px;color:var(--green);">Pagamentos de consignados: ${formatCurrency(totalConsignado)}</div>` : ''}
             </div>
-            ${data.sales.map((s, idx) => {
-                const orderTotal = round(s.total + s.service_charge_amount, 2);
-                const remainingPaidAtClose = round(s.final_total, 2);
-                const paidInPartials = round(s.partial_payment + s.partial_service_charge, 2);
-                return `
-                <div class="sale-card" onclick="openSaleDetailModal(${idx})" style="cursor:pointer;">
-                    <div class="sale-header">
-                        <span class="sale-table">${s.is_balcao ? 'Balcão' : (s.table_label || 'Mesa ' + s.table_number)}</span>
-                        <span class="sale-time">${s.closed_at ? _fmtDateTime(s.closed_at) : ''}</span>
+            ${all.map(item => {
+                if (item._type === 'order') {
+                    const s = item;
+                    const orderTotal = round(s.total + s.service_charge_amount, 2);
+                    const remainingPaidAtClose = round(s.final_total, 2);
+                    const paidInPartials = round(s.partial_payment + s.partial_service_charge, 2);
+                    return `
+                    <div class="sale-card" onclick="openSaleDetailModal(${sales.indexOf(s)})" style="cursor:pointer;">
+                        <div class="sale-header">
+                            <span class="sale-table">${s.is_balcao ? 'Balcão' : (s.table_label || 'Mesa ' + s.table_number)}</span>
+                            <span class="sale-time">${s.closed_at ? _fmtDateTime(s.closed_at) : ''}</span>
+                        </div>
+                        <div class="sale-details">
+                            <div class="sale-detail"><span>Garçom: ${s.waiter_name || 'N/A'}</span><span>${s.items_count} itens</span></div>
+                            ${s.customer_name ? `<div class="sale-detail"><span>Cliente: ${s.customer_name}</span></div>` : ''}
+                            <div class="sale-detail"><span>Forma fechamento: ${s.payment_method_label || s.payment_method}</span>${s.card_machine ? `<span style="font-size:11px;">${s.card_machine}</span>` : ''}</span></div>
+                            ${paidInPartials > 0 ? `<div class="sale-detail" style="color:var(--accent);"><span>Pago em parciais</span><span>${formatCurrency(paidInPartials)}</span></div>` : ''}
+                            ${remainingPaidAtClose > 0 ? `<div class="sale-detail" style="color:var(--green);"><span>Pago no fechamento</span><span>${formatCurrency(remainingPaidAtClose)}</span></div>` : ''}
+                            ${s.service_charge_amount > 0 ? `<div class="sale-detail"><span>+ ${s.service_charge_pct}% serviço</span><span>${formatCurrency(s.service_charge_amount)}</span></div>` : ''}
+                        </div>
+                        <div class="sale-total">${formatCurrency(orderTotal)}</div>
                     </div>
-                    <div class="sale-details">
-                        <div class="sale-detail"><span>Garçom: ${s.waiter_name || 'N/A'}</span><span>${s.items_count} itens</span></div>
-                        ${s.customer_name ? `<div class="sale-detail"><span>Cliente: ${s.customer_name}</span></div>` : ''}
-                        <div class="sale-detail"><span>Forma fechamento: ${s.payment_method_label || s.payment_method}</span>${s.card_machine ? `<span style="font-size:11px;">${s.card_machine}</span>` : ''}</span></div>
-                        ${paidInPartials > 0 ? `<div class="sale-detail" style="color:var(--accent);"><span>Pago em parciais</span><span>${formatCurrency(paidInPartials)}</span></div>` : ''}
-                        ${remainingPaidAtClose > 0 ? `<div class="sale-detail" style="color:var(--green);"><span>Pago no fechamento</span><span>${formatCurrency(remainingPaidAtClose)}</span></div>` : ''}
-                        ${s.service_charge_amount > 0 ? `<div class="sale-detail"><span>+ ${s.service_charge_pct}% serviço</span><span>${formatCurrency(s.service_charge_amount)}</span></div>` : ''}
+                    `;
+                } else {
+                    const c = item;
+                    const payLabel = c.payment_method_label || c.payment_method || '';
+                    return `
+                    <div class="sale-card">
+                        <div class="sale-header">
+                            <span class="sale-table">Consignado</span>
+                            <span class="sale-time">${c.created_at ? _fmtDateTime(c.created_at) : ''}</span>
+                        </div>
+                        <div class="sale-details">
+                            ${c.customer_name ? `<div class="sale-detail"><span>Cliente: ${c.customer_name}</span></div>` : ''}
+                            <div class="sale-detail"><span>Garçom: ${c.waiter_name || 'N/A'}</span></div>
+                            <div class="sale-detail"><span>Forma: ${payLabel}</span></div>
+                        </div>
+                        <div class="sale-total">${formatCurrency(c.amount)}</div>
                     </div>
-                    <div class="sale-total">${formatCurrency(orderTotal)}</div>
-                </div>
-                `;
+                    `;
+                }
             }).join('')}
         `;
-        window._lastSalesData = data.sales;
-        window._lastSalesMode = 'vendas';
     } catch (err) { container.innerHTML = '<div class="error-msg">Erro ao carregar vendas</div>'; }
 }
 

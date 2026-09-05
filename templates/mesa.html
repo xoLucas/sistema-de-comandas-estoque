@@ -99,7 +99,11 @@
             <div class="summary-row"><span>Total da conta</span><span id="partial-total-account">R$ 0,00</span></div>
             <div class="summary-row"><span>Já pago</span><span id="partial-already-paid">R$ 0,00</span></div>
             <div class="summary-row" style="font-weight:700;border-top:1px solid var(--border);padding-top:6px;margin-top:6px;"><span>Restante</span><span id="partial-remaining">R$ 0,00</span></div>
+        </div>
+        <div class="payment-summary" style="margin-bottom:14px;">
+            <div class="summary-row"><span>Valor a abater</span><span id="partial-abater-display">R$ 0,00</span></div>
             <div class="summary-row" id="partial-service-row" style="display:none;color:var(--accent);"><span>Taxa de serviço / Gorjeta</span><span id="partial-service-display">R$ 0,00</span></div>
+            <div class="summary-row" style="font-weight:700;border-top:1px solid var(--border);padding-top:6px;margin-top:6px;"><span>Total a pagar</span><span id="partial-total-pagar-display">R$ 0,00</span></div>
         </div>
 
         <div class="tabs" style="margin-bottom:14px;">
@@ -118,7 +122,7 @@
             <p style="font-size:13px;color:var(--text-muted);margin-bottom:10px;">Selecione a quantidade de cada item pago:</p>
             <div id="partial-payment-items" class="partial-payment-list text-break-word"></div>
             <div class="payment-summary" style="padding:10px 12px;margin-top:10px;">
-                <div class="summary-row"><span>Selecionado</span><span id="partial-selected-total">R$ 0,00</span></div>
+                <div class="summary-row"><span>Subtotal selecionado</span><span id="partial-selected-total">R$ 0,00</span></div>
             </div>
         </div>
 
@@ -246,6 +250,16 @@
             <p style="font-size:12px;color:var(--text-muted);margin-top:4px;" id="fiado-create-customer-wrapper">
                 <button type="button" class="btn-link create-customer-inline-btn" onclick="openCreateCustomerForFiado()" style="font-size:12px;color:var(--text-muted);padding:0;background:none;border:none;cursor:pointer;text-decoration:underline;">Cadastrar novo cliente</button>
             </p>
+        </div>
+        <div id="fiado-service-section" style="margin-bottom:12px;">
+            <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+                <input type="checkbox" id="fiado-apply-service-charge" onchange="toggleFiadoServiceSection()" style="width:18px;height:18px;accent-color:var(--accent);">
+                Aplicar taxa de serviço (<span id="fiado-service-pct-label">10</span>%)
+            </label>
+            <div id="fiado-service-custom-wrap" style="display:none;margin-top:8px;">
+                <label class="input-label">Gorjeta fixa (R$) — opcional</label>
+                <input type="number" id="fiado-service-custom" class="input-field" step="0.01" min="0" placeholder="0,00">
+            </div>
         </div>
         <p id="fiado-error" class="error-msg" style="display:none;"></p>
         <div style="display:flex;gap:8px;margin-top:12px;">

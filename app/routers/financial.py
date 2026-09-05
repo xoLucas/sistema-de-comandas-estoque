@@ -213,6 +213,10 @@ async def compute_session_close_metrics(session, db: AsyncSession) -> dict:
             amount, payment.payment_method or "nao_informado", payment.card_machine, db, card_fee_rates
         )
 
+    # Repasse ao garçom só quando o consignado é 100% pago no período.
+    tips = await _consignment_tips_paid_in_period(start, end, db)
+    service_charge += sum(tips.values())
+
     return {
         "gross_total": round(gross_total, 2),
         "card_fees": round(card_fees, 2),
@@ -275,25 +279,18 @@ async def compute_period_profit(start: datetime, end: datetime, db: AsyncSession
             ConsignmentPayment.created_at >= start,
             ConsignmentPayment.created_at <= end,
         )
-        .options(
-            selectinload(ConsignmentPayment.consignment_order)
-            .selectinload(ConsignmentOrder.items)
-            .selectinload(ConsignmentOrderItem.product),
-        )
     )
     for payment in consignment_result.scalars().all():
         amount = float(payment.amount)
-        total_sales += amount
-        consignment = payment.consignment_order
-        if consignment and consignment.total > 0:
-            consignment_cogs = sum(
-                (item.product.cost if item.product else 0.0) * item.quantity
-                for item in consignment.items
-            )
-            total_cogs += round(consignment_cogs * (amount / consignment.total), 2)
+        service_portion = float(payment.service_portion or 0)
+        product_amount = round(max(0.0, amount - service_portion), 2)
+        total_sales += product_amount
         total_card_fees += await _card_fee_for_order_payment(
             amount, payment.payment_method or "nao_informado", payment.card_machine, db, card_fee_rates
         )
+
+    # COGS integral das consignadas CRIADAS no período (custo congelado na venda).
+    total_cogs += await _consignment_cogs_in_period(start, end, db)
 
     expenses_result = await db.execute(
         select(Expense).where(Expense.expense_date >= start, Expense.expense_date <= end)
@@ -352,6 +349,64 @@ async def _get_perdas(
     return items, round(total, 2)
 
 
+async def _consignment_cogs_in_period(
+    start: datetime,
+    end: datetime,
+    db: AsyncSession,
+) -> float:
+    """Full COGS (frozen unit_cost) of consignments CREATED in the period.
+
+    Cost is recognized when the credit sale happens (venda vira consignado),
+    NOT when payments arrive. Canceled consignments (stock returned) are excluded.
+    """
+    result = await db.execute(
+        select(ConsignmentOrderItem)
+        .join(ConsignmentOrder, ConsignmentOrder.id == ConsignmentOrderItem.consignment_order_id)
+        .where(
+            ConsignmentOrder.created_at >= start,
+            ConsignmentOrder.created_at <= end,
+            ConsignmentOrder.status != "cancelado",
+        )
+        .options(selectinload(ConsignmentOrderItem.product))
+    )
+    items = result.scalars().all()
+    total = 0.0
+    for item in items:
+        unit_cost = item.unit_cost if item.unit_cost is not None else (item.product.cost if item.product else 0.0)
+        total += float(unit_cost) * item.quantity
+    return round(total, 2)
+
+
+async def _consignment_tips_paid_in_period(
+    start: datetime,
+    end: datetime,
+    db: AsyncSession,
+) -> dict[str, float]:
+    """Service tips (service_portion) credited only when consignments become
+    fully paid ('pago') in the period, grouped by waiter name."""
+    result = await db.execute(
+        select(ConsignmentOrder)
+        .where(
+            ConsignmentOrder.status == "pago",
+            ConsignmentOrder.closed_at >= start,
+            ConsignmentOrder.closed_at <= end,
+        )
+        .options(
+            selectinload(ConsignmentOrder.payments),
+            selectinload(ConsignmentOrder.waiter),
+        )
+    )
+    consignments = result.scalars().all()
+    tips: dict[str, float] = {}
+    for consignment in consignments:
+        total = sum(float(p.service_portion or 0) for p in consignment.payments)
+        if total <= 0:
+            continue
+        waiter_name = consignment.waiter.name if consignment.waiter else "N/A"
+        tips[waiter_name] = round(tips.get(waiter_name, 0.0) + total, 2)
+    return tips
+
+
 async def _add_consignment_payments_to_report(
     start: datetime,
     end: datetime,
@@ -361,11 +416,18 @@ async def _add_consignment_payments_to_report(
     card_fee_rates: dict,
     hour_totals: dict | None = None,
     item_totals: dict | None = None,
+    waiter_totals: dict | None = None,
 ) -> int:
-    """Add consignment payments received in the period as revenue.
+    """Add consignment payments received in the period as revenue (faturamento).
 
     Only paid installments count as revenue. The payment method is grouped
     together with regular sales (e.g. Dinheiro, Pix, Cartão).
+
+    Each payment splits: the product portion (amount - service_portion) is
+    revenue/sales. COGS is NOT recognized here — it is recognized when the
+    consignment is CREATED (see _consignment_cogs_in_period), and the
+    service_portion (repasse) is credited only when the consignment is fully
+    paid (see _consignment_tips_paid_in_period).
     """
     result = await db.execute(
         select(ConsignmentPayment)
@@ -387,21 +449,14 @@ async def _add_consignment_payments_to_report(
     for payment in payments:
         consignment = payment.consignment_order
         amount = float(payment.amount)
+        service_portion = float(payment.service_portion or 0)
+        product_amount = round(max(0.0, amount - service_portion), 2)
         method = payment.payment_method or "nao_informado"
         card_machine = payment.card_machine
 
         fee = await _card_fee_for_order_payment(amount, method, card_machine, db, card_fee_rates)
 
-        allocated_cogs = 0.0
-        if consignment and consignment.total > 0:
-            total_cogs = sum(
-                (item.product.cost if item.product else 0.0) * item.quantity
-                for item in consignment.items
-            )
-            allocated_cogs = round(total_cogs * (amount / consignment.total), 2)
-
-        report["summary"]["total_sales"] += amount
-        report["summary"]["total_cogs"] += allocated_cogs
+        report["summary"]["total_sales"] += product_amount
         report["summary"]["gross_total"] += amount
         report["summary"]["total_card_fees"] += fee
 
@@ -725,8 +780,15 @@ async def _build_daily_report(
         )
 
     await _add_consignment_payments_to_report(
-        day_start, day_end, db, report, method_totals, card_fee_rates, hour_totals, item_totals
+        day_start, day_end, db, report, method_totals, card_fee_rates, hour_totals, item_totals, waiter_totals
     )
+    # COGS integral das consignadas CRIADAS no dia (custo congelado na venda).
+    report["summary"]["total_cogs"] += await _consignment_cogs_in_period(day_start, day_end, db)
+    # Repasse ao garçom só quando o consignado é 100% pago no período.
+    tips = await _consignment_tips_paid_in_period(day_start, day_end, db)
+    report["summary"]["total_service_charge"] += sum(tips.values())
+    for waiter_name, tip_amount in tips.items():
+        waiter_totals[waiter_name]["service_charge"] += tip_amount
     await _add_consignment_summary(day_start, day_end, db, report)
 
     report["summary"]["total_sales"] = round(report["summary"]["total_sales"], 2)
@@ -1008,8 +1070,15 @@ async def _build_session_report(
         )
 
     await _add_consignment_payments_to_report(
-        start, end, db, report, method_totals, card_fee_rates, hour_totals, item_totals
+        start, end, db, report, method_totals, card_fee_rates, hour_totals, item_totals, waiter_totals
     )
+    # COGS integral das consignadas CRIADAS no período (custo congelado na venda).
+    report["summary"]["total_cogs"] += await _consignment_cogs_in_period(start, end, db)
+    # Repasse ao garçom só quando o consignado é 100% pago no período.
+    tips = await _consignment_tips_paid_in_period(start, end, db)
+    report["summary"]["total_service_charge"] += sum(tips.values())
+    for waiter_name, tip_amount in tips.items():
+        waiter_totals[waiter_name]["service_charge"] += tip_amount
     await _add_consignment_summary(start, end, db, report)
 
     report["summary"]["total_sales"] = round(report["summary"]["total_sales"], 2)
@@ -1204,7 +1273,10 @@ async def list_sales(
     consignment_paid_total = 0.0
     if day_start is not None and day_end is not None:
         consignment_payments = await fetch_consignment_payments(day_start, day_end, db)
-        consignment_paid_total = sum(float(p.amount) for p in consignment_payments)
+        consignment_paid_total = sum(
+            round(max(0.0, float(p.amount) - float(p.service_portion or 0)), 2)
+            for p in consignment_payments
+        )
 
     return {
         "sales": data,
@@ -1546,13 +1618,16 @@ async def dashboard(
         sales_total, service_charge, sales_count = sales_result.one()
 
         payments_result = await db.execute(
-            select(func.coalesce(func.sum(ConsignmentPayment.amount), 0))
-            .where(
+            select(
+                func.coalesce(func.sum(ConsignmentPayment.amount - ConsignmentPayment.service_portion), 0),
+                func.coalesce(func.sum(ConsignmentPayment.service_portion), 0),
+            ).where(
                 ConsignmentPayment.created_at >= start,
                 ConsignmentPayment.created_at <= end,
             )
         )
-        payments_total = payments_result.scalar()
+        payments_product, payments_service = payments_result.one()
+        payments_total = float(payments_product)
 
         pending_result = await db.execute(
             select(
@@ -1568,8 +1643,8 @@ async def dashboard(
         pending_count, pending_total = pending_result.one()
 
         return {
-            "total": round(float(sales_total) + float(payments_total), 2),
-            "service_charge": round(float(service_charge), 2),
+            "total": round(float(sales_total) + payments_total, 2),
+            "service_charge": round(float(service_charge) + float(payments_service), 2),
             "orders": sales_count,
             "consignments": pending_count,
             "consignments_total": round(float(pending_total), 2),

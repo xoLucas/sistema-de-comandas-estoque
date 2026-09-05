@@ -1590,7 +1590,7 @@ function showPartialPaymentModal() {
     if (!order) return;
 
     document.getElementById('partial-total-account').textContent = formatCurrency(order.total || 0);
-    document.getElementById('partial-already-paid').textContent = formatCurrency((order.partial_payment || 0) + (order.partial_service_charge || 0));
+    document.getElementById('partial-already-paid').textContent = formatCurrency(order.partial_payment || 0);
 
     document.getElementById('partial-deduct-amount').value = '';
     document.getElementById('partial-tendered-amount').value = '';
@@ -1614,30 +1614,40 @@ function updatePartialPaymentSummary() {
 
     const customInput = document.getElementById('partial-service-custom');
     const customValue = applyService ? parseFloat(customInput?.value || 0) || 0 : 0;
+    const serviceChargePct = getSettingFloat('service_charge_pct', 10);
+
+    // Abater = valor de PRODUTO pago neste pagamento parcial
+    let abater = 0;
+    if (partialPaymentMode === 'value') {
+        abater = parseFloat(document.getElementById('partial-deduct-amount')?.value || 0) || 0;
+    } else {
+        const { subtotal } = getItemsPaymentSubtotal();
+        abater = subtotal;
+        document.getElementById('partial-selected-total').textContent = formatCurrency(subtotal);
+    }
+
+    const service = applyService ? (customValue > 0 ? customValue : abater * (serviceChargePct / 100)) : 0;
+    const totalAPagar = abater + service;
+
+    const abaterDisplay = document.getElementById('partial-abater-display');
+    if (abaterDisplay) abaterDisplay.textContent = formatCurrency(abater);
+
     const serviceRow = document.getElementById('partial-service-row');
     const serviceDisplay = document.getElementById('partial-service-display');
     if (applyService && serviceRow && serviceDisplay) {
-        const serviceChargePct = getSettingFloat('service_charge_pct', 10);
-        const remaining = getRemainingAmount(false);
-        const shownService = customValue > 0 ? customValue : remaining.product * (serviceChargePct / 100);
         serviceRow.style.display = '';
-        serviceDisplay.textContent = formatCurrency(shownService);
+        serviceDisplay.textContent = formatCurrency(service);
     } else if (serviceRow) {
         serviceRow.style.display = 'none';
     }
 
-    const remaining = getRemainingAmount(applyService, customValue);
-    document.getElementById('partial-remaining').textContent = formatCurrency(remaining.total);
+    const totalPagarDisplay = document.getElementById('partial-total-pagar-display');
+    if (totalPagarDisplay) totalPagarDisplay.textContent = formatCurrency(totalAPagar);
 
-    let amount = 0;
-    if (partialPaymentMode === 'value') {
-        amount = parseFloat(document.getElementById('partial-deduct-amount')?.value || 0);
-    } else {
-        const { subtotal } = getItemsPaymentSubtotal();
-        const serviceChargePct = getSettingFloat('service_charge_pct', 10);
-        amount = applyService ? (customValue > 0 ? subtotal + customValue : subtotal * (1 + serviceChargePct / 100)) : subtotal;
-        document.getElementById('partial-selected-total').textContent = formatCurrency(amount);
-    }
+    // Restante da conta usa só o PRODUTO: a taxa de serviço do parcial é uma
+    // gorjeta sobre o pagamento atual e não aumenta a conta dos demais membros.
+    const remainingBase = getRemainingAmount(false);
+    document.getElementById('partial-remaining').textContent = formatCurrency(remainingBase.product);
 
     const method = document.getElementById('partial-payment-method')?.value || 'dinheiro';
     const cashSection = document.getElementById('partial-cash-section');
@@ -1649,7 +1659,7 @@ function updatePartialPaymentSummary() {
     const tendered = parseFloat(tenderedInput?.value || 0);
 
     if (method === 'dinheiro' && tenderedInput) {
-        const change = Math.max(0, tendered - amount);
+        const change = Math.max(0, tendered - totalAPagar);
         document.getElementById('partial-change').textContent = formatCurrency(change);
     }
 }
@@ -1667,49 +1677,56 @@ async function submitPartialPayment() {
     const cardMachine = isCardMethod(method) ? (document.getElementById('partial-card-machine')?.value || '1') : null;
     const errorEl = document.getElementById('partial-payment-error');
 
-    let amount = 0;
+    let abater = 0;
     let itemsToPay = [];
 
     if (partialPaymentMode === 'value') {
-        amount = parseFloat(document.getElementById('partial-deduct-amount')?.value || 0);
-        if (amount <= 0) {
+        abater = parseFloat(document.getElementById('partial-deduct-amount')?.value || 0);
+        if (abater <= 0) {
             errorEl.textContent = 'Informe o valor a abater';
             errorEl.style.display = 'block';
             return;
         }
-        if (customService > 0 && amount <= customService) {
+        if (customService > 0 && abater <= customService) {
             errorEl.textContent = 'A gorjeta personalizada não pode ser maior ou igual ao valor a abater';
             errorEl.style.display = 'block';
             return;
         }
     } else {
         const itemsResult = getItemsPaymentSubtotal();
-        amount = itemsResult.subtotal;
+        abater = itemsResult.subtotal;
         itemsToPay = itemsResult.itemsToPay;
-        if (amount <= 0) {
+        if (abater <= 0) {
             errorEl.textContent = 'Selecione ao menos um item';
             errorEl.style.display = 'block';
             return;
         }
-        if (applyService) {
-            const serviceChargePct = getSettingFloat('service_charge_pct', 10);
-            amount = customService > 0 ? amount + customService : amount * (1 + serviceChargePct / 100);
-        }
     }
+
+    const serviceChargePct = getSettingFloat('service_charge_pct', 10);
+    const service = applyService ? (customService > 0 ? customService : abater * (serviceChargePct / 100)) : 0;
+    const totalAPagar = abater + service;
 
     const tendered = parseFloat(tenderedInput?.value || 0);
-    const remaining = getRemainingAmount(applyService, customService || null);
+    const remainingBase = getRemainingAmount(false);
 
-    if (amount > remaining.total + 0.01) {
-        errorEl.textContent = 'O valor não pode ser maior que o restante da conta';
+    if (abater > remainingBase.product + 0.01) {
+        errorEl.textContent = 'O valor a abater não pode ser maior que o restante da conta (sem a taxa)';
         errorEl.style.display = 'block';
         return;
     }
 
-    if (method === 'dinheiro' && tendered > 0 && tendered < amount) {
-        errorEl.textContent = 'O valor pago em dinheiro não pode ser menor que o valor a abater';
-        errorEl.style.display = 'block';
-        return;
+    if (method === 'dinheiro') {
+        if (tendered <= 0) {
+            errorEl.textContent = 'Informe o valor pago em dinheiro';
+            errorEl.style.display = 'block';
+            return;
+        }
+        if (tendered < totalAPagar) {
+            errorEl.textContent = 'O valor pago em dinheiro não pode ser menor que o Total a pagar';
+            errorEl.style.display = 'block';
+            return;
+        }
     }
 
     try {
@@ -1718,7 +1735,7 @@ async function submitPartialPayment() {
             body: JSON.stringify({
                 table_id: TABLE_ID,
                 order_id: currentOrderId,
-                amount: round(amount, 2),
+                amount: round(totalAPagar, 2),
                 payment_method: method,
                 card_machine: cardMachine,
                 apply_service_charge: applyService,
@@ -2020,6 +2037,13 @@ function openFiadoFromCloseModal() {
     const currentCustomerId = currentTableData?.customer_id || order.customer_id || null;
     const currentCustomerName = currentTableData?.customer_name || order.customer_name || '';
     showFiadoModal(order.id, currentCustomerId, currentCustomerName);
+    const closeApply = document.getElementById('apply-service-charge');
+    const applyEl = document.getElementById('fiado-apply-service-charge');
+    if (applyEl && closeApply) applyEl.checked = closeApply.checked;
+    const closeCustom = document.getElementById('close-service-custom');
+    const customEl = document.getElementById('fiado-service-custom');
+    if (customEl && closeCustom && closeCustom.value) customEl.value = closeCustom.value;
+    toggleFiadoServiceSection();
 }
 
 let printReceiptDraft = null;
@@ -5657,12 +5681,18 @@ async function openConsignmentDetail(consignmentId) {
 
         const paymentsEl = document.getElementById('consignment-detail-payments');
         if (data.payments && data.payments.length > 0) {
+            const paymentsSum = (data.payments || []).reduce((s, p) => s + (Number(p.amount) || 0), 0);
+            const tipDiff = round(paymentsSum - (Number(data.amount_paid) || 0), 2);
+            const noteHtml = tipDiff > 0.005 ? `
+                <div style="margin-top:8px;padding:8px 10px;border-radius:8px;background:var(--bg);border:1px solid var(--border);font-size:12px;color:var(--text-muted);">
+                    ${formatCurrency(tipDiff)} dos pagamentos referem-se a gorjeta.
+                </div>` : '';
             paymentsEl.innerHTML = data.payments.map(p => `
                 <div class="detail-payment">
                     <span>${PAYMENT_METHOD_LABELS[p.payment_method] || p.payment_method} ${p.card_machine ? '(Máq. ' + p.card_machine + ')' : ''}</span>
                     <span><strong>${formatCurrency(p.amount)}</strong> em ${p.created_at ? new Date(p.created_at).toLocaleDateString('pt-BR') : '-'}</span>
                 </div>
-            `).join('');
+            `).join('') + noteHtml;
         } else {
             paymentsEl.innerHTML = '<p class="empty-msg">Nenhum pagamento registrado</p>';
         }
@@ -6242,7 +6272,20 @@ function showFiadoModal(orderId, currentCustomerId, currentCustomerName) {
     document.getElementById('fiado-customer-id').value = currentCustomerId || '';
     document.getElementById('fiado-customer-name').value = currentCustomerName || '';
     document.getElementById('fiado-error').style.display = 'none';
+    const applyEl = document.getElementById('fiado-apply-service-charge');
+    if (applyEl) applyEl.checked = false;
+    const customEl = document.getElementById('fiado-service-custom');
+    if (customEl) customEl.value = '';
+    toggleFiadoServiceSection();
     document.getElementById('fiado-modal').style.display = 'flex';
+}
+
+function toggleFiadoServiceSection() {
+    const applyEl = document.getElementById('fiado-apply-service-charge');
+    const wrap = document.getElementById('fiado-service-custom-wrap');
+    const pctLabel = document.getElementById('fiado-service-pct-label');
+    if (pctLabel) pctLabel.textContent = getSettingFloat('service_charge_pct', 10);
+    if (wrap) wrap.style.display = (applyEl && applyEl.checked) ? 'block' : 'none';
 }
 
 function closeFiadoModal() {
@@ -6335,10 +6378,19 @@ async function submitFiado() {
         return;
     }
 
+    const applyServiceEl = document.getElementById('fiado-apply-service-charge');
+    const applyServiceCharge = applyServiceEl ? applyServiceEl.checked : false;
+    const customEl = document.getElementById('fiado-service-custom');
+    const serviceCustom = applyServiceCharge && customEl && customEl.value ? parseFloat(customEl.value) : null;
+
     try {
         const res = await apiFetch(API_BASE + '/comanda/' + fiadoOrderId + '/converter-fiado', {
             method: 'POST',
-            body: JSON.stringify({ customer_id: customerId }),
+            body: JSON.stringify({
+                customer_id: customerId,
+                apply_service_charge: applyServiceCharge,
+                service_charge_custom: serviceCustom,
+            }),
         });
         const data = await res.json();
         if (data.error) {

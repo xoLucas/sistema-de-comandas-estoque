@@ -1,4 +1,8 @@
+from datetime import datetime
+
 from sqlalchemy import select, text
+from sqlalchemy.orm import selectinload
+
 from app.core.database import async_session, engine, Base
 from app.core.security import hash_password
 
@@ -338,6 +342,12 @@ async def _ensure_columns() -> None:
             text("ALTER TABLE tables ADD COLUMN IF NOT EXISTS name VARCHAR(100) DEFAULT NULL")
         )
         await conn.execute(
+            text("ALTER TABLE consignment_payments ADD COLUMN IF NOT EXISTS service_portion FLOAT NOT NULL DEFAULT 0.0")
+        )
+        await conn.execute(
+            text("ALTER TABLE consignment_order_items ADD COLUMN IF NOT EXISTS unit_cost FLOAT DEFAULT NULL")
+        )
+        await conn.execute(
             text("DROP TABLE IF EXISTS printer_category")
         )
         await conn.execute(
@@ -424,6 +434,118 @@ async def seed_pack_products(session) -> None:
     await session.commit()
 
 
+async def _backfill_consignment_service_portion(session) -> None:
+    """Idempotent backfill: populate ConsignmentPayment.service_portion for
+    conversions made before the field existed, matching each re-registered
+    partial payment to the source order's partial_payments_detail."""
+    result = await session.execute(
+        select(ConsignmentOrder)
+        .where(ConsignmentOrder.source_order_id.is_not(None))
+        .options(
+            selectinload(ConsignmentOrder.payments),
+            selectinload(ConsignmentOrder.source_order),
+        )
+    )
+    consignments = result.scalars().all()
+
+    def _amount(partial: dict) -> float:
+        return round(float(partial.get("amount", 0)), 2)
+
+    def _ts(partial: dict) -> float | None:
+        created = partial.get("created_at")
+        try:
+            return round(datetime.fromisoformat(created).timestamp(), 3) if created else None
+        except (TypeError, ValueError):
+            return None
+
+    updated = 0
+    for consignment in consignments:
+        source = consignment.source_order
+        if not source:
+            continue
+        partials = source.partial_payments_detail or []
+        used_partial_idx = set()
+        for payment in consignment.payments:
+            if payment.service_portion:
+                # Encontra e marca o parcial já consumido (por valor+timestamp).
+                for idx, partial in enumerate(partials):
+                    if idx in used_partial_idx:
+                        continue
+                    if _amount(partial) == round(float(payment.amount), 2) and _ts(partial) is not None and payment.created_at is not None and round(payment.created_at.timestamp(), 3) == _ts(partial):
+                        used_partial_idx.add(idx)
+                        break
+        for payment in consignment.payments:
+            if payment.service_portion or payment.created_at is None:
+                continue
+            amount = round(float(payment.amount), 2)
+            ts = round(payment.created_at.timestamp(), 3)
+            pick_idx = None
+            for idx, partial in enumerate(partials):
+                if idx in used_partial_idx:
+                    continue
+                if _amount(partial) != amount:
+                    continue
+                if _ts(partial) == ts:
+                    pick_idx = idx
+                    break
+            if pick_idx is None:
+                candidates = [
+                    idx for idx, partial in enumerate(partials)
+                    if idx not in used_partial_idx and _amount(partial) == amount
+                ]
+                if len(candidates) == 1:
+                    pick_idx = candidates[0]
+            if pick_idx is not None:
+                used_partial_idx.add(pick_idx)
+                payment.service_portion = round(float(partials[pick_idx].get("service_portion", 0)), 2)
+                updated += 1
+
+    if updated:
+        await session.commit()
+
+
+async def _backfill_consignment_unit_cost(session) -> None:
+    """Idempotent backfill: freeze unit_cost on consignment items.
+
+    Uses the source order item's frozen unit_cost (converted consignments) or
+    the current product cost as a fallback for legacy/direct items.
+    """
+    items_result = await session.execute(
+        select(ConsignmentOrderItem)
+        .where(ConsignmentOrderItem.unit_cost.is_(None))
+        .options(
+            selectinload(ConsignmentOrderItem.consignment_order),
+            selectinload(ConsignmentOrderItem.product),
+        )
+    )
+    items = items_result.scalars().all()
+    if not items:
+        return
+
+    by_consignment: dict[int, list] = {}
+    for item in items:
+        by_consignment.setdefault(item.consignment_order_id, []).append(item)
+
+    updated = 0
+    for _, citems in by_consignment.items():
+        consignment = citems[0].consignment_order
+        source_map: dict[int, float | None] = {}
+        if consignment and consignment.source_order_id:
+            src_result = await session.execute(
+                select(OrderItem).where(OrderItem.order_id == consignment.source_order_id)
+            )
+            source_map = {oi.product_id: oi.unit_cost for oi in src_result.scalars().all()}
+        for item in citems:
+            frozen = source_map.get(item.product_id)
+            if frozen is None:
+                frozen = float(item.product.cost) if item.product else 0.0
+            item.unit_cost = round(float(frozen), 2)
+            updated += 1
+
+    if updated:
+        await session.commit()
+
+
 async def run_seed() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -432,6 +554,10 @@ async def run_seed() -> None:
 
     async with async_session() as session:
         await ensure_settings(session)
+
+        # Backfills idempotentes para dados de conversões anteriores.
+        await _backfill_consignment_service_portion(session)
+        await _backfill_consignment_unit_cost(session)
 
         existing = await session.execute(select(User).limit(1))
         if existing.scalar_one_or_none() is not None:

@@ -79,6 +79,8 @@ class ConsignmentPaymentRequest(BaseModel):
 
 class ConvertToFiadoRequest(BaseModel):
     customer_id: int | None = None
+    apply_service_charge: bool = False
+    service_charge_custom: float | None = None
 
 
 async def _consume_stock_for_items(
@@ -130,6 +132,7 @@ async def _consume_stock_for_items(
             product_id=product.id,
             quantity=entry.quantity,
             unit_price=unit_price,
+            unit_cost=float(product.cost) if product.cost is not None else 0.0,
         ))
     return created_items, stock_notifications, products_to_broadcast
 
@@ -476,6 +479,7 @@ async def add_payment(
         consignment_order_id=consignment.id,
         user_id=user.id,
         amount=req.amount,
+        service_portion=0.0,
         payment_method=req.payment_method,
         card_machine=req.card_machine,
         notes=req.notes,
@@ -588,11 +592,23 @@ async def convert_order_to_consignment(
         return {"error": "Comanda não possui itens confirmados"}
 
     remaining_product = max(0.0, float(order.total) - float(order.partial_payment))
-    service_pct = await get_setting_as_float(db, "service_charge_pct", 10.0)
-    remaining_service = round(remaining_product * (service_pct / 100), 2)
+    remaining_service = 0.0
+    if req.apply_service_charge:
+        if req.service_charge_custom is not None and req.service_charge_custom > 0:
+            remaining_service = round(float(req.service_charge_custom), 2)
+        else:
+            service_pct = await get_setting_as_float(db, "service_charge_pct", 10.0)
+            remaining_service = round(remaining_product * (service_pct / 100), 2)
     consignment_total = round(float(order.total) + remaining_service, 2)
-    amount_paid = round(float(order.partial_payment) + float(order.partial_service_charge), 2)
+    # O amount_paid do fiado reflete apenas o que abateu nos PRODUTOS. A gorjeta/
+    # serviço paga no parcial (partial_service_charge) é receita já recebida e fica
+    # registrada nas ConsignmentPayment (faturamento/caixa), mas NÃO abate o saldo.
+    amount_paid = round(float(order.partial_payment), 2)
     balance = round(max(0.0, consignment_total - amount_paid), 2)
+
+    # Garçom a creditar: segue o garçom da comanda (mesma lógica de uma comanda
+    # normal fechada sem override). O repasse da gorjeta vai para ele.
+    credited_waiter_id = order.waiter_id or user.id
 
     consignment = ConsignmentOrder(
         customer_id=customer.id,
@@ -602,7 +618,7 @@ async def convert_order_to_consignment(
         total=consignment_total,
         amount_paid=amount_paid,
         balance=balance,
-        waiter_id=user.id,
+        waiter_id=credited_waiter_id,
         closed_at=datetime.now(timezone.utc) if balance <= 0 else None,
         notes=f"Gerado da comanda da mesa {order.table.label if order.table else order.table_id}",
     )
@@ -616,6 +632,7 @@ async def convert_order_to_consignment(
             product_id=item.product_id,
             quantity=item.quantity,
             unit_price=float(item.unit_price),
+            unit_cost=float(item.unit_cost) if item.unit_cost is not None else (float(item.product.cost) if item.product else 0.0),
         ))
 
     # Registra como pagamentos de consignação os pagamentos parciais já feitos na
@@ -632,6 +649,7 @@ async def convert_order_to_consignment(
             consignment_order_id=consignment.id,
             user_id=user.id,
             amount=round(float(partial.get("amount", 0)), 2),
+            service_portion=round(float(partial.get("service_portion", 0)), 2),
             payment_method=partial.get("method") or "nao_informado",
             card_machine=partial.get("card_machine"),
             notes=f"Pagamento parcial da comanda #{order.id}",

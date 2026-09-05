@@ -52,6 +52,7 @@ class ConsignmentOrderItem(Base):
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     unit_price: Mapped[float] = mapped_column(Float, nullable=False)
+    unit_cost: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -74,6 +75,7 @@ class ConsignmentPayment(Base):
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
     amount: Mapped[float] = mapped_column(Float, nullable=False)
+    service_portion: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     payment_method: Mapped[str | None] = mapped_column(String(30), nullable=True)
     card_machine: Mapped[str | None] = mapped_column(String(30), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)

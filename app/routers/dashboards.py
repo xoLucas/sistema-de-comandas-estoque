@@ -32,7 +32,7 @@ from app.models.expense import Expense
 from app.models.stock_history import StockHistory
 from app.models.cash_position_movement import CashPositionMovement
 from app.routers.auth_deps import get_current_user
-from app.routers.financial import compute_period_profit
+from app.routers.financial import compute_period_profit, _consignment_tips_paid_in_period
 from app.services.cash_service import compute_payment_breakdown
 from app.services.stock_service import stock_status, is_pack, pack_stock_for_product
 from app.services.consignment_service import fetch_consignment_payments
@@ -101,6 +101,14 @@ async def dashboard_geral(
     # Pagamentos de consignação recebidos no período (só contam como faturamento)
     consignment_payments = await fetch_consignment_payments(start_dt, end_dt, db)
     consignment_paid_total = sum(float(p.amount) for p in consignment_payments)
+    # Faturamento usa só a parte de PRODUTO; a gorjeta (service_portion) é repasse ao garçom.
+    consignment_product_total = sum(
+        round(max(0.0, float(p.amount) - float(p.service_portion or 0)), 2) for p in consignment_payments
+    )
+    # Repasse creditado só quando o consignado é 100% pago no período.
+    tips = await _consignment_tips_paid_in_period(start_dt, end_dt, db)
+    consignment_service_total = sum(tips.values())
+    service_charge = float(service_charge) + consignment_service_total
 
     # Comandas abertas agora
     open_orders_result = await db.execute(
@@ -278,7 +286,7 @@ async def dashboard_geral(
             "Indicador", "Valor", "Periodo Inicio", "Periodo Fim"
         ]
         rows = [
-            ["Faturamento", round(float(sales_total) + consignment_paid_total, 2), start_local.isoformat(), end_local.isoformat()],
+            ["Faturamento", round(float(sales_total) + consignment_product_total, 2), start_local.isoformat(), end_local.isoformat()],
             ["Pagamentos de Consignados", round(float(consignment_paid_total), 2), start_local.isoformat(), end_local.isoformat()],
             ["Taxa de Servico", round(float(service_charge), 2), start_local.isoformat(), end_local.isoformat()],
             ["Comandas Finalizadas", sales_count, start_local.isoformat(), end_local.isoformat()],
@@ -296,7 +304,7 @@ async def dashboard_geral(
     return {
         "period": {"start": start_local.isoformat(), "end": end_local.isoformat()},
         "sales": {
-            "total": round(float(sales_total) + consignment_paid_total, 2),
+            "total": round(float(sales_total) + consignment_product_total, 2),
             "service_charge": round(float(service_charge), 2),
             "orders_count": sales_count,
             "consignment_paid": round(float(consignment_paid_total), 2),
@@ -339,6 +347,9 @@ async def dashboard_vendas(
     # Pagamentos de consignação recebidos no período (só pagos contam como faturamento)
     consignment_payments = await fetch_consignment_payments(start_dt, end_dt, db)
     consignment_paid_total = sum(float(p.amount) for p in consignment_payments)
+    consignment_product_total = sum(
+        round(max(0.0, float(p.amount) - float(p.service_portion or 0)), 2) for p in consignment_payments
+    )
 
     # Vendas por dia
     daily_expr = cast(func.timezone("America/Sao_Paulo", Order.closed_at), Date)
@@ -603,7 +614,7 @@ async def dashboard_vendas(
     return {
         "period": {"start": start_local.isoformat(), "end": end_local.isoformat()},
         "summary": {
-            "total_sales": round(float(total_sales) + consignment_paid_total, 2),
+            "total_sales": round(float(total_sales) + consignment_product_total, 2),
             "orders_count": orders_count,
             "ticket_medio": ticket_medio,
             "consignment_paid": round(float(consignment_paid_total), 2),

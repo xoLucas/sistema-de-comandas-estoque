@@ -63,9 +63,17 @@
     <div class="modal-content">
         <h3>Finalizar Venda</h3>
         <div class="payment-summary" style="margin-bottom:14px;">
-            <div class="summary-row" style="font-size:18px;font-weight:700;">
-                <span>Total</span>
+            <div class="summary-row">
+                <span>Total produtos</span>
                 <span id="balcao-close-total">R$ 0,00</span>
+            </div>
+            <div class="summary-row" id="balcao-service-row" style="display:none;">
+                <span>Taxa serviço (10%)</span>
+                <span id="balcao-close-service">R$ 0,00</span>
+            </div>
+            <div class="summary-row" style="font-size:18px;font-weight:700;border-top:1px solid var(--border);padding-top:8px;margin-top:6px;">
+                <span>Total a pagar</span>
+                <span id="balcao-close-final">R$ 0,00</span>
             </div>
         </div>
         <div style="margin-bottom:14px;">
@@ -77,6 +85,12 @@
                 <option value="pix">Pix</option>
             </select>
         </div>
+        <div style="margin-bottom:14px;">
+            <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+                <input type="checkbox" id="balcao-apply-service-charge" onchange="updateBalcaoChange()" style="width:18px;height:18px;accent-color:var(--accent);">
+                Aplicar taxa de serviço (10%)
+            </label>
+        </div>
         <div id="balcao-close-card-section" style="display:none;margin-bottom:14px;">
             <label class="input-label">Maquininha</label>
             <select id="balcao-close-card-machine" class="select-field">
@@ -86,7 +100,7 @@
         </div>
         <div id="balcao-close-cash-section" style="margin-bottom:14px;">
             <label class="input-label">Valor recebido (R$)</label>
-            <input type="number" id="balcao-close-tendered" class="input-field" step="0.01" min="0" placeholder="0,00" oninput="updateBalcaoChange()">
+            <input type="number" id="balcao-close-tendered" class="input-field" step="0.01" min="0" placeholder="0,00" oninput="balcaoTenderedTouched=true; updateBalcaoChange()">
             <div class="payment-summary" style="margin-top:8px;padding:8px 12px;">
                 <div class="summary-row" style="font-weight:700;color:var(--green);">
                     <span>Troco</span>

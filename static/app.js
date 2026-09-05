@@ -1956,6 +1956,7 @@ async function showCloseModal() {
     populateCardMachineSelect('close');
 
     document.getElementById('close-tendered-amount').value = remainingProduct.toFixed(2);
+    closeTenderedTouched = false;
 
     const isManager = hasRole('gerente');
     const waiterSection = document.getElementById('close-waiter-section');
@@ -1994,11 +1995,17 @@ function updateCloseTotal() {
 
     const tenderedInput = document.getElementById('close-tendered-amount');
     if (method === 'dinheiro' && tenderedInput) {
+        if (!closeTenderedTouched) {
+            tenderedInput.value = final.toFixed(2);
+        }
         const tendered = parseFloat(tenderedInput.value || 0);
         const change = Math.max(0, tendered - final);
         document.getElementById('close-change').textContent = formatCurrency(change);
     }
 }
+
+let closeTenderedTouched = false;
+let balcaoTenderedTouched = false;
 
 function closeCloseModal() {
     selectedCloseWaiterId = null;
@@ -2033,7 +2040,7 @@ function buildPrintReceiptDraftFromOrder(order) {
 
     const total = items.reduce((sum, i) => sum + (Number(i.subtotal) || 0), 0);
     const partialPayment = Number(order.partial_payment || 0);
-    const serviceChargePct = Number(order.service_charge_pct || getSettingFloat('service_charge_pct', 10) || 0);
+    const serviceChargePct = Number(order.service_charge_applied ? (order.service_charge_pct || getSettingFloat('service_charge_pct', 10)) : 0) || 0;
     const remainingProduct = Math.max(0, total - partialPayment);
     const serviceChargeAmount = remainingProduct * (serviceChargePct / 100);
     const finalTotal = remainingProduct + serviceChargeAmount;
@@ -3092,13 +3099,14 @@ async function loadSales() {
             ${all.map(item => {
                 if (item._type === 'order') {
                     const s = item;
+                    const isFiado = !!s.is_fiado;
                     const orderTotal = round(s.total + s.service_charge_amount, 2);
                     const remainingPaidAtClose = round(s.final_total, 2);
                     const paidInPartials = round(s.partial_payment + s.partial_service_charge, 2);
                     return `
                     <div class="sale-card" onclick="openSaleDetailModal(${sales.indexOf(s)})" style="cursor:pointer;">
                         <div class="sale-header">
-                            <span class="sale-table">${s.is_balcao ? 'Balcão' : (s.table_label || 'Mesa ' + s.table_number)}</span>
+                            <span class="sale-table">${s.is_balcao ? 'Balcão' : (s.table_label || 'Mesa ' + s.table_number)}${isFiado ? ' · Fiado' : ''}</span>
                             <span class="sale-time">${s.closed_at ? _fmtDateTime(s.closed_at) : ''}</span>
                         </div>
                         <div class="sale-details">
@@ -3106,7 +3114,7 @@ async function loadSales() {
                             ${s.customer_name ? `<div class="sale-detail"><span>Cliente: ${s.customer_name}</span></div>` : ''}
                             <div class="sale-detail"><span>Forma fechamento: ${s.payment_method_label || s.payment_method}</span>${s.card_machine ? `<span style="font-size:11px;">${s.card_machine}</span>` : ''}</span></div>
                             ${paidInPartials > 0 ? `<div class="sale-detail" style="color:var(--accent);"><span>Pago em parciais</span><span>${formatCurrency(paidInPartials)}</span></div>` : ''}
-                            ${remainingPaidAtClose > 0 ? `<div class="sale-detail" style="color:var(--green);"><span>Pago no fechamento</span><span>${formatCurrency(remainingPaidAtClose)}</span></div>` : ''}
+                            ${isFiado ? `<div class="sale-detail" style="color:var(--green);"><span>Fiado (quitado)</span><span>${formatCurrency(s.total)}</span></div>` : (remainingPaidAtClose > 0 ? `<div class="sale-detail" style="color:var(--green);"><span>Pago no fechamento</span><span>${formatCurrency(remainingPaidAtClose)}</span></div>` : '')}
                             ${s.service_charge_amount > 0 ? `<div class="sale-detail"><span>+ ${s.service_charge_pct}% serviço</span><span>${formatCurrency(s.service_charge_amount)}</span></div>` : ''}
                         </div>
                         <div class="sale-total">${formatCurrency(orderTotal)}</div>
@@ -3196,12 +3204,13 @@ function openSaleDetailModal(index) {
         cartao_debito: 'Débito', pix: 'Pix', nao_informado: 'Não Informado'
     };
     const formatCard = (m) => m ? ` (${m})` : '';
+    const isFiado = !!s.is_fiado;
     const totalPaid = round(s.total + s.service_charge_amount, 2);
     const paidInPartials = round(s.partial_payment + s.partial_service_charge, 2);
     const paidAtClose = round(s.final_total, 2);
     const paymentRows = (s.payment_details || []).map(p => {
         const label = p.method_label || methodLabels[p.method] || p.method;
-        const prefix = p.type === 'parcial' ? 'Parcial' : 'Fechamento';
+        const prefix = p.type === 'parcial' ? 'Parcial' : (p.type === 'fiado' ? 'Fiado (quitado)' : 'Fechamento');
         return `<div class="summary-row"><span>${prefix} - ${label}${formatCard(p.card_machine)}</span><span>${formatCurrency(p.amount)}</span></div>`;
     }).join('');
     const itemRows = (s.items || []).map(i => `
@@ -3218,7 +3227,7 @@ function openSaleDetailModal(index) {
             <div class="summary-row"><span>Itens</span><span>${s.items_count}</span></div>
             <div class="summary-row"><span>Total produtos</span><span>${formatCurrency(s.total)}</span></div>
             ${s.service_charge_amount > 0 ? `<div class="summary-row"><span>Taxa serviço (${s.service_charge_pct}%)</span><span>${formatCurrency(s.service_charge_amount)}</span></div>` : ''}
-            <div class="summary-row" style="font-weight:600;"><span>Total pago</span><span>${formatCurrency(totalPaid)}</span></div>
+            <div class="summary-row" style="font-weight:600;"><span>${isFiado ? 'Total (fiado quitado)' : 'Total pago'}</span><span>${formatCurrency(totalPaid)}</span></div>
             <div class="summary-row"><span>Hora fechamento</span><span>${s.closed_at ? _fmtDateTime(s.closed_at) : '-'}</span></div>
         </div>
         <h4 style="margin:16px 0 8px;font-size:14px;">Pagamentos</h4>
@@ -3228,10 +3237,10 @@ function openSaleDetailModal(index) {
                 <span>Pago em parciais</span>
                 <span>${formatCurrency(paidInPartials)}</span>
             </div>
-            <div class="summary-row">
+            ${isFiado ? `<div class="summary-row" style="color:var(--green);"><span>Fiado</span><span>Quitado via consignado</span></div>` : `<div class="summary-row">
                 <span>Pago no fechamento</span>
                 <span>${formatCurrency(paidAtClose)}</span>
-            </div>
+            </div>`}
             <div class="summary-row" style="font-weight:600;">
                 <span>Total</span>
                 <span>${formatCurrency(totalPaid)}</span>
@@ -4115,13 +4124,20 @@ function renderPromotionProducts(selectedIds = []) {
 
 async function showPromotionModal(promotion = null) {
     await loadPromotionProducts();
+    const toLocalInputValue = (iso) => {
+        if (!iso) return '';
+        const d = new Date(iso);
+        if (isNaN(d.getTime())) return '';
+        const pad = (n) => String(n).padStart(2, '0');
+        return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+    };
     document.getElementById('promotion-modal-title').textContent = promotion ? 'Editar Promoção' : 'Nova Promoção';
     document.getElementById('promotion-id').value = promotion ? promotion.id : '';
     document.getElementById('promotion-name').value = promotion ? promotion.name : '';
     document.getElementById('promotion-description').value = promotion ? (promotion.description || '') : '';
     document.getElementById('promotion-discount').value = promotion ? promotion.discount_pct : '';
-    document.getElementById('promotion-start').value = promotion && promotion.start_at ? new Date(promotion.start_at).toISOString().slice(0, 16) : '';
-    document.getElementById('promotion-end').value = promotion && promotion.end_at ? new Date(promotion.end_at).toISOString().slice(0, 16) : '';
+    document.getElementById('promotion-start').value = promotion && promotion.start_at ? toLocalInputValue(promotion.start_at) : '';
+    document.getElementById('promotion-end').value = promotion && promotion.end_at ? toLocalInputValue(promotion.end_at) : '';
 
     const activeCheckbox = document.getElementById('promotion-active');
     activeCheckbox.checked = promotion ? promotion.is_active : true;
@@ -6656,8 +6672,10 @@ function showBalcaoCloseModal() {
         return;
     }
     document.getElementById('balcao-close-total').textContent = formatCurrency(balcaoCurrentOrder.total);
+    const applyEl = document.getElementById('balcao-apply-service-charge');
+    if (applyEl) applyEl.checked = false;
     document.getElementById('balcao-close-method').value = 'dinheiro';
-    document.getElementById('balcao-close-tendered').value = balcaoCurrentOrder.total.toFixed(2);
+    balcaoTenderedTouched = false;
     updateBalcaoChange();
     document.getElementById('balcao-close-card-section').style.display = 'none';
     document.getElementById('balcao-close-cash-section').style.display = 'block';
@@ -6686,9 +6704,28 @@ function updateBalcaoCloseMethod() {
 }
 
 function updateBalcaoChange() {
-    const total = balcaoCurrentOrder ? balcaoCurrentOrder.total : 0;
-    const tendered = parseFloat(document.getElementById('balcao-close-tendered').value) || 0;
-    const change = Math.max(0, tendered - total);
+    const total = balcaoCurrentOrder ? (Number(balcaoCurrentOrder.total) || 0) : 0;
+    const paid = balcaoCurrentOrder ? (Number(balcaoCurrentOrder.partial_payment) || 0) : 0;
+    const remainingProduct = Math.max(0, total - paid);
+    const applyEl = document.getElementById('balcao-apply-service-charge');
+    const apply = applyEl ? applyEl.checked : false;
+    const serviceChargePct = getSettingFloat('service_charge_pct', 10);
+    const service = apply ? remainingProduct * (serviceChargePct / 100) : 0;
+    const finalVal = remainingProduct + service;
+
+    const serviceRow = document.getElementById('balcao-service-row');
+    const serviceEl = document.getElementById('balcao-close-service');
+    if (serviceRow) serviceRow.style.display = apply ? 'flex' : 'none';
+    if (serviceEl) serviceEl.textContent = formatCurrency(service);
+    const finalEl = document.getElementById('balcao-close-final');
+    if (finalEl) finalEl.textContent = formatCurrency(finalVal);
+
+    const tenderedInput = document.getElementById('balcao-close-tendered');
+    if (tenderedInput && !balcaoTenderedTouched) {
+        tenderedInput.value = finalVal.toFixed(2);
+    }
+    const tendered = parseFloat(tenderedInput ? tenderedInput.value : 0) || 0;
+    const change = Math.max(0, tendered - finalVal);
     document.getElementById('balcao-close-change').textContent = formatCurrency(change);
 }
 
@@ -6700,9 +6737,18 @@ async function confirmBalcaoClose() {
     const method = document.getElementById('balcao-close-method').value;
     const cardMachine = document.getElementById('balcao-close-card-machine').value;
     const tendered = parseFloat(document.getElementById('balcao-close-tendered').value) || 0;
+    const applyServiceEl = document.getElementById('balcao-apply-service-charge');
+    const applyServiceCharge = applyServiceEl ? applyServiceEl.checked : false;
 
-    if (method === 'dinheiro' && tendered < balcaoCurrentOrder.total) {
-        errorEl.textContent = 'Valor recebido menor que o total';
+    const total = balcaoCurrentOrder ? (Number(balcaoCurrentOrder.total) || 0) : 0;
+    const paid = balcaoCurrentOrder ? (Number(balcaoCurrentOrder.partial_payment) || 0) : 0;
+    const remainingProduct = Math.max(0, total - paid);
+    const serviceChargePct = getSettingFloat('service_charge_pct', 10);
+    const balcaoService = applyServiceCharge ? remainingProduct * (serviceChargePct / 100) : 0;
+    const balcaoFinal = remainingProduct + balcaoService;
+
+    if (method === 'dinheiro' && tendered < balcaoFinal) {
+        errorEl.textContent = 'Valor recebido menor que o total a pagar';
         errorEl.style.display = 'block';
         return;
     }
@@ -6714,7 +6760,7 @@ async function confirmBalcaoClose() {
             body: JSON.stringify({
                 table_id: TABLE_ID,
                 order_id: orderId,
-                apply_service_charge: false,
+                apply_service_charge: applyServiceCharge,
                 payment_method: method,
                 card_machine: (method === 'cartao_credito' || method === 'cartao_debito') ? cardMachine : null,
                 amount: method === 'dinheiro' ? tendered : null,

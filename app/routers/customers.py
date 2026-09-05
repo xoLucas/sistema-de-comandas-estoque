@@ -239,6 +239,7 @@ async def customer_summary(
         ).where(
             Order.customer_id == customer_id,
             Order.status == "finalizada",
+            or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
         )
     )
     total_spent, visit_count, last_visit = result.one()

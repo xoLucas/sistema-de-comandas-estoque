@@ -33,6 +33,7 @@ from app.models.stock_history import StockHistory
 from app.models.cash_position_movement import CashPositionMovement
 from app.routers.auth_deps import get_current_user
 from app.routers.financial import compute_period_profit
+from app.services.cash_service import compute_payment_breakdown
 from app.services.stock_service import stock_status, is_pack, pack_stock_for_product
 from app.services.consignment_service import fetch_consignment_payments
 
@@ -183,54 +184,22 @@ async def dashboard_geral(
                 "min_stock": p.min_stock,
             })
 
-    # Vendas por hora
-    hour_expr = func.to_char(func.timezone("America/Sao_Paulo", Order.closed_at), "HH24:00").label("hour")
-    orders_by_hour_result = await db.execute(
-        select(
-            hour_expr,
-            func.coalesce(func.sum(Order.total), 0.0),
-            func.count(Order.id),
-        ).where(
+    # Vendas por hora e formas de pagamento — mesma semântica dos relatórios
+    # financeiros (final no método/hora do fechamento + parciais no próprio
+    # método/hora, com taxa de serviço incluída).
+    breakdown_orders_result = await db.execute(
+        select(Order).where(
             Order.status == "finalizada",
             Order.closed_at >= start_dt,
             Order.closed_at <= end_dt,
             or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
-        ).group_by(hour_expr)
-        .order_by(hour_expr)
+        )
     )
-    sales_by_hour = [
-        {"hour": hour, "total": round(float(total), 2), "orders": count}
-        for hour, total, count in orders_by_hour_result.all()
-    ]
-
-    # Merge pagamentos de consignação nas vendas por hora
-    consignment_hours: dict[str, float] = {}
-    for p in consignment_payments:
-        if p.created_at:
-            hour_key = as_local(p.created_at).strftime("%H:00")
-            consignment_hours[hour_key] = consignment_hours.get(hour_key, 0.0) + float(p.amount)
-    sales_by_hour_map = {item["hour"]: item for item in sales_by_hour}
-    for hour_key, amount in consignment_hours.items():
-        if hour_key in sales_by_hour_map:
-            sales_by_hour_map[hour_key]["total"] = round(sales_by_hour_map[hour_key]["total"] + amount, 2)
-        else:
-            sales_by_hour_map[hour_key] = {"hour": hour_key, "total": round(amount, 2), "orders": 0}
-    sales_by_hour = [sales_by_hour_map[k] for k in sorted(sales_by_hour_map.keys())]
-
-    # Formas de pagamento
-    payments_result = await db.execute(
-        select(
-            Order.payment_method,
-            func.coalesce(func.sum(Order.total), 0.0),
-            func.count(Order.id),
-        ).where(
-            Order.status == "finalizada",
-            Order.closed_at >= start_dt,
-            Order.closed_at <= end_dt,
-            or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
-        ).group_by(Order.payment_method)
+    breakdown_orders = breakdown_orders_result.scalars().all()
+    method_totals, hour_totals = await compute_payment_breakdown(
+        breakdown_orders, consignment_payments, start_dt, end_dt
     )
-    payment_methods = []
+
     payment_labels = {
         "dinheiro": "Dinheiro",
         "pix": "Pix",
@@ -238,31 +207,19 @@ async def dashboard_geral(
         "cartao_credito": "Cartão Crédito",
         "nao_informado": "Não Informado",
     }
-    for method, total, count in payments_result.all():
-        payment_methods.append({
-            "method": method or "nao_informado",
-            "label": payment_labels.get(method or "nao_informado", method or "Não Informado"),
-            "total": round(float(total), 2),
-            "count": count,
-        })
-
-    # Merge pagamentos de consignação nas formas de pagamento
-    consignment_methods: dict[str, float] = {}
-    for p in consignment_payments:
-        method = p.payment_method or "nao_informado"
-        consignment_methods[method] = consignment_methods.get(method, 0.0) + float(p.amount)
-    for method, amount in consignment_methods.items():
-        existing = next((pm for pm in payment_methods if pm["method"] == method), None)
-        if existing:
-            existing["total"] = round(existing["total"] + amount, 2)
-            existing["count"] += 1
-        else:
-            payment_methods.append({
-                "method": method,
-                "label": payment_labels.get(method, method or "Não Informado"),
-                "total": round(amount, 2),
-                "count": 1,
-            })
+    sales_by_hour = [
+        {"hour": hour, "total": entry["gross"], "orders": entry["count"]}
+        for hour, entry in sorted(hour_totals.items())
+    ]
+    payment_methods = [
+        {
+            "method": method,
+            "label": payment_labels.get(method, method or "Não Informado"),
+            "total": entry["gross"],
+            "count": entry["count"],
+        }
+        for method, entry in method_totals.items()
+    ]
 
     # Top produtos
     items_result = await db.execute(
@@ -526,18 +483,18 @@ async def dashboard_vendas(
             "orders": count,
         })
 
-    # Formas de pagamento
-    payment_result = await db.execute(
-        select(
-            Order.payment_method,
-            func.coalesce(func.sum(Order.total), 0.0),
-            func.count(Order.id),
-        ).where(
+    # Formas de pagamento — mesma semântica dos relatórios financeiros
+    breakdown_orders_result = await db.execute(
+        select(Order).where(
             Order.status == "finalizada",
             Order.closed_at >= start_dt,
             Order.closed_at <= end_dt,
             or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
-        ).group_by(Order.payment_method)
+        )
+    )
+    breakdown_orders = breakdown_orders_result.scalars().all()
+    method_totals, _ = await compute_payment_breakdown(
+        breakdown_orders, consignment_payments, start_dt, end_dt
     )
     payment_labels = {
         "dinheiro": "Dinheiro",
@@ -548,30 +505,18 @@ async def dashboard_vendas(
     }
     by_payment = [
         {
-            "method": method or "nao_informado",
-            "label": payment_labels.get(method or "nao_informado", method or "Não Informado"),
-            "total": round(float(total), 2),
-            "count": count,
+            "method": method,
+            "label": payment_labels.get(method, method or "Não Informado"),
+            "total": entry["gross"],
+            "count": entry["count"],
         }
-        for method, total, count in payment_result.all()
+        for method, entry in method_totals.items()
     ]
 
-    # Merge pagamentos de consignação nas agregações (só pagamentos contam)
+    # Merge pagamentos de consignação em produto/categoria (só pagamentos contam)
     processed_consignment_ids: set[int] = set()
     consignment_product_totals: dict[str, dict] = {}
     for p in consignment_payments:
-        method = p.payment_method or "nao_informado"
-        existing_payment = next((b for b in by_payment if b["method"] == method), None)
-        if existing_payment:
-            existing_payment["total"] = round(existing_payment["total"] + float(p.amount), 2)
-            existing_payment["count"] += 1
-        else:
-            by_payment.append({
-                "method": method,
-                "label": payment_labels.get(method, method or "Não Informado"),
-                "total": round(float(p.amount), 2),
-                "count": 1,
-            })
         consignment = p.consignment_order
         if not consignment or consignment.id in processed_consignment_ids:
             continue
@@ -816,7 +761,10 @@ async def dashboard_clientes(
             func.count(Order.id),
         )
         .join(Order, Order.customer_id == Customer.id)
-        .where(Order.status == "finalizada")
+        .where(
+            Order.status == "finalizada",
+            or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
+        )
         .group_by(Customer.id, Customer.name)
         .order_by(func.coalesce(func.sum(Order.total), 0.0).desc())
         .limit(10)
@@ -977,39 +925,23 @@ async def dashboard_funcionarios(
             }
     by_waiter = sorted(by_waiter_map.values(), key=lambda x: x["total"], reverse=True)
 
-    # Vendas por hora (horário de pico)
-    hour_expr = func.to_char(func.timezone("America/Sao_Paulo", Order.closed_at), "HH24:00").label("hour")
-    hour_result = await db.execute(
-        select(
-            hour_expr,
-            func.coalesce(func.sum(Order.total), 0.0),
-            func.count(Order.id),
-        ).where(
+    # Vendas por hora (horário de pico) — mesma semântica dos relatórios
+    breakdown_orders_result = await db.execute(
+        select(Order).where(
             Order.status == "finalizada",
             Order.closed_at >= start_dt,
             Order.closed_at <= end_dt,
             or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
-        ).group_by(hour_expr)
-        .order_by(hour_expr)
+        )
+    )
+    breakdown_orders = breakdown_orders_result.scalars().all()
+    _, hour_totals = await compute_payment_breakdown(
+        breakdown_orders, consignment_payments, start_dt, end_dt
     )
     by_hour = [
-        {"hour": hour, "total": round(float(total), 2), "orders": count}
-        for hour, total, count in hour_result.all()
+        {"hour": hour, "total": entry["gross"], "orders": entry["count"]}
+        for hour, entry in sorted(hour_totals.items())
     ]
-
-    # Merge pagamentos de consignação por hora
-    consignment_hours: dict[str, float] = {}
-    for p in consignment_payments:
-        if p.created_at:
-            hour_key = as_local(p.created_at).strftime("%H:00")
-            consignment_hours[hour_key] = consignment_hours.get(hour_key, 0.0) + float(p.amount)
-    by_hour_map = {item["hour"]: item for item in by_hour}
-    for hour_key, amount in consignment_hours.items():
-        if hour_key in by_hour_map:
-            by_hour_map[hour_key]["total"] = round(by_hour_map[hour_key]["total"] + amount, 2)
-        else:
-            by_hour_map[hour_key] = {"hour": hour_key, "total": round(amount, 2), "orders": 0}
-    by_hour = [by_hour_map[k] for k in sorted(by_hour_map.keys())]
 
     if format.lower() == "csv":
         headers = ["ID", "Nome", "Total", "Comandas", "Ticket Medio"]

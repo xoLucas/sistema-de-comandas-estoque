@@ -29,6 +29,7 @@ from app.routers.orders import (
 )
 from app.routers.ws import broadcast_table_update, broadcast_stock_update
 from app.services.notification_service import broadcast_stock_notification
+from app.services.settings_service import get_setting_as_float
 from app.services.stock_service import is_pack, pack_stock_for_product, stock_status
 
 
@@ -95,7 +96,7 @@ async def _consume_stock_for_items(
         if not product:
             continue
 
-        unit_price = entry.unit_price if entry.unit_price is not None else await _get_promotional_price(product, db)
+        unit_price = await _get_promotional_price(product, db)
 
         try:
             stock_product, notification = await _check_and_consume_stock_consignment(
@@ -167,15 +168,21 @@ async def _return_stock_for_items(db: AsyncSession, consignment_id: int) -> set:
 
 
 async def _recalculate_totals(db: AsyncSession, consignment_id: int) -> None:
-    total_result = await db.execute(
-        select(func.coalesce(func.sum(ConsignmentOrderItem.unit_price * ConsignmentOrderItem.quantity), 0.0))
-        .where(ConsignmentOrderItem.consignment_order_id == consignment_id)
+    consignment_result = await db.execute(
+        select(ConsignmentOrder).where(ConsignmentOrder.id == consignment_id)
     )
-    total = float(total_result.scalar_one())
-
-    consignment_result = await db.execute(select(ConsignmentOrder).where(ConsignmentOrder.id == consignment_id))
     consignment = consignment_result.scalar_one()
-    consignment.total = round(total, 2)
+
+    if consignment.source_order_id is None:
+        # Criação direta: o total é a soma dos itens.
+        total_result = await db.execute(
+            select(func.coalesce(func.sum(ConsignmentOrderItem.unit_price * ConsignmentOrderItem.quantity), 0.0))
+            .where(ConsignmentOrderItem.consignment_order_id == consignment_id)
+        )
+        consignment.total = round(float(total_result.scalar_one()), 2)
+
+    # Conversões (source_order_id preenchido) já trazem o total com a taxa de
+    # serviço do restante embutida; o saldo é sempre total - amount_paid.
     consignment.balance = round(max(0.0, consignment.total - consignment.amount_paid), 2)
 
 
@@ -476,7 +483,7 @@ async def add_payment(
     db.add(payment)
 
     consignment.amount_paid = round(consignment.amount_paid + req.amount, 2)
-    consignment.balance = round(max(0.0, consignment.total - consignment.amount_paid), 2)
+    consignment.balance = round(max(0.0, consignment.balance - req.amount), 2)
 
     if consignment.balance <= 0.01:
         consignment.status = "pago"
@@ -518,7 +525,14 @@ async def cancel_consignment(
     if consignment.status == "cancelado":
         return {"error": "Consignado já cancelado"}
 
-    if consignment.amount_paid > 0:
+    payments_count_result = await db.execute(
+        select(func.count(ConsignmentPayment.id)).where(
+            ConsignmentPayment.consignment_order_id == consignment_id
+        )
+    )
+    has_payments = (payments_count_result.scalar_one() or 0) > 0
+
+    if consignment.amount_paid > 0 or has_payments:
         return {"error": "Não é possível cancelar consignado com pagamentos registrados"}
 
     products_to_broadcast = await _return_stock_for_items(db, consignment.id)
@@ -573,15 +587,23 @@ async def convert_order_to_consignment(
     if not confirmed_items:
         return {"error": "Comanda não possui itens confirmados"}
 
+    remaining_product = max(0.0, float(order.total) - float(order.partial_payment))
+    service_pct = await get_setting_as_float(db, "service_charge_pct", 10.0)
+    remaining_service = round(remaining_product * (service_pct / 100), 2)
+    consignment_total = round(float(order.total) + remaining_service, 2)
+    amount_paid = round(float(order.partial_payment) + float(order.partial_service_charge), 2)
+    balance = round(max(0.0, consignment_total - amount_paid), 2)
+
     consignment = ConsignmentOrder(
         customer_id=customer.id,
         source_order_id=order.id,
         order_type="pf",
-        status="pendente",
-        total=float(order.total),
-        amount_paid=float(order.partial_payment),
-        balance=max(0.0, float(order.total) - float(order.partial_payment)),
+        status="pago" if balance <= 0 else "pendente",
+        total=consignment_total,
+        amount_paid=amount_paid,
+        balance=balance,
         waiter_id=user.id,
+        closed_at=datetime.now(timezone.utc) if balance <= 0 else None,
         notes=f"Gerado da comanda da mesa {order.table.label if order.table else order.table_id}",
     )
     db.add(consignment)

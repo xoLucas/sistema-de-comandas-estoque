@@ -9,6 +9,7 @@ from decimal import Decimal
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.timezone import local_hour_label
 from app.models.cash_register_session import CashRegisterSession
 from app.models.consignment import ConsignmentPayment
 from app.models.order import Order
@@ -126,3 +127,86 @@ async def compute_session_cash_summary(
         "total_suprimento": round(total_suprimento, 2),
         "expected_cash": expected_cash,
     }
+
+
+def _partial_paid_at(detail: dict, fallback: datetime | None = None) -> datetime | None:
+    """Return when a partial payment detail was recorded."""
+    raw = detail.get("created_at")
+    if isinstance(raw, str):
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            return fallback
+    if isinstance(raw, datetime):
+        return raw
+    return fallback
+
+
+async def compute_payment_breakdown(
+    orders: list,
+    consignment_payments: list,
+    start: datetime,
+    end: datetime,
+) -> tuple[dict, dict]:
+    """Break finalized orders down by payment method and hour using the same
+    semantics as the financial reports: the close "final" amount goes into the
+    close method/hour, and each partial goes into its own method/hour (only for
+    partials paid within [start, end]).
+
+    Consignment installments received in the period are aggregated too.
+
+    Returns (method_totals, hour_totals) where each value is
+    {"gross": float, "count": int}.
+    """
+    method_totals: dict[str, dict] = {}
+    hour_totals: dict[str, dict] = {}
+
+    def _add_method(method: str, amount: float) -> None:
+        entry = method_totals.setdefault(method, {"gross": 0.0, "count": 0})
+        entry["gross"] += amount
+        entry["count"] += 1
+
+    def _add_hour(hour_key: str, amount: float) -> None:
+        entry = hour_totals.setdefault(hour_key, {"gross": 0.0, "count": 0})
+        entry["gross"] += amount
+        entry["count"] += 1
+
+    for o in orders:
+        product_remaining = max(0.0, o.total - o.partial_payment)
+        service_remaining = (
+            product_remaining * (o.service_charge_pct / 100)
+            if o.service_charge_applied
+            else 0.0
+        )
+        final = product_remaining + service_remaining
+        close_method = o.payment_method or "nao_informado"
+
+        if final > 0:
+            _add_method(close_method, final)
+            close_hour = local_hour_label(o.closed_at) if o.closed_at else "00:00"
+            _add_hour(close_hour, final)
+
+        for pd in o.partial_payments_detail or []:
+            amount = float(pd.get("amount", 0))
+            if amount <= 0:
+                continue
+            paid_at = _partial_paid_at(pd, o.closed_at)
+            if paid_at is None or not (start <= paid_at <= end):
+                continue
+            p_method = pd.get("method", "nao_informado")
+            _add_method(p_method, amount)
+            hour_key = local_hour_label(paid_at)
+            _add_hour(hour_key, amount)
+
+    for payment in consignment_payments:
+        amount = float(payment.amount)
+        method = payment.payment_method or "nao_informado"
+        _add_method(method, amount)
+        if payment.created_at:
+            _add_hour(local_hour_label(payment.created_at), amount)
+
+    for totals_map in (method_totals, hour_totals):
+        for entry in totals_map.values():
+            entry["gross"] = round(entry["gross"], 2)
+
+    return method_totals, hour_totals

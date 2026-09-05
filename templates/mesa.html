@@ -210,7 +210,7 @@
         <div id="close-cash-section" style="display:none;margin-bottom:14px;">
             <div style="margin-bottom:8px;">
                 <label class="input-label">Valor pago</label>
-                <input type="number" id="close-tendered-amount" class="input-field" step="0.01" min="0" placeholder="0,00" oninput="updateCloseTotal()">
+                <input type="number" id="close-tendered-amount" class="input-field" step="0.01" min="0" placeholder="0,00" oninput="closeTenderedTouched=true; updateCloseTotal()">
             </div>
             <div class="payment-summary" style="padding:10px 12px;">
                 <div class="summary-row" style="font-weight:700;color:var(--green);">

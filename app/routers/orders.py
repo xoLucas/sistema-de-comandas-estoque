@@ -700,7 +700,6 @@ async def add_order_item(
 
         if existing_item:
             existing_item.quantity += req.quantity
-            existing_item.unit_price = unit_price
             if existing_item.unit_cost is None:
                 existing_item.unit_cost = float(product.cost) if product.cost is not None else 0.0
         else:
@@ -915,6 +914,8 @@ async def close_order(
     final_total = remaining_product + remaining_service
 
     close_method = req.payment_method or "nao_informado"
+    if close_method == "fiado":
+        return {"error": "Para venda fiado, use o fluxo de Fiado/Consignado (vincula o cliente e gera o recebível) — não feche a comanda como fiado"}
     if close_method not in _CLOSE_PAYMENT_METHODS:
         return {"error": "Forma de pagamento inválida"}
 
@@ -1334,7 +1335,6 @@ async def add_pending_order_item(
 
         if existing_item:
             existing_item.quantity += req.quantity
-            existing_item.unit_price = unit_price
             if existing_item.unit_cost is None:
                 existing_item.unit_cost = float(product.cost) if product.cost is not None else 0.0
         else:

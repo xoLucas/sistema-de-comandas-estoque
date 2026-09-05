@@ -98,16 +98,26 @@ def serialize_order_sale(order: Order) -> dict:
             "apply_service_charge": pd.get("apply_service_charge", False),
             "created_at": pd.get("created_at"),
         })
-    payment_details.append({
-        "type": "final",
-        "method": order.payment_method or "nao_informado",
-        "method_label": payment_method_label,
-        "amount": round(float(final), 2),
-        "card_machine": order.card_machine,
-    })
+    if order.payment_method == "fiado":
+        payment_details.append({
+            "type": "fiado",
+            "method": "fiado",
+            "method_label": "Fiado (quitado)",
+            "amount": 0.0,
+            "card_machine": None,
+        })
+    else:
+        payment_details.append({
+            "type": "final",
+            "method": order.payment_method or "nao_informado",
+            "method_label": payment_method_label,
+            "amount": round(float(final), 2),
+            "card_machine": order.card_machine,
+        })
 
     return {
         "order_id": order.id,
+        "is_fiado": order.payment_method == "fiado",
         "table_number": order.table.number if order.table else 0,
         "table_label": order.table.label if order.table else "",
         "is_balcao": order.table.is_balcao if order.table else False,
@@ -183,6 +193,8 @@ async def compute_session_close_metrics(session, db: AsyncSession) -> dict:
             p_amount = float(pd.get("amount", 0))
             if p_amount <= 0:
                 continue
+            if not _partial_in_window(pd, start, end, o.closed_at):
+                continue
             gross_total += p_amount
             card_fees += await _card_fee_for_order_payment(
                 p_amount, pd.get("method", "nao_informado"), pd.get("card_machine"), db, card_fee_rates
@@ -251,19 +263,34 @@ async def compute_period_profit(start: datetime, end: datetime, db: AsyncSession
             p_amount = float(pd.get("amount", 0))
             if p_amount <= 0:
                 continue
+            if not _partial_in_window(pd, start, end, o.closed_at):
+                continue
             total_card_fees += await _card_fee_for_order_payment(
                 p_amount, pd.get("method", "nao_informado"), pd.get("card_machine"), db, card_fee_rates
             )
 
     consignment_result = await db.execute(
-        select(ConsignmentPayment).where(
+        select(ConsignmentPayment)
+        .where(
             ConsignmentPayment.created_at >= start,
             ConsignmentPayment.created_at <= end,
+        )
+        .options(
+            selectinload(ConsignmentPayment.consignment_order)
+            .selectinload(ConsignmentOrder.items)
+            .selectinload(ConsignmentOrderItem.product),
         )
     )
     for payment in consignment_result.scalars().all():
         amount = float(payment.amount)
         total_sales += amount
+        consignment = payment.consignment_order
+        if consignment and consignment.total > 0:
+            consignment_cogs = sum(
+                (item.product.cost if item.product else 0.0) * item.quantity
+                for item in consignment.items
+            )
+            total_cogs += round(consignment_cogs * (amount / consignment.total), 2)
         total_card_fees += await _card_fee_for_order_payment(
             amount, payment.payment_method or "nao_informado", payment.card_machine, db, card_fee_rates
         )
@@ -457,6 +484,30 @@ def _fmt_datetime(value: str | datetime | None) -> str:
     return local_datetime_str(value)
 
 
+def _partial_paid_at(pd: dict, fallback: datetime | None = None) -> datetime | None:
+    """Return the moment a partial payment detail was recorded."""
+    raw = pd.get("created_at")
+    if isinstance(raw, str):
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            return fallback
+    if isinstance(raw, datetime):
+        return raw
+    return fallback
+
+
+def _partial_in_window(
+    pd: dict,
+    start: datetime,
+    end: datetime,
+    fallback: datetime | None = None,
+) -> bool:
+    """True if the partial detail's payment moment falls within [start, end]."""
+    paid_at = _partial_paid_at(pd, fallback)
+    return paid_at is not None and start <= paid_at <= end
+
+
 async def _get_card_fee_rates(db: AsyncSession) -> dict[str, float]:
     debit = await get_setting_as_float(db, "card_fee_debit_pct", 1.5)
     credit = await get_setting_as_float(db, "card_fee_credit_pct", 3.5)
@@ -624,6 +675,8 @@ async def _build_daily_report(
         for pd in o.partial_payments_detail or []:
             p_amount = float(pd.get("amount", 0))
             if p_amount <= 0:
+                continue
+            if not _partial_in_window(pd, day_start, day_end, o.closed_at):
                 continue
             p_method = pd.get("method", "nao_informado")
             p_card_machine = pd.get("card_machine")
@@ -906,6 +959,8 @@ async def _build_session_report(
             p_amount = float(pd.get("amount", 0))
             if p_amount <= 0:
                 continue
+            if not _partial_in_window(pd, start, end, o.closed_at):
+                continue
             p_method = pd.get("method", "nao_informado")
             p_card_machine = pd.get("card_machine")
             p_fee = await _card_fee_for_order_payment(p_amount, p_method, p_card_machine, db, card_fee_rates)
@@ -1126,18 +1181,30 @@ async def list_sales(
     total_service = 0.0
     counted_orders = 0
 
+    # Vendas fiado só entram no módulo quando totalmente quitadas (ConsignmentOrder status "pago").
+    fiado_order_ids = [o.id for o in orders if o.payment_method == "fiado"]
+    fully_paid_fiado_ids: set[int] = set()
+    if fiado_order_ids:
+        fiado_cons_result = await db.execute(
+            select(ConsignmentOrder.source_order_id).where(
+                ConsignmentOrder.source_order_id.in_(fiado_order_ids),
+                ConsignmentOrder.status == "pago",
+            )
+        )
+        fully_paid_fiado_ids = set(fiado_cons_result.scalars().all())
+
     for o in orders:
+        if o.payment_method == "fiado" and o.id not in fully_paid_fiado_ids:
+            continue
         total_service += o.service_charge_amount
         data.append(serialize_order_sale(o))
-        if o.payment_method != "fiado":
-            total_day += o.total
-            counted_orders += 1
+        total_day += o.total
+        counted_orders += 1
 
     consignment_paid_total = 0.0
     if day_start is not None and day_end is not None:
         consignment_payments = await fetch_consignment_payments(day_start, day_end, db)
         consignment_paid_total = sum(float(p.amount) for p in consignment_payments)
-        total_day += consignment_paid_total
 
     return {
         "sales": data,
@@ -1148,6 +1215,23 @@ async def list_sales(
             "consignment_paid": round(consignment_paid_total, 2),
         },
     }
+
+
+def _order_cash_received(order: Order) -> float:
+    """Total cash (dinheiro) received for an order: cash partials + cash close."""
+    total = 0.0
+    for pd in order.partial_payments_detail or []:
+        if pd.get("method") == "dinheiro":
+            total += float(pd.get("amount", 0))
+    if order.payment_method == "dinheiro":
+        remaining_product = max(0.0, order.total - order.partial_payment)
+        remaining_service = (
+            remaining_product * (order.service_charge_pct / 100)
+            if order.service_charge_applied
+            else 0.0
+        )
+        total += remaining_product + remaining_service
+    return total
 
 
 @router.delete("/vendas/{order_id}")
@@ -1215,6 +1299,24 @@ async def estornar_venda(
     order.status = "cancelada"
     order.is_estorno = True
     await _sync_session_cash_position(order.closed_at, db)
+
+    cash_refund = _order_cash_received(order)
+    if cash_refund > 0:
+        open_cash_result = await db.execute(
+            select(CashRegisterSession).where(CashRegisterSession.status == "open")
+        )
+        open_session = open_cash_result.scalar_one_or_none()
+        if open_session:
+            db.add(CashPositionMovement(
+                type="saida",
+                source="manual",
+                title=f"Estorno venda #{order.id}",
+                amount=round(cash_refund, 2),
+                observation="Devolução em dinheiro ao cliente no estorno",
+                session_id=open_session.id,
+                created_by_id=user.id,
+            ))
+
     await db.commit()
 
     seen = set()

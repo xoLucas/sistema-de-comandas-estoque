@@ -5,6 +5,14 @@ def is_pack(product: Product) -> bool:
     return product.pack_unit_product_id is not None
 
 
+def validate_pack_configuration(product: Product) -> None:
+    if is_pack(product) and (product.pack_size is None or product.pack_size < 2):
+        raise ValueError(
+            f"Engradado '{product.name}' possui quantidade por engradado inválida. "
+            "Corrija o cadastro antes de vender ou movimentar o produto."
+        )
+
+
 def pack_stock_for_product(product: Product) -> int:
     """Return computed pack stock based on linked unit product."""
     if not is_pack(product) or not product.pack_unit_product:

@@ -7,7 +7,11 @@ from app.core.database import get_db
 from app.models.product import Product
 from app.models.user import User
 from app.routers.auth_deps import get_current_user, can_view_product_cost
-from app.services.promotion_service import get_active_promotion_map
+from app.services.money_service import as_float, money
+from app.services.promotion_service import (
+    calculate_discounted_price,
+    get_active_promotion_map,
+)
 
 
 def _is_pack(product: Product) -> bool:
@@ -28,14 +32,18 @@ router = APIRouter(prefix="/api", tags=["products"])
 def _serialize_product_list(p: Product, promo_map: dict, user: User) -> dict:
     is_pack = _is_pack(p)
     discount_pct, promo_name = promo_map.get(p.id, (0, None))
-    discounted_price = round(float(p.price) * (1 - discount_pct / 100), 2) if discount_pct else float(p.price)
+    discounted_price = (
+        calculate_discounted_price(p.price, discount_pct)
+        if discount_pct
+        else money(p.price)
+    )
     item = {
         "id": p.id,
         "code": p.code,
         "name": p.name,
         "category": p.category,
         "price": float(p.price),
-        "discounted_price": discounted_price,
+        "discounted_price": as_float(discounted_price),
         "active_promotion": promo_name,
         "stock": _pack_stock_for_product(p) if is_pack else p.stock,
         "min_stock": p.min_stock,

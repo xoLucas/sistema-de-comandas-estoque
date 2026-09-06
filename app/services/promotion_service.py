@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -6,13 +7,21 @@ from sqlalchemy.orm import selectinload
 
 from app.models.product import Product
 from app.models.promotion import Promotion
+from app.services.money_service import decimal_value, money
 
 
 def _utc_now():
     return datetime.now(timezone.utc)
 
 
-async def get_discounted_price(product: Product, db: AsyncSession) -> float:
+def calculate_discounted_price(price: Decimal, discount_pct: Decimal) -> Decimal:
+    return money(
+        decimal_value(price)
+        * (Decimal("1") - decimal_value(discount_pct) / Decimal("100"))
+    )
+
+
+async def get_discounted_price(product: Product, db: AsyncSession):
     now = _utc_now()
     result = await db.execute(
         select(Promotion)
@@ -26,12 +35,12 @@ async def get_discounted_price(product: Product, db: AsyncSession) -> float:
     )
     promotions = result.scalars().all()
     if not promotions:
-        return float(product.price)
+        return money(product.price)
     best_discount = max(p.discount_pct for p in promotions)
-    return round(float(product.price) * (1 - best_discount / 100), 2)
+    return calculate_discounted_price(product.price, best_discount)
 
 
-async def get_active_promotion_map(db: AsyncSession) -> dict[int, tuple[float, str | None]]:
+async def get_active_promotion_map(db: AsyncSession) -> dict[int, tuple[Decimal, str | None]]:
     now = _utc_now()
     result = await db.execute(
         select(Promotion)
@@ -43,7 +52,7 @@ async def get_active_promotion_map(db: AsyncSession) -> dict[int, tuple[float, s
         )
     )
     promotions = result.scalars().all()
-    product_promo: dict[int, tuple[float, str | None]] = {}
+    product_promo: dict[int, tuple[Decimal, str | None]] = {}
     for promo in promotions:
         for product in promo.products:
             current = product_promo.get(product.id)

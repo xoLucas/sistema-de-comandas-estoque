@@ -2,7 +2,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, text
+from sqlalchemy.exc import IntegrityError
 
 from app.core.database import async_session
 from app.models.cash_register_session import CashRegisterSession
@@ -19,6 +20,7 @@ from app.services.settings_service import (
 )
 from app.services.email_service import send_email_with_attachment
 from app.routers.financial import _build_daily_report, _build_pdf_bytes
+from app.services.money_service import money
 
 
 SCHEDULER = AsyncIOScheduler(timezone=ZoneInfo("America/Sao_Paulo"))
@@ -64,16 +66,20 @@ async def auto_open_cash_register() -> None:
         if now.strftime("%H:%M") != configured_time:
             return
 
+        system_user = await _ensure_system_user(db)
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext('cash_register_open'))")
+        )
         existing = await db.execute(
-            select(CashRegisterSession).where(CashRegisterSession.status == "open")
+            select(CashRegisterSession)
+            .where(CashRegisterSession.status == "open")
+            .with_for_update()
         )
         if existing.scalar_one_or_none():
             return
 
         last_closed = await _get_last_closed_session(db)
-        initial_cash = float(last_closed.final_cash) if last_closed else 0.0
-
-        system_user = await _ensure_system_user(db)
+        initial_cash = money(last_closed.final_cash) if last_closed else money(0)
 
         session = CashRegisterSession(
             opened_by_id=system_user.id,
@@ -81,7 +87,10 @@ async def auto_open_cash_register() -> None:
             status="open",
         )
         db.add(session)
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
 
 
 async def auto_close_notification() -> None:

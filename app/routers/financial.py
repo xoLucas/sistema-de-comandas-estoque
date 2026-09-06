@@ -1,9 +1,10 @@
 from datetime import datetime, date, timezone, timedelta
+from decimal import Decimal
 from collections import defaultdict
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-from sqlalchemy import select, func, extract, cast, Date, or_, desc
+from pydantic import BaseModel, Field
+from sqlalchemy import select, func, extract, cast, case, Date, or_, and_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from fpdf import FPDF
@@ -31,14 +32,14 @@ from app.models.cash_register_movement import CashRegisterMovement
 from app.models.cash_position_movement import CashPositionMovement
 from app.models.stock_history import StockHistory
 from app.models.consignment import ConsignmentOrder, ConsignmentOrderItem, ConsignmentPayment
+from app.models.payment import OrderPayment, PaymentRefund, PaymentRefundItem
 from app.routers.auth_deps import get_current_user, can_view_financial
-from app.routers.ws import broadcast_table_update, broadcast_stock_update
-from app.routers.orders import _resolve_pack_stock, _build_stock_broadcast_info
-from app.routers.consignments import _return_stock_for_items
-from app.services.settings_service import get_setting_as_float, get_card_fee_for_machine
+from app.routers.ws import broadcast_stock_update
 from app.services.cash_service import compute_session_cash_summary
 from app.services.stock_service import is_pack
 from app.services.consignment_service import fetch_consignment_payments
+from app.services.money_service import ZERO, as_float, money, rate
+from app.services.refund_service import refund_full_order
 
 router = APIRouter(prefix="/api/financeiro", tags=["financeiro"])
 
@@ -71,34 +72,59 @@ def serialize_order_sale(order: Order) -> dict:
     The order must have its relationships loaded (table, waiter, closed_by,
     closed_waiter, customer and items -> product).
     """
-    product_remaining = max(0.0, order.total - order.partial_payment)
-    service_remaining = (
-        product_remaining * (order.service_charge_pct / 100)
-        if order.service_charge_applied
-        else 0.0
+    canonical_payments = list(order.payments or [])
+    product_remaining = money(max(ZERO, money(order.total) - money(order.partial_payment)))
+    service_amount = money(order.service_charge_amount)
+    final = money(
+        sum(
+            (
+                payment.gross_amount
+                for payment in canonical_payments
+                if payment.payment_type == "final"
+            ),
+            ZERO,
+        )
     )
-    service_amount = order.service_charge_amount
-    final = product_remaining + service_remaining
 
     payment_method_label = PAYMENT_LABELS.get(
         order.payment_method or "nao_informado", order.payment_method or "Não Informado"
     )
     payment_details = []
-    for idx, pd in enumerate(order.partial_payments_detail or [], start=1):
-        p_method = pd.get("method", "nao_informado")
-        payment_details.append({
-            "type": "parcial",
-            "index": idx,
-            "method": p_method,
-            "method_label": PAYMENT_LABELS.get(p_method, p_method),
-            "amount": round(float(pd.get("amount", 0)), 2),
-            "product_portion": round(float(pd.get("product_portion", pd.get("amount", 0))), 2),
-            "service_portion": round(float(pd.get("service_portion", 0)), 2),
-            "card_machine": pd.get("card_machine"),
-            "apply_service_charge": pd.get("apply_service_charge", False),
-            "created_at": pd.get("created_at"),
-        })
-    if order.payment_method == "fiado":
+    if canonical_payments:
+        for idx, payment in enumerate(canonical_payments, start=1):
+            payment_details.append({
+                "payment_id": payment.id,
+                "type": payment.payment_type,
+                "index": idx,
+                "method": payment.payment_method,
+                "method_label": PAYMENT_LABELS.get(
+                    payment.payment_method, payment.payment_method
+                ),
+                "amount": as_float(payment.gross_amount),
+                "product_portion": as_float(payment.product_amount),
+                "service_portion": as_float(payment.service_amount),
+                "card_machine": payment.card_machine,
+                "apply_service_charge": payment.service_amount > ZERO,
+                "created_at": (
+                    payment.created_at.isoformat() if payment.created_at else None
+                ),
+            })
+    else:
+        for idx, pd in enumerate(order.partial_payments_detail or [], start=1):
+            p_method = pd.get("method", "nao_informado")
+            payment_details.append({
+                "type": "parcial",
+                "index": idx,
+                "method": p_method,
+                "method_label": PAYMENT_LABELS.get(p_method, p_method),
+                "amount": round(float(pd.get("amount", 0)), 2),
+                "product_portion": round(float(pd.get("product_portion", pd.get("amount", 0))), 2),
+                "service_portion": round(float(pd.get("service_portion", 0)), 2),
+                "card_machine": pd.get("card_machine"),
+                "apply_service_charge": pd.get("apply_service_charge", False),
+                "created_at": pd.get("created_at"),
+            })
+    if order.payment_method == "fiado" and not canonical_payments:
         payment_details.append({
             "type": "fiado",
             "method": "fiado",
@@ -106,7 +132,7 @@ def serialize_order_sale(order: Order) -> dict:
             "amount": 0.0,
             "card_machine": None,
         })
-    else:
+    elif not canonical_payments:
         payment_details.append({
             "type": "final",
             "method": order.payment_method or "nao_informado",
@@ -125,17 +151,33 @@ def serialize_order_sale(order: Order) -> dict:
         "customer_id": order.customer_id,
         "customer_name": order.customer_name or (order.customer.name if order.customer else None),
         "items_count": sum(item.quantity for item in order.items),
-        "total": float(order.total),
+        "total": as_float(order.total),
         "service_charge_pct": float(order.service_charge_pct),
-        "service_charge_amount": round(float(service_amount), 2),
-        "partial_payment": float(order.partial_payment),
-        "partial_service_charge": float(order.partial_service_charge),
-        "final_total": float(final),
+        "service_charge_amount": as_float(service_amount),
+        "partial_payment": as_float(order.partial_payment),
+        "partial_service_charge": as_float(order.partial_service_charge),
+        "final_total": as_float(final),
         "payment_method": order.payment_method or "nao_informado",
         "payment_method_label": payment_method_label,
         "card_machine": order.card_machine,
         "closed_at": order.closed_at.isoformat() if order.closed_at else None,
-        "can_estornar": order.status == "finalizada",
+        "is_estorno": bool(order.is_estorno),
+        "can_estornar": order.status == "finalizada" and not order.is_estorno,
+        "refunds": [
+            {
+                "refund_id": refund.id,
+                "amount": as_float(refund.gross_amount),
+                "product_portion": as_float(refund.product_amount),
+                "service_portion": as_float(refund.service_amount),
+                "method": refund.payment_method,
+                "method_label": PAYMENT_LABELS.get(
+                    refund.payment_method, refund.payment_method
+                ),
+                "reason": refund.reason,
+                "created_at": refund.created_at.isoformat() if refund.created_at else None,
+            }
+            for refund in (order.refunds or [])
+        ],
         "items": [
             {
                 "product_name": item.product.name if item.product else "N/A",
@@ -149,85 +191,74 @@ def serialize_order_sale(order: Order) -> dict:
     }
 
 
+async def _direct_service_in_period(
+    start: datetime | None,
+    end: datetime | None,
+    db: AsyncSession,
+) -> Decimal:
+    query = (
+        select(func.coalesce(func.sum(OrderPayment.service_amount), 0))
+        .join(Order, Order.id == OrderPayment.order_id)
+        .where(or_(Order.payment_method != "fiado", Order.payment_method.is_(None)))
+    )
+    if start is not None:
+        query = query.where(OrderPayment.created_at >= start)
+    if end is not None:
+        query = query.where(OrderPayment.created_at <= end)
+    return money(await db.scalar(query))
+
+
 async def compute_session_close_metrics(session, db: AsyncSession) -> dict:
     """Compute the faturamento/card-fees/service-charge for a closed session.
 
     Mirrors the summary computed by _build_session_report but returns only the
     three values needed to feed the cash position movements on close.
     """
-    start = session.opened_at
-    end = session.closed_at or datetime.now(timezone.utc)
-    card_fee_rates = await _get_card_fee_rates(db)
-
-    result = await db.execute(
-        select(Order).where(
-            Order.status == "finalizada",
-            Order.closed_at >= start,
-            Order.closed_at <= end,
+    direct_result = await db.execute(
+        select(OrderPayment)
+        .join(Order, Order.id == OrderPayment.order_id)
+        .where(
+            OrderPayment.cash_session_id == session.id,
             or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
         )
     )
-    orders = result.scalars().all()
-
-    gross_total = 0.0
-    card_fees = 0.0
-    service_charge = 0.0
-
-    for o in orders:
-        product_remaining = max(0.0, o.total - o.partial_payment)
-        service_remaining = (
-            product_remaining * (o.service_charge_pct / 100)
-            if o.service_charge_applied
-            else 0.0
-        )
-        final = product_remaining + service_remaining
-        close_method = o.payment_method or "nao_informado"
-
-        gross_total += final
-        card_fees += await _card_fee_for_order_payment(
-            final, close_method, o.card_machine, db, card_fee_rates
-        )
-        service_charge += o.service_charge_amount
-
-        for pd in o.partial_payments_detail or []:
-            p_amount = float(pd.get("amount", 0))
-            if p_amount <= 0:
-                continue
-            if not _partial_in_window(pd, start, end, o.closed_at):
-                continue
-            gross_total += p_amount
-            card_fees += await _card_fee_for_order_payment(
-                p_amount, pd.get("method", "nao_informado"), pd.get("card_machine"), db, card_fee_rates
-            )
+    direct_payments = direct_result.scalars().all()
 
     consignment_result = await db.execute(
         select(ConsignmentPayment).where(
-            ConsignmentPayment.created_at >= start,
-            ConsignmentPayment.created_at <= end,
+            ConsignmentPayment.cash_session_id == session.id
         )
     )
-    for payment in consignment_result.scalars().all():
-        amount = float(payment.amount)
-        gross_total += amount
-        card_fees += await _card_fee_for_order_payment(
-            amount, payment.payment_method or "nao_informado", payment.card_machine, db, card_fee_rates
-        )
+    consignment_payments = consignment_result.scalars().all()
 
-    # Repasse ao garçom só quando o consignado é 100% pago no período.
-    tips = await _consignment_tips_paid_in_period(start, end, db)
-    service_charge += sum(tips.values())
+    gross_total = money(
+        sum((payment.gross_amount for payment in direct_payments), ZERO)
+        + sum((payment.amount for payment in consignment_payments), ZERO)
+    )
+    card_fees = money(
+        sum((payment.card_fee_amount for payment in direct_payments), ZERO)
+        + sum((payment.card_fee_amount for payment in consignment_payments), ZERO)
+    )
+    direct_service = money(
+        sum((payment.service_amount for payment in direct_payments), ZERO)
+    )
+    paid_consignment_service = await db.scalar(
+        select(func.coalesce(func.sum(ConsignmentOrder.service_total), 0)).where(
+            ConsignmentOrder.status == "pago",
+            ConsignmentOrder.closed_at >= session.opened_at,
+            ConsignmentOrder.closed_at <= (session.closed_at or datetime.now(timezone.utc)),
+        )
+    )
 
     return {
-        "gross_total": round(gross_total, 2),
-        "card_fees": round(card_fees, 2),
-        "service_charge": round(service_charge, 2),
+        "gross_total": as_float(gross_total),
+        "card_fees": as_float(card_fees),
+        "service_charge": as_float(money(direct_service + money(paid_consignment_service))),
     }
 
 
 async def compute_period_profit(start: datetime, end: datetime, db: AsyncSession) -> dict:
     """Compute profit metrics for an arbitrary period (same semantics as the reports)."""
-    card_fee_rates = await _get_card_fee_rates(db)
-
     orders_result = await db.execute(
         select(Order)
         .where(
@@ -240,38 +271,28 @@ async def compute_period_profit(start: datetime, end: datetime, db: AsyncSession
     )
     orders = orders_result.scalars().all()
 
-    total_sales = 0.0
-    total_cogs = 0.0
-    total_card_fees = 0.0
+    total_sales = ZERO
+    total_cogs = ZERO
 
     for o in orders:
-        total_sales += o.total
-        total_cogs += sum(
-            ((item.unit_cost if item.unit_cost is not None else (item.product.cost if item.product else 0.0)) * item.quantity)
-            for item in o.items
-        )
-
-        product_remaining = max(0.0, o.total - o.partial_payment)
-        service_remaining = (
-            product_remaining * (o.service_charge_pct / 100)
-            if o.service_charge_applied
-            else 0.0
-        )
-        final = product_remaining + service_remaining
-        close_method = o.payment_method or "nao_informado"
-        total_card_fees += await _card_fee_for_order_payment(
-            final, close_method, o.card_machine, db, card_fee_rates
-        )
-
-        for pd in o.partial_payments_detail or []:
-            p_amount = float(pd.get("amount", 0))
-            if p_amount <= 0:
-                continue
-            if not _partial_in_window(pd, start, end, o.closed_at):
-                continue
-            total_card_fees += await _card_fee_for_order_payment(
-                p_amount, pd.get("method", "nao_informado"), pd.get("card_machine"), db, card_fee_rates
+        total_sales = money(total_sales + o.total)
+        total_cogs = money(
+            total_cogs
+            + sum(
+                (
+                    money(
+                        (
+                            item.unit_cost
+                            if item.unit_cost is not None
+                            else (item.product.cost if item.product else ZERO)
+                        )
+                        * item.quantity
+                    )
+                    for item in o.items
+                ),
+                ZERO,
             )
+        )
 
     consignment_result = await db.execute(
         select(ConsignmentPayment)
@@ -280,35 +301,99 @@ async def compute_period_profit(start: datetime, end: datetime, db: AsyncSession
             ConsignmentPayment.created_at <= end,
         )
     )
-    for payment in consignment_result.scalars().all():
-        amount = float(payment.amount)
-        service_portion = float(payment.service_portion or 0)
-        product_amount = round(max(0.0, amount - service_portion), 2)
-        total_sales += product_amount
-        total_card_fees += await _card_fee_for_order_payment(
-            amount, payment.payment_method or "nao_informado", payment.card_machine, db, card_fee_rates
-        )
+    consignment_payments = consignment_result.scalars().all()
+    total_sales = money(
+        total_sales
+        + sum((payment.product_portion for payment in consignment_payments), ZERO)
+    )
 
-    # COGS integral das consignadas CRIADAS no período (custo congelado na venda).
-    total_cogs += await _consignment_cogs_in_period(start, end, db)
+    direct_fee = await db.scalar(
+        select(func.coalesce(func.sum(OrderPayment.card_fee_amount), 0))
+        .join(Order, Order.id == OrderPayment.order_id)
+        .where(
+            OrderPayment.created_at >= start,
+            OrderPayment.created_at <= end,
+            or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
+        )
+    )
+    total_card_fees = money(
+        money(direct_fee)
+        + sum((payment.card_fee_amount for payment in consignment_payments), ZERO)
+    )
+
+    total_cogs = money(total_cogs + money(await _consignment_cogs_in_period(start, end, db)))
+
+    refund_result = await db.execute(
+        select(
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            PaymentRefund.sale_was_recognized == True,
+                            PaymentRefund.product_amount,
+                        ),
+                        else_=0,
+                    )
+                ),
+                0,
+            ),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (PaymentRefund.service_already_repassed == True, PaymentRefund.service_amount),
+                        else_=0,
+                    )
+                ),
+                0,
+            ),
+        ).where(
+            PaymentRefund.created_at >= start,
+            PaymentRefund.created_at <= end,
+        )
+    )
+    refunded_product, retained_service_loss = refund_result.one()
+    refund_cogs = await db.scalar(
+        select(
+            func.coalesce(
+                func.sum(PaymentRefundItem.unit_cost * PaymentRefundItem.quantity), 0
+            )
+        )
+        .join(PaymentRefund, PaymentRefund.id == PaymentRefundItem.refund_id)
+        .where(
+            PaymentRefund.created_at >= start,
+            PaymentRefund.created_at <= end,
+            PaymentRefund.sale_was_recognized == True,
+        )
+    )
+    total_sales = money(total_sales - money(refunded_product))
+    total_cogs = money(total_cogs - money(refund_cogs))
 
     expenses_result = await db.execute(
         select(Expense).where(Expense.expense_date >= start, Expense.expense_date <= end)
     )
-    total_expenses = sum(float(e.amount) for e in expenses_result.scalars().all())
+    total_expenses = sum(
+        (money(expense.amount) for expense in expenses_result.scalars().all()),
+        ZERO,
+    )
     _, perdas_total = await _get_perdas(start, end, db)
-    total_expenses = round(total_expenses + perdas_total, 2)
+    total_expenses = money(total_expenses + perdas_total)
 
-    gross_profit = round(total_sales - total_cogs, 2)
-    net_profit = round(gross_profit - total_card_fees - total_expenses, 2)
+    gross_profit = money(total_sales - total_cogs)
+    net_profit = money(
+        gross_profit
+        - total_card_fees
+        - total_expenses
+        - money(retained_service_loss)
+    )
 
     return {
-        "total_sales": round(total_sales, 2),
-        "total_cogs": round(total_cogs, 2),
-        "gross_profit": gross_profit,
-        "total_card_fees": round(total_card_fees, 2),
-        "total_expenses": total_expenses,
-        "net_profit": net_profit,
+        "total_sales": as_float(total_sales),
+        "total_cogs": as_float(total_cogs),
+        "gross_profit": as_float(gross_profit),
+        "total_card_fees": as_float(total_card_fees),
+        "total_expenses": as_float(total_expenses),
+        "retained_service_loss": as_float(retained_service_loss),
+        "net_profit": as_float(net_profit),
     }
 
 
@@ -316,7 +401,7 @@ async def _get_perdas(
     start: datetime,
     end: datetime,
     db: AsyncSession,
-) -> tuple[list[dict], float]:
+) -> tuple[list[dict], Decimal]:
     """Return manual stock exits (losses) in the period and their total cost."""
     result = await db.execute(
         select(StockHistory, Product)
@@ -331,33 +416,36 @@ async def _get_perdas(
         .order_by(StockHistory.created_at)
     )
     items = []
-    total = 0.0
+    total = ZERO
     for history, product in result.all():
-        cost = float(product.cost) if product.cost else 0.0
-        amount = round(cost * history.quantity, 2)
-        total += amount
+        unit_cost = history.unit_cost_snapshot
+        if unit_cost is None:
+            unit_cost = product.cost or ZERO
+        amount = money(unit_cost * history.quantity)
+        total = money(total + amount)
         items.append({
             "id": f"perda_{history.id}",
             "description": f"Perda: {product.name} ({history.quantity} un.)",
-            "amount": amount,
+            "amount": as_float(amount),
             "category": "perdas",
             "expense_date": _fmt_datetime(history.created_at),
             "quantity": history.quantity,
             "product_name": product.name,
             "note": history.note,
         })
-    return items, round(total, 2)
+    return items, money(total)
 
 
 async def _consignment_cogs_in_period(
     start: datetime,
     end: datetime,
     db: AsyncSession,
-) -> float:
+) -> Decimal:
     """Full COGS (frozen unit_cost) of consignments CREATED in the period.
 
-    Cost is recognized when the credit sale happens (venda vira consignado),
-    NOT when payments arrive. Canceled consignments (stock returned) are excluded.
+    Cost is recognized when the credit sale happens, not when payments arrive.
+    Canceled consignments with returned stock are excluded unless they were
+    canceled by a financial refund, which is reversed in the refund period.
     """
     result = await db.execute(
         select(ConsignmentOrderItem)
@@ -365,45 +453,55 @@ async def _consignment_cogs_in_period(
         .where(
             ConsignmentOrder.created_at >= start,
             ConsignmentOrder.created_at <= end,
-            ConsignmentOrder.status != "cancelado",
+            or_(
+                ConsignmentOrder.status != "cancelado",
+                ConsignmentOrder.source_order.has(Order.is_estorno == True),
+                ConsignmentOrder.refunds.any(),
+            ),
         )
         .options(selectinload(ConsignmentOrderItem.product))
     )
     items = result.scalars().all()
-    total = 0.0
+    total = ZERO
     for item in items:
-        unit_cost = item.unit_cost if item.unit_cost is not None else (item.product.cost if item.product else 0.0)
-        total += float(unit_cost) * item.quantity
-    return round(total, 2)
+        unit_cost = item.unit_cost if item.unit_cost is not None else (item.product.cost if item.product else ZERO)
+        total = money(total + money(unit_cost * item.quantity))
+    return money(total)
 
 
 async def _consignment_tips_paid_in_period(
     start: datetime,
     end: datetime,
     db: AsyncSession,
-) -> dict[str, float]:
-    """Service tips (service_portion) credited only when consignments become
-    fully paid ('pago') in the period, grouped by waiter name."""
+) -> dict[str, Decimal]:
+    """Return service tips when consignments become fully paid in the period."""
     result = await db.execute(
         select(ConsignmentOrder)
-        .where(
-            ConsignmentOrder.status == "pago",
-            ConsignmentOrder.closed_at >= start,
-            ConsignmentOrder.closed_at <= end,
-        )
+        .where(ConsignmentOrder.total > 0)
         .options(
             selectinload(ConsignmentOrder.payments),
             selectinload(ConsignmentOrder.waiter),
+            selectinload(ConsignmentOrder.credited_waiter),
         )
     )
     consignments = result.scalars().all()
-    tips: dict[str, float] = {}
+    tips: dict[str, Decimal] = {}
     for consignment in consignments:
-        total = sum(float(p.service_portion or 0) for p in consignment.payments)
-        if total <= 0:
+        running_total = ZERO
+        payoff_at = None
+        for payment in sorted(
+            consignment.payments,
+            key=lambda entry: (entry.created_at or consignment.created_at, entry.id),
+        ):
+            running_total = money(running_total + payment.amount)
+            if running_total >= money(consignment.total):
+                payoff_at = payment.created_at
+                break
+        if payoff_at is None or not (start <= payoff_at <= end):
             continue
-        waiter_name = consignment.waiter.name if consignment.waiter else "N/A"
-        tips[waiter_name] = round(tips.get(waiter_name, 0.0) + total, 2)
+        total = money(consignment.service_total)
+        waiter_name = consignment.credited_waiter_name or "N/A"
+        tips[waiter_name] = money(tips.get(waiter_name, ZERO) + total)
     return tips
 
 
@@ -413,7 +511,6 @@ async def _add_consignment_payments_to_report(
     db: AsyncSession,
     report: dict,
     method_totals: dict,
-    card_fee_rates: dict,
     hour_totals: dict | None = None,
     item_totals: dict | None = None,
     waiter_totals: dict | None = None,
@@ -445,48 +542,271 @@ async def _add_consignment_payments_to_report(
     if not payments:
         return 0
 
-    processed_consignment_ids = set()
     for payment in payments:
-        consignment = payment.consignment_order
-        amount = float(payment.amount)
-        service_portion = float(payment.service_portion or 0)
-        product_amount = round(max(0.0, amount - service_portion), 2)
+        amount = money(payment.amount)
+        product_amount = money(payment.product_portion)
         method = payment.payment_method or "nao_informado"
-        card_machine = payment.card_machine
+        fee = money(payment.card_fee_amount)
 
-        fee = await _card_fee_for_order_payment(amount, method, card_machine, db, card_fee_rates)
+        report["summary"]["total_sales"] = money(report["summary"]["total_sales"] + product_amount)
+        report["summary"]["gross_total"] = money(report["summary"]["gross_total"] + amount)
+        report["summary"]["total_card_fees"] = money(report["summary"]["total_card_fees"] + fee)
 
-        report["summary"]["total_sales"] += product_amount
-        report["summary"]["gross_total"] += amount
-        report["summary"]["total_card_fees"] += fee
-
-        if method not in method_totals:
-            method_totals[method] = {
-                "gross": 0.0,
-                "fee_pct": card_fee_rates.get(method, 0.0),
-                "fee": 0.0,
-                "net": 0.0,
-                "count": 0,
-            }
-        method_totals[method]["gross"] += amount
-        method_totals[method]["fee"] += fee
-        method_totals[method]["net"] += amount - fee
-        method_totals[method]["count"] += 1
+        bucket = _method_bucket(
+            method_totals, method, float(payment.card_fee_rate)
+        )
+        bucket["gross"] = money(bucket["gross"] + amount)
+        bucket["fee_base"] = money(bucket["fee_base"] + amount)
+        bucket["fee"] = money(bucket["fee"] + fee)
+        bucket["net"] = money(bucket["net"] + amount - fee)
+        bucket["count"] += 1
 
         if hour_totals is not None and payment.created_at:
             hour_key = local_hour_label(payment.created_at)
-            hour_totals[hour_key] += amount
-
-        if item_totals is not None and consignment and consignment.id not in processed_consignment_ids:
-            for item in consignment.items:
-                product = item.product
-                if not product:
-                    continue
-                item_totals[product.name]["quantity"] += item.quantity
-                item_totals[product.name]["total"] += item.unit_price * item.quantity
-            processed_consignment_ids.add(consignment.id)
+            hour_totals[hour_key] = money(hour_totals[hour_key] + amount)
 
     return len(payments)
+
+
+def _method_bucket(method_totals: dict, method: str, fee_pct: float = 0.0) -> dict:
+    bucket = method_totals.setdefault(
+        method,
+        {
+            "gross": ZERO,
+            "fee_pct": fee_pct,
+            "fee_base": ZERO,
+            "fee": ZERO,
+            "net": ZERO,
+            "count": 0,
+            "refunds_count": 0,
+        },
+    )
+    bucket.setdefault("refunds_count", 0)
+    return bucket
+
+
+async def _add_direct_payments_to_report(
+    start: datetime,
+    end: datetime,
+    db: AsyncSession,
+    report: dict,
+    method_totals: dict,
+    hour_totals: dict,
+    waiter_totals: dict,
+) -> None:
+    result = await db.execute(
+        select(OrderPayment)
+        .join(Order, Order.id == OrderPayment.order_id)
+        .where(
+            OrderPayment.created_at >= start,
+            OrderPayment.created_at <= end,
+            or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
+        )
+        .options(
+            selectinload(OrderPayment.order).selectinload(Order.waiter),
+            selectinload(OrderPayment.order).selectinload(Order.closed_by),
+            selectinload(OrderPayment.order).selectinload(Order.closed_waiter),
+        )
+    )
+    for payment in result.scalars().all():
+        gross = money(payment.gross_amount)
+        fee = money(payment.card_fee_amount)
+        report["summary"]["gross_total"] = money(report["summary"]["gross_total"] + gross)
+        report["summary"]["total_card_fees"] = money(report["summary"]["total_card_fees"] + fee)
+        report["summary"]["total_service_charge"] = money(
+            report["summary"]["total_service_charge"] + money(payment.service_amount)
+        )
+        if payment.payment_type == "partial":
+            report["summary"]["total_partial_payments"] = money(
+                report["summary"]["total_partial_payments"] + gross
+            )
+
+        bucket = _method_bucket(
+            method_totals, payment.payment_method, float(payment.card_fee_rate)
+        )
+        bucket["gross"] = money(bucket["gross"] + gross)
+        bucket["fee_base"] = money(bucket["fee_base"] + gross)
+        bucket["fee"] = money(bucket["fee"] + fee)
+        bucket["net"] = money(bucket["net"] + gross - fee)
+        bucket["count"] += 1
+        waiter_name = _resolve_waiter_name(payment.order)
+        waiter_totals[waiter_name]["service_charge"] = money(
+            waiter_totals[waiter_name]["service_charge"] + money(payment.service_amount)
+        )
+        if payment.created_at:
+            hour_key = local_hour_label(payment.created_at)
+            hour_totals[hour_key] = money(hour_totals[hour_key] + gross)
+
+
+async def _add_consignment_sale_rankings(
+    start: datetime,
+    end: datetime,
+    db: AsyncSession,
+    item_totals: dict,
+    waiter_totals: dict,
+) -> None:
+    result = await db.execute(
+        select(ConsignmentOrder)
+        .where(
+            ConsignmentOrder.created_at >= start,
+            ConsignmentOrder.created_at <= end,
+            or_(
+                ConsignmentOrder.status != "cancelado",
+                ConsignmentOrder.source_order.has(Order.is_estorno == True),
+                ConsignmentOrder.refunds.any(),
+            ),
+        )
+        .options(
+            selectinload(ConsignmentOrder.items).selectinload(
+                ConsignmentOrderItem.product
+            ),
+            selectinload(ConsignmentOrder.waiter),
+            selectinload(ConsignmentOrder.credited_waiter),
+        )
+    )
+    for consignment in result.scalars().all():
+        waiter_name = consignment.credited_waiter_name or "N/A"
+        waiter_totals[waiter_name]["orders"] += 1
+        waiter_totals[waiter_name]["sales"] = money(
+            waiter_totals[waiter_name]["sales"] + money(consignment.product_total)
+        )
+        for item in consignment.items:
+            if not item.product:
+                continue
+            item_totals[item.product.name]["quantity"] += item.quantity
+            item_totals[item.product.name]["total"] = money(
+                item_totals[item.product.name]["total"]
+                + money(item.unit_price * item.quantity)
+            )
+
+
+async def _apply_refunds_to_report(
+    start: datetime,
+    end: datetime,
+    db: AsyncSession,
+    report: dict,
+    method_totals: dict,
+    hour_totals: dict,
+    item_totals: dict,
+    waiter_totals: dict,
+    table_totals: dict,
+) -> None:
+    result = await db.execute(
+        select(PaymentRefund)
+        .where(
+            PaymentRefund.created_at >= start,
+            PaymentRefund.created_at <= end,
+        )
+        .options(
+            selectinload(PaymentRefund.items).selectinload(
+                PaymentRefundItem.product
+            ),
+            selectinload(PaymentRefund.order).selectinload(Order.table),
+            selectinload(PaymentRefund.order).selectinload(Order.waiter),
+            selectinload(PaymentRefund.order).selectinload(Order.closed_by),
+            selectinload(PaymentRefund.order).selectinload(Order.closed_waiter),
+            selectinload(PaymentRefund.consignment_order).selectinload(
+                ConsignmentOrder.waiter
+            ),
+            selectinload(PaymentRefund.consignment_order).selectinload(
+                ConsignmentOrder.credited_waiter
+            ),
+        )
+        .order_by(PaymentRefund.created_at, PaymentRefund.id)
+    )
+    refunds = result.scalars().all()
+    report["refunds"] = []
+    report["summary"].setdefault("total_refunds", ZERO)
+    report["summary"].setdefault("retained_service_loss", ZERO)
+
+    for refund in refunds:
+        gross = money(refund.gross_amount)
+        product_amount = money(refund.product_amount)
+        service_amount = money(refund.service_amount)
+        report["summary"]["total_refunds"] = money(report["summary"]["total_refunds"] + gross)
+        report["summary"]["gross_total"] = money(report["summary"]["gross_total"] - gross)
+        if refund.sale_was_recognized:
+            report["summary"]["total_sales"] = money(report["summary"]["total_sales"] - product_amount)
+        if refund.service_already_repassed:
+            report["summary"]["retained_service_loss"] = money(
+                report["summary"]["retained_service_loss"] + service_amount
+            )
+        elif refund.service_was_recognized:
+            report["summary"]["total_service_charge"] = money(
+                report["summary"]["total_service_charge"] - service_amount
+            )
+
+        if gross > 0:
+            bucket = _method_bucket(method_totals, refund.payment_method)
+            bucket["gross"] = money(bucket["gross"] - gross)
+            bucket["net"] = money(bucket["net"] - gross)
+            bucket["refunds_count"] += 1
+            if refund.created_at:
+                hour_key = local_hour_label(refund.created_at)
+                hour_totals[hour_key] = money(hour_totals[hour_key] - gross)
+
+        order = refund.order
+        reversed_sale_product = money(
+            sum((item.product_amount for item in refund.items), ZERO)
+        )
+        if order:
+            waiter_name = _resolve_waiter_name(order)
+            if refund.sale_was_recognized:
+                waiter_totals[waiter_name]["sales"] = money(
+                    waiter_totals[waiter_name]["sales"] - reversed_sale_product
+                )
+            if refund.service_was_recognized and not refund.service_already_repassed:
+                waiter_totals[waiter_name]["service_charge"] = money(
+                    waiter_totals[waiter_name]["service_charge"] - service_amount
+                )
+            if refund.sale_was_recognized and refund.payment_id is not None:
+                table_label = order.table.label if order.table else "Balcão"
+                table_totals[table_label]["total"] = money(
+                    table_totals[table_label]["total"] - reversed_sale_product
+                )
+        elif refund.consignment_order:
+            waiter_name = refund.consignment_order.credited_waiter_name or "N/A"
+            if refund.sale_was_recognized:
+                waiter_totals[waiter_name]["sales"] = money(
+                    waiter_totals[waiter_name]["sales"] - reversed_sale_product
+                )
+            if refund.service_was_recognized and not refund.service_already_repassed:
+                waiter_totals[waiter_name]["service_charge"] = money(
+                    waiter_totals[waiter_name]["service_charge"] - service_amount
+                )
+
+        if refund.sale_was_recognized:
+            for item in refund.items:
+                item_cost = money(item.unit_cost * item.quantity)
+                report["summary"]["total_cogs"] = money(
+                    report["summary"]["total_cogs"] - item_cost
+                )
+                name = (
+                    item.product.name
+                    if item.product
+                    else f"Produto #{item.product_id}"
+                )
+                item_totals[name]["quantity"] -= item.quantity
+                item_totals[name]["total"] = money(
+                    item_totals[name]["total"] - money(item.product_amount)
+                )
+
+        report["refunds"].append(
+            {
+                "id": refund.id,
+                "order_id": refund.order_id,
+                "consignment_order_id": refund.consignment_order_id,
+                "amount": as_float(gross),
+                "product_amount": as_float(product_amount),
+                "service_amount": as_float(service_amount),
+                "payment_method": refund.payment_method,
+                "reason": refund.reason,
+                "sale_was_recognized": refund.sale_was_recognized,
+                "service_was_recognized": refund.service_was_recognized,
+                "service_already_repassed": refund.service_already_repassed,
+                "created_at": _fmt_datetime(refund.created_at),
+            }
+        )
 
 
 async def _add_consignment_summary(
@@ -539,57 +859,87 @@ def _fmt_datetime(value: str | datetime | None) -> str:
     return local_datetime_str(value)
 
 
-def _partial_paid_at(pd: dict, fallback: datetime | None = None) -> datetime | None:
-    """Return the moment a partial payment detail was recorded."""
-    raw = pd.get("created_at")
-    if isinstance(raw, str):
-        try:
-            return datetime.fromisoformat(raw)
-        except ValueError:
-            return fallback
-    if isinstance(raw, datetime):
-        return raw
-    return fallback
+def _finalize_method_totals(method_totals: dict) -> None:
+    """Round method totals and derive the effective frozen fee percentage."""
+    for values in method_totals.values():
+        fee_base = money(values.pop("fee_base", ZERO))
+        gross = money(values["gross"])
+        fee = money(values["fee"])
+        net = money(values["net"])
+        values["gross"] = as_float(gross)
+        values["fee"] = as_float(fee)
+        values["net"] = as_float(net)
+        values["fee_pct"] = float(
+            rate((fee / fee_base) * Decimal("100") if fee_base > ZERO else ZERO)
+        )
 
 
-def _partial_in_window(
-    pd: dict,
-    start: datetime,
-    end: datetime,
-    fallback: datetime | None = None,
-) -> bool:
-    """True if the partial detail's payment moment falls within [start, end]."""
-    paid_at = _partial_paid_at(pd, fallback)
-    return paid_at is not None and start <= paid_at <= end
+def _finalize_report_totals(
+    report: dict,
+    method_totals: dict,
+    waiter_totals: dict,
+    table_totals: dict,
+    hour_totals: dict,
+    item_totals: dict,
+) -> None:
+    summary = report["summary"]
+    summary["total_sales"] = money(summary["total_sales"])
+    summary["total_cogs"] = money(summary["total_cogs"])
+    summary["gross_profit"] = money(
+        summary["total_sales"] - summary["total_cogs"]
+    )
+    summary["total_service_charge"] = money(summary["total_service_charge"])
+    summary["total_partial_payments"] = money(summary["total_partial_payments"])
+    summary["total_card_fees"] = money(summary["total_card_fees"])
+    summary["total_expenses"] = money(summary["total_expenses"])
+    summary["operating_expenses"] = money(
+        summary["total_card_fees"]
+        + summary["total_expenses"]
+        + money(summary.get("retained_service_loss", ZERO))
+    )
+    summary["net_profit"] = money(
+        summary["gross_profit"] - summary["operating_expenses"]
+    )
+    summary["gross_total"] = money(summary["gross_total"])
+    summary["net_total"] = money(
+        summary["gross_total"]
+        - summary["total_service_charge"]
+        - summary["total_card_fees"]
+        - summary["total_expenses"]
+    )
 
+    for key, value in list(summary.items()):
+        if isinstance(value, Decimal):
+            summary[key] = as_float(value)
 
-async def _get_card_fee_rates(db: AsyncSession) -> dict[str, float]:
-    debit = await get_setting_as_float(db, "card_fee_debit_pct", 1.5)
-    credit = await get_setting_as_float(db, "card_fee_credit_pct", 3.5)
-    return {
-        "dinheiro": 0.0,
-        "pix": 0.0,
-        "cartao_debito": debit,
-        "cartao_credito": credit,
-        "nao_informado": 0.0,
+    _finalize_method_totals(method_totals)
+
+    for values in waiter_totals.values():
+        values["service_charge"] = as_float(values["service_charge"])
+        values["sales"] = as_float(values["sales"])
+
+    for values in table_totals.values():
+        values["total"] = as_float(values["total"])
+
+    report["by_payment_method"] = method_totals
+    report["by_waiter"] = dict(waiter_totals)
+    report["by_table"] = dict(table_totals)
+    report["by_hour"] = {
+        key: as_float(value)
+        for key, value in sorted(hour_totals.items())
     }
-
-
-def _card_fee_for_payment(amount: float, method: str, rates: dict[str, float]) -> float:
-    return amount * (rates.get(method, 0.0) / 100)
-
-
-async def _card_fee_for_order_payment(
-    amount: float,
-    method: str,
-    card_machine: str | None,
-    db: AsyncSession,
-    default_rates: dict[str, float] | None = None,
-) -> float:
-    if method not in ("cartao_debito", "cartao_credito"):
-        return 0.0
-    rate = await get_card_fee_for_machine(db, card_machine, method, default_rates)
-    return round(amount * (rate / 100), 2)
+    report["items_ranking"] = sorted(
+        [
+            {
+                "name": key,
+                "quantity": value["quantity"],
+                "total": as_float(value["total"]),
+            }
+            for key, value in item_totals.items()
+        ],
+        key=lambda entry: entry["total"],
+        reverse=True,
+    )
 
 
 async def _build_daily_report(
@@ -611,12 +961,11 @@ async def _build_daily_report(
             selectinload(Order.closed_by),
             selectinload(Order.closed_waiter),
             selectinload(Order.items).selectinload(OrderItem.product),
+            selectinload(Order.payments),
         )
         .order_by(Order.closed_at)
     )
     orders = result.scalars().all()
-    card_fee_rates = await _get_card_fee_rates(db)
-
     expenses_result = await db.execute(
         select(Expense).where(
             Expense.expense_date >= day_start,
@@ -624,13 +973,10 @@ async def _build_daily_report(
         )
     )
     expenses = expenses_result.scalars().all()
-    cash_expenses = sum(e.amount for e in expenses)
+    cash_expenses = money(sum((money(e.amount) for e in expenses), ZERO))
 
     perdas_items, perdas_total = await _get_perdas(day_start, day_end, db)
-    total_expenses = round(cash_expenses + perdas_total, 2)
-
-    if not orders and not expenses and not perdas_items:
-        return {"error": "Nenhuma venda ou despesa encontrada nesta data"}
+    total_expenses = money(cash_expenses + perdas_total)
 
     report = {
         "date": format_local_date(close_date),
@@ -638,18 +984,18 @@ async def _build_daily_report(
         "generated_at": local_datetime_str(datetime.now(timezone.utc)),
         "orders": [],
         "summary": {
-            "total_sales": 0.0,
-            "total_cogs": 0.0,
-            "gross_profit": 0.0,
-            "total_service_charge": 0.0,
-            "total_partial_payments": 0.0,
-            "total_card_fees": 0.0,
-            "total_expenses": round(float(total_expenses), 2),
+            "total_sales": ZERO,
+            "total_cogs": ZERO,
+            "gross_profit": ZERO,
+            "total_service_charge": ZERO,
+            "total_partial_payments": ZERO,
+            "total_card_fees": ZERO,
+            "total_expenses": total_expenses,
             "perdas_total": perdas_total,
-            "operating_expenses": 0.0,
-            "net_profit": 0.0,
-            "gross_total": 0.0,
-            "net_total": 0.0,
+            "operating_expenses": ZERO,
+            "net_profit": ZERO,
+            "gross_total": ZERO,
+            "net_total": ZERO,
             "orders_count": len(orders),
             "consignments_count": 0,
         },
@@ -662,7 +1008,7 @@ async def _build_daily_report(
             {
                 "id": e.id,
                 "description": e.description,
-                "amount": float(e.amount),
+                "amount": as_float(e.amount),
                 "category": e.category,
                 "expense_date": _fmt_datetime(e.expense_date),
             }
@@ -671,173 +1017,120 @@ async def _build_daily_report(
     }
 
     method_totals = {}
-    waiter_totals = defaultdict(lambda: {"service_charge": 0.0, "orders": 0, "sales": 0.0})
-    table_totals = defaultdict(lambda: {"total": 0.0, "orders": 0})
-    hour_totals = defaultdict(float)
-    item_totals = defaultdict(lambda: {"quantity": 0, "total": 0.0})
+    waiter_totals = defaultdict(lambda: {"service_charge": ZERO, "orders": 0, "sales": ZERO})
+    table_totals = defaultdict(lambda: {"total": ZERO, "orders": 0})
+    hour_totals = defaultdict(lambda: ZERO)
+    item_totals = defaultdict(lambda: {"quantity": 0, "total": ZERO})
 
     for o in orders:
-        product_remaining = max(0.0, o.total - o.partial_payment)
-        service_remaining = (
-            product_remaining * (o.service_charge_pct / 100) if o.service_charge_applied else 0.0
+        service_amount = money(o.service_charge_amount)
+        final = money(
+            sum(
+                (
+                    payment.gross_amount
+                    for payment in o.payments
+                    if payment.payment_type == "final"
+                ),
+                ZERO,
+            )
         )
-        service_amount = o.service_charge_amount
-        final = product_remaining + service_remaining
         close_method = o.payment_method or "nao_informado"
-        close_fee = await _card_fee_for_order_payment(final, close_method, o.card_machine, db, card_fee_rates)
 
-        report["summary"]["total_sales"] += o.total
-        report["summary"]["total_cogs"] += sum(
-            ((item.unit_cost if item.unit_cost is not None else (item.product.cost if item.product else 0.0)) * item.quantity)
-            for item in o.items
+        report["summary"]["total_sales"] = money(report["summary"]["total_sales"] + money(o.total))
+        report["summary"]["total_cogs"] = money(
+            report["summary"]["total_cogs"] + sum(
+                money(
+                    (item.unit_cost if item.unit_cost is not None else (item.product.cost if item.product else ZERO))
+                    * item.quantity
+                )
+                for item in o.items
+            )
         )
-        report["summary"]["total_service_charge"] += service_amount
-        report["summary"]["total_partial_payments"] += o.partial_payment + o.partial_service_charge
-        report["summary"]["total_card_fees"] += close_fee
-        report["summary"]["gross_total"] += final
-
         waiter_name = _resolve_waiter_name(o)
-        waiter_totals[waiter_name]["service_charge"] += service_amount
         waiter_totals[waiter_name]["orders"] += 1
-        waiter_totals[waiter_name]["sales"] += o.total
+        waiter_totals[waiter_name]["sales"] = money(waiter_totals[waiter_name]["sales"] + money(o.total))
 
         table_label = o.table.label if o.table else "Balcão"
-        table_totals[table_label]["total"] += o.total
+        table_totals[table_label]["total"] = money(table_totals[table_label]["total"] + money(o.total))
         table_totals[table_label]["orders"] += 1
 
         for item in o.items:
             item_totals[item.product.name]["quantity"] += item.quantity
-            item_totals[item.product.name]["total"] += item.unit_price * item.quantity
-
-        # Final payment grouped by the method chosen at close.
-        if final > 0:
-            close_hour = local_hour_label(o.closed_at) if o.closed_at else "00:00"
-            hour_totals[close_hour] += final
-            if close_method not in method_totals:
-                method_totals[close_method] = {
-                    "gross": 0.0,
-                    "fee_pct": card_fee_rates.get(close_method, 0.0),
-                    "fee": 0.0,
-                    "net": 0.0,
-                    "count": 0,
-                }
-            method_totals[close_method]["gross"] += final
-            method_totals[close_method]["fee"] += close_fee
-            method_totals[close_method]["net"] += final - close_fee
-            method_totals[close_method]["count"] += 1
-
-        # Partial payments grouped by their actual method and hour.
-        for pd in o.partial_payments_detail or []:
-            p_amount = float(pd.get("amount", 0))
-            if p_amount <= 0:
-                continue
-            if not _partial_in_window(pd, day_start, day_end, o.closed_at):
-                continue
-            p_method = pd.get("method", "nao_informado")
-            p_card_machine = pd.get("card_machine")
-            p_fee = await _card_fee_for_order_payment(p_amount, p_method, p_card_machine, db, card_fee_rates)
-
-            report["summary"]["total_card_fees"] += p_fee
-            report["summary"]["gross_total"] += p_amount
-
-            p_created_at = pd.get("created_at")
-            if isinstance(p_created_at, str):
-                try:
-                    p_paid_at = datetime.fromisoformat(p_created_at)
-                except ValueError:
-                    p_paid_at = o.closed_at
-            else:
-                p_paid_at = p_created_at or o.closed_at
-            p_hour = local_hour_label(p_paid_at) if p_paid_at else "00:00"
-            hour_totals[p_hour] += p_amount
-
-            if p_method not in method_totals:
-                method_totals[p_method] = {
-                    "gross": 0.0,
-                    "fee_pct": card_fee_rates.get(p_method, 0.0),
-                    "fee": 0.0,
-                    "net": 0.0,
-                    "count": 0,
-                }
-            method_totals[p_method]["gross"] += p_amount
-            method_totals[p_method]["fee"] += p_fee
-            method_totals[p_method]["net"] += p_amount - p_fee
-            method_totals[p_method]["count"] += 1
+            item_totals[item.product.name]["total"] = money(
+                item_totals[item.product.name]["total"] + money(item.unit_price * item.quantity)
+            )
 
         report["orders"].append(
             {
                 "order_id": o.id,
                 "table": table_label,
                 "waiter": waiter_name,
-                "total": float(o.total),
-                "service_charge": round(service_amount, 2),
-                "partial_payment": float(o.partial_payment),
-                "partial_service_charge": float(o.partial_service_charge),
-                "final_total": round(final, 2),
+                "total": as_float(o.total),
+                "service_charge": as_float(service_amount),
+                "partial_payment": as_float(o.partial_payment),
+                "partial_service_charge": as_float(o.partial_service_charge),
+                "final_total": as_float(final),
                 "payment_method": close_method,
                 "closed_at": as_local(o.closed_at).strftime("%H:%M") if o.closed_at else "",
             }
         )
 
-    await _add_consignment_payments_to_report(
-        day_start, day_end, db, report, method_totals, card_fee_rates, hour_totals, item_totals, waiter_totals
+    await _add_direct_payments_to_report(
+        day_start,
+        day_end,
+        db,
+        report,
+        method_totals,
+        hour_totals,
+        waiter_totals,
     )
-    # COGS integral das consignadas CRIADAS no dia (custo congelado na venda).
-    report["summary"]["total_cogs"] += await _consignment_cogs_in_period(day_start, day_end, db)
-    # Repasse ao garçom só quando o consignado é 100% pago no período.
+    await _add_consignment_payments_to_report(
+        day_start,
+        day_end,
+        db,
+        report,
+        method_totals,
+        hour_totals,
+        item_totals,
+        waiter_totals,
+    )
+    # Recognize frozen consignment COGS when the credit sale is created.
+    report["summary"]["total_cogs"] = money(
+        report["summary"]["total_cogs"]
+        + await _consignment_cogs_in_period(day_start, day_end, db)
+    )
+    # Credit the waiter only after the consignment is fully paid.
     tips = await _consignment_tips_paid_in_period(day_start, day_end, db)
-    report["summary"]["total_service_charge"] += sum(tips.values())
+    report["summary"]["total_service_charge"] = money(
+        report["summary"]["total_service_charge"] + sum(tips.values(), ZERO)
+    )
     for waiter_name, tip_amount in tips.items():
-        waiter_totals[waiter_name]["service_charge"] += tip_amount
+        waiter_totals[waiter_name]["service_charge"] = money(
+            waiter_totals[waiter_name]["service_charge"] + tip_amount
+        )
+    await _add_consignment_sale_rankings(
+        day_start, day_end, db, item_totals, waiter_totals
+    )
+    await _apply_refunds_to_report(
+        day_start,
+        day_end,
+        db,
+        report,
+        method_totals,
+        hour_totals,
+        item_totals,
+        waiter_totals,
+        table_totals,
+    )
     await _add_consignment_summary(day_start, day_end, db, report)
 
-    report["summary"]["total_sales"] = round(report["summary"]["total_sales"], 2)
-    report["summary"]["total_cogs"] = round(report["summary"]["total_cogs"], 2)
-    report["summary"]["gross_profit"] = round(
-        report["summary"]["total_sales"] - report["summary"]["total_cogs"], 2
-    )
-    report["summary"]["total_service_charge"] = round(report["summary"]["total_service_charge"], 2)
-    report["summary"]["total_partial_payments"] = round(report["summary"]["total_partial_payments"], 2)
-    report["summary"]["total_card_fees"] = round(report["summary"]["total_card_fees"], 2)
-    report["summary"]["total_expenses"] = round(report["summary"]["total_expenses"], 2)
-    report["summary"]["operating_expenses"] = round(
-        report["summary"]["total_card_fees"] + report["summary"]["total_expenses"], 2
-    )
-    report["summary"]["net_profit"] = round(
-        report["summary"]["gross_profit"] - report["summary"]["operating_expenses"], 2
-    )
-    report["summary"]["gross_total"] = round(report["summary"]["gross_total"], 2)
-    report["summary"]["net_total"] = round(
-        report["summary"]["gross_total"]
-        - report["summary"]["total_service_charge"]
-        - report["summary"]["total_card_fees"]
-        - report["summary"]["total_expenses"],
-        2,
-    )
-
-    for method, values in method_totals.items():
-        method_totals[method]["gross"] = round(values["gross"], 2)
-        method_totals[method]["fee"] = round(values["fee"], 2)
-        method_totals[method]["net"] = round(values["net"], 2)
-
-    for waiter, values in waiter_totals.items():
-        waiter_totals[waiter]["service_charge"] = round(values["service_charge"], 2)
-        waiter_totals[waiter]["sales"] = round(values["sales"], 2)
-
-    for table, values in table_totals.items():
-        table_totals[table]["total"] = round(values["total"], 2)
-
-    report["by_payment_method"] = method_totals
-    report["by_waiter"] = dict(waiter_totals)
-    report["by_table"] = dict(table_totals)
-    report["by_hour"] = dict(sorted(hour_totals.items()))
-    report["items_ranking"] = sorted(
-        [
-            {"name": k, "quantity": v["quantity"], "total": round(v["total"], 2)}
-            for k, v in item_totals.items()
-        ],
-        key=lambda x: x["total"],
-        reverse=True,
+    _finalize_report_totals(
+        report,
+        method_totals,
+        waiter_totals,
+        table_totals,
+        hour_totals,
+        item_totals,
     )
 
     return report
@@ -865,12 +1158,11 @@ async def _build_session_report(
             selectinload(Order.closed_by),
             selectinload(Order.closed_waiter),
             selectinload(Order.items).selectinload(OrderItem.product),
+            selectinload(Order.payments),
         )
         .order_by(Order.closed_at)
     )
     orders = result.scalars().all()
-    card_fee_rates = await _get_card_fee_rates(db)
-
     expenses_result = await db.execute(
         select(Expense).where(
             Expense.expense_date >= start,
@@ -878,10 +1170,10 @@ async def _build_session_report(
         )
     )
     expenses = expenses_result.scalars().all()
-    cash_expenses = sum(e.amount for e in expenses)
+    cash_expenses = money(sum((money(e.amount) for e in expenses), ZERO))
 
     perdas_items, perdas_total = await _get_perdas(start, end, db)
-    total_expenses = round(cash_expenses + perdas_total, 2)
+    total_expenses = money(cash_expenses + perdas_total)
 
     movements_result = await db.execute(
         select(CashRegisterMovement).where(CashRegisterMovement.session_id == session.id)
@@ -917,18 +1209,18 @@ async def _build_session_report(
         "generated_at": local_datetime_str(datetime.now(timezone.utc)),
         "orders": [],
         "summary": {
-            "total_sales": 0.0,
-            "total_cogs": 0.0,
-            "gross_profit": 0.0,
-            "total_service_charge": 0.0,
-            "total_partial_payments": 0.0,
-            "total_card_fees": 0.0,
-            "total_expenses": round(float(total_expenses), 2),
+            "total_sales": ZERO,
+            "total_cogs": ZERO,
+            "gross_profit": ZERO,
+            "total_service_charge": ZERO,
+            "total_partial_payments": ZERO,
+            "total_card_fees": ZERO,
+            "total_expenses": total_expenses,
             "perdas_total": perdas_total,
-            "operating_expenses": 0.0,
-            "net_profit": 0.0,
-            "gross_total": 0.0,
-            "net_total": 0.0,
+            "operating_expenses": ZERO,
+            "net_profit": ZERO,
+            "gross_total": ZERO,
+            "net_total": ZERO,
             "orders_count": len(orders),
             "consignments_count": 0,
         },
@@ -937,7 +1229,7 @@ async def _build_session_report(
             {
                 "id": m.id,
                 "type": m.type,
-                "amount": float(m.amount),
+                "amount": as_float(m.amount),
                 "note": m.note,
                 "created_at": _fmt_datetime(m.created_at),
             }
@@ -952,7 +1244,7 @@ async def _build_session_report(
             {
                 "id": e.id,
                 "description": e.description,
-                "amount": float(e.amount),
+                "amount": as_float(e.amount),
                 "category": e.category,
                 "expense_date": _fmt_datetime(e.expense_date),
             }
@@ -961,255 +1253,123 @@ async def _build_session_report(
     }
 
     method_totals = {}
-    waiter_totals = defaultdict(lambda: {"service_charge": 0.0, "orders": 0, "sales": 0.0})
-    table_totals = defaultdict(lambda: {"total": 0.0, "orders": 0})
-    hour_totals = defaultdict(float)
-    item_totals = defaultdict(lambda: {"quantity": 0, "total": 0.0})
+    waiter_totals = defaultdict(lambda: {"service_charge": ZERO, "orders": 0, "sales": ZERO})
+    table_totals = defaultdict(lambda: {"total": ZERO, "orders": 0})
+    hour_totals = defaultdict(lambda: ZERO)
+    item_totals = defaultdict(lambda: {"quantity": 0, "total": ZERO})
 
     for o in orders:
-        product_remaining = max(0.0, o.total - o.partial_payment)
-        service_remaining = (
-            product_remaining * (o.service_charge_pct / 100) if o.service_charge_applied else 0.0
+        service_amount = money(o.service_charge_amount)
+        final = money(
+            sum(
+                (
+                    payment.gross_amount
+                    for payment in o.payments
+                    if payment.payment_type == "final"
+                ),
+                ZERO,
+            )
         )
-        service_amount = o.service_charge_amount
-        final = product_remaining + service_remaining
         close_method = o.payment_method or "nao_informado"
-        close_fee = await _card_fee_for_order_payment(final, close_method, o.card_machine, db, card_fee_rates)
 
-        report["summary"]["total_sales"] += o.total
-        report["summary"]["total_cogs"] += sum(
-            ((item.unit_cost if item.unit_cost is not None else (item.product.cost if item.product else 0.0)) * item.quantity)
-            for item in o.items
+        report["summary"]["total_sales"] = money(report["summary"]["total_sales"] + money(o.total))
+        report["summary"]["total_cogs"] = money(
+            report["summary"]["total_cogs"] + sum(
+                money(
+                    (item.unit_cost if item.unit_cost is not None else (item.product.cost if item.product else ZERO))
+                    * item.quantity
+                )
+                for item in o.items
+            )
         )
-        report["summary"]["total_service_charge"] += service_amount
-        report["summary"]["total_partial_payments"] += o.partial_payment + o.partial_service_charge
-        report["summary"]["total_card_fees"] += close_fee
-        report["summary"]["gross_total"] += final
-
         waiter_name = _resolve_waiter_name(o)
-        waiter_totals[waiter_name]["service_charge"] += service_amount
         waiter_totals[waiter_name]["orders"] += 1
-        waiter_totals[waiter_name]["sales"] += o.total
+        waiter_totals[waiter_name]["sales"] = money(waiter_totals[waiter_name]["sales"] + money(o.total))
 
         table_label = o.table.label if o.table else "Balcão"
-        table_totals[table_label]["total"] += o.total
+        table_totals[table_label]["total"] = money(table_totals[table_label]["total"] + money(o.total))
         table_totals[table_label]["orders"] += 1
 
         for item in o.items:
             item_totals[item.product.name]["quantity"] += item.quantity
-            item_totals[item.product.name]["total"] += item.unit_price * item.quantity
-
-        # Final payment grouped by the method chosen at close.
-        if final > 0:
-            close_hour = local_hour_label(o.closed_at) if o.closed_at else "00:00"
-            hour_totals[close_hour] += final
-            if close_method not in method_totals:
-                method_totals[close_method] = {
-                    "gross": 0.0,
-                    "fee_pct": card_fee_rates.get(close_method, 0.0),
-                    "fee": 0.0,
-                    "net": 0.0,
-                    "count": 0,
-                }
-            method_totals[close_method]["gross"] += final
-            method_totals[close_method]["fee"] += close_fee
-            method_totals[close_method]["net"] += final - close_fee
-            method_totals[close_method]["count"] += 1
-
-        # Partial payments grouped by their actual method and hour.
-        for pd in o.partial_payments_detail or []:
-            p_amount = float(pd.get("amount", 0))
-            if p_amount <= 0:
-                continue
-            if not _partial_in_window(pd, start, end, o.closed_at):
-                continue
-            p_method = pd.get("method", "nao_informado")
-            p_card_machine = pd.get("card_machine")
-            p_fee = await _card_fee_for_order_payment(p_amount, p_method, p_card_machine, db, card_fee_rates)
-
-            report["summary"]["total_card_fees"] += p_fee
-            report["summary"]["gross_total"] += p_amount
-
-            p_created_at = pd.get("created_at")
-            if isinstance(p_created_at, str):
-                try:
-                    p_paid_at = datetime.fromisoformat(p_created_at)
-                except ValueError:
-                    p_paid_at = o.closed_at
-            else:
-                p_paid_at = p_created_at or o.closed_at
-            p_hour = local_hour_label(p_paid_at) if p_paid_at else "00:00"
-            hour_totals[p_hour] += p_amount
-
-            if p_method not in method_totals:
-                method_totals[p_method] = {
-                    "gross": 0.0,
-                    "fee_pct": card_fee_rates.get(p_method, 0.0),
-                    "fee": 0.0,
-                    "net": 0.0,
-                    "count": 0,
-                }
-            method_totals[p_method]["gross"] += p_amount
-            method_totals[p_method]["fee"] += p_fee
-            method_totals[p_method]["net"] += p_amount - p_fee
-            method_totals[p_method]["count"] += 1
+            item_totals[item.product.name]["total"] = money(
+                item_totals[item.product.name]["total"] + money(item.unit_price * item.quantity)
+            )
 
         report["orders"].append(
             {
                 "order_id": o.id,
                 "table": table_label,
                 "waiter": waiter_name,
-                "total": float(o.total),
-                "service_charge": round(service_amount, 2),
-                "partial_payment": float(o.partial_payment),
-                "partial_service_charge": float(o.partial_service_charge),
-                "final_total": round(final, 2),
+                "total": as_float(o.total),
+                "service_charge": as_float(service_amount),
+                "partial_payment": as_float(o.partial_payment),
+                "partial_service_charge": as_float(o.partial_service_charge),
+                "final_total": as_float(final),
                 "payment_method": close_method,
                 "closed_at": as_local(o.closed_at).strftime("%H:%M") if o.closed_at else "",
             }
         )
 
-    await _add_consignment_payments_to_report(
-        start, end, db, report, method_totals, card_fee_rates, hour_totals, item_totals, waiter_totals
+    await _add_direct_payments_to_report(
+        start,
+        end,
+        db,
+        report,
+        method_totals,
+        hour_totals,
+        waiter_totals,
     )
-    # COGS integral das consignadas CRIADAS no período (custo congelado na venda).
-    report["summary"]["total_cogs"] += await _consignment_cogs_in_period(start, end, db)
-    # Repasse ao garçom só quando o consignado é 100% pago no período.
+    await _add_consignment_payments_to_report(
+        start,
+        end,
+        db,
+        report,
+        method_totals,
+        hour_totals,
+        item_totals,
+        waiter_totals,
+    )
+    # Recognize frozen consignment COGS when the credit sale is created.
+    report["summary"]["total_cogs"] = money(
+        report["summary"]["total_cogs"]
+        + await _consignment_cogs_in_period(start, end, db)
+    )
+    # Credit the waiter only after the consignment is fully paid.
     tips = await _consignment_tips_paid_in_period(start, end, db)
-    report["summary"]["total_service_charge"] += sum(tips.values())
+    report["summary"]["total_service_charge"] = money(
+        report["summary"]["total_service_charge"] + sum(tips.values(), ZERO)
+    )
     for waiter_name, tip_amount in tips.items():
-        waiter_totals[waiter_name]["service_charge"] += tip_amount
+        waiter_totals[waiter_name]["service_charge"] = money(
+            waiter_totals[waiter_name]["service_charge"] + tip_amount
+        )
+    await _add_consignment_sale_rankings(
+        start, end, db, item_totals, waiter_totals
+    )
+    await _apply_refunds_to_report(
+        start,
+        end,
+        db,
+        report,
+        method_totals,
+        hour_totals,
+        item_totals,
+        waiter_totals,
+        table_totals,
+    )
     await _add_consignment_summary(start, end, db, report)
 
-    report["summary"]["total_sales"] = round(report["summary"]["total_sales"], 2)
-    report["summary"]["total_cogs"] = round(report["summary"]["total_cogs"], 2)
-    report["summary"]["gross_profit"] = round(
-        report["summary"]["total_sales"] - report["summary"]["total_cogs"], 2
-    )
-    report["summary"]["total_service_charge"] = round(report["summary"]["total_service_charge"], 2)
-    report["summary"]["total_partial_payments"] = round(report["summary"]["total_partial_payments"], 2)
-    report["summary"]["total_card_fees"] = round(report["summary"]["total_card_fees"], 2)
-    report["summary"]["total_expenses"] = round(report["summary"]["total_expenses"], 2)
-    report["summary"]["operating_expenses"] = round(
-        report["summary"]["total_card_fees"] + report["summary"]["total_expenses"], 2
-    )
-    report["summary"]["net_profit"] = round(
-        report["summary"]["gross_profit"] - report["summary"]["operating_expenses"], 2
-    )
-    report["summary"]["gross_total"] = round(report["summary"]["gross_total"], 2)
-    report["summary"]["net_total"] = round(
-        report["summary"]["gross_total"]
-        - report["summary"]["total_service_charge"]
-        - report["summary"]["total_card_fees"]
-        - report["summary"]["total_expenses"],
-        2,
-    )
-
-    for method, values in method_totals.items():
-        method_totals[method]["gross"] = round(values["gross"], 2)
-        method_totals[method]["fee"] = round(values["fee"], 2)
-        method_totals[method]["net"] = round(values["net"], 2)
-
-    for waiter, values in waiter_totals.items():
-        waiter_totals[waiter]["service_charge"] = round(values["service_charge"], 2)
-        waiter_totals[waiter]["sales"] = round(values["sales"], 2)
-
-    for table, values in table_totals.items():
-        table_totals[table]["total"] = round(values["total"], 2)
-
-    report["by_payment_method"] = method_totals
-    report["by_waiter"] = dict(waiter_totals)
-    report["by_table"] = dict(table_totals)
-    report["by_hour"] = dict(sorted(hour_totals.items()))
-    report["items_ranking"] = sorted(
-        [
-            {"name": k, "quantity": v["quantity"], "total": round(v["total"], 2)}
-            for k, v in item_totals.items()
-        ],
-        key=lambda x: x["total"],
-        reverse=True,
+    _finalize_report_totals(
+        report,
+        method_totals,
+        waiter_totals,
+        table_totals,
+        hour_totals,
+        item_totals,
     )
 
     return report
-
-
-async def _sync_session_cash_position(
-    order_closed_at: datetime | None,
-    db: AsyncSession,
-) -> None:
-    """Recalculate the automatic cash position movements for a closed session.
-
-    After a sale is reversed (estorno) or reopened, the automatic movements
-    ("Fechamento de caixa" and "Taxa de cartão") persisted when the session was
-    closed are updated to reflect the current state of that session.
-    """
-    if not order_closed_at:
-        return
-    session_result = await db.execute(
-        select(CashRegisterSession).where(
-            CashRegisterSession.status == "closed",
-            CashRegisterSession.opened_at <= order_closed_at,
-            CashRegisterSession.closed_at >= order_closed_at,
-        )
-    )
-    session = session_result.scalar_one_or_none()
-    if not session:
-        return
-
-    metrics = await compute_session_close_metrics(session, db)
-
-    movements_result = await db.execute(
-        select(CashPositionMovement).where(
-            CashPositionMovement.session_id == session.id,
-            CashPositionMovement.source == "automatico",
-        )
-    )
-    movements = movements_result.scalars().all()
-    close_movement = next((m for m in movements if m.title == "Fechamento de caixa"), None)
-    fee_movement = next((m for m in movements if m.title == "Taxa de cartão"), None)
-
-    target_gross = metrics["gross_total"]
-    target_fees = metrics["card_fees"]
-
-    if close_movement:
-        if target_gross > 0:
-            close_movement.amount = target_gross
-        else:
-            await db.delete(close_movement)
-    elif target_gross > 0:
-        db.add(CashPositionMovement(
-            type="entrada",
-            source="automatico",
-            title="Fechamento de caixa",
-            amount=target_gross,
-            session_id=session.id,
-        ))
-
-    if fee_movement:
-        if target_fees > 0:
-            fee_movement.amount = target_fees
-        else:
-            await db.delete(fee_movement)
-    elif target_fees > 0:
-        db.add(CashPositionMovement(
-            type="saida",
-            source="automatico",
-            title="Taxa de cartão",
-            amount=target_fees,
-            session_id=session.id,
-        ))
-
-
-async def _load_reversal_order(order_id: int, db: AsyncSession) -> Order | None:
-    result = await db.execute(
-        select(Order)
-        .where(Order.id == order_id)
-        .options(
-            selectinload(Order.table),
-            selectinload(Order.items).selectinload(OrderItem.product),
-        )
-    )
-    return result.scalars().first()
 
 
 @router.get("/vendas")
@@ -1223,7 +1383,7 @@ async def list_sales(
 
     query = (
         select(Order)
-        .where(Order.status == "finalizada")
+        .where(Order.status == "finalizada", Order.is_estorno == False)
         .options(
             selectinload(Order.table),
             selectinload(Order.waiter),
@@ -1231,6 +1391,8 @@ async def list_sales(
             selectinload(Order.closed_waiter),
             selectinload(Order.customer),
             selectinload(Order.items).selectinload(OrderItem.product),
+            selectinload(Order.payments),
+            selectinload(Order.refunds),
         )
         .order_by(Order.closed_at.desc())
     )
@@ -1246,159 +1408,146 @@ async def list_sales(
     orders = result.scalars().all()
 
     data = []
-    total_day = 0.0
-    total_service = 0.0
+    total_day = ZERO
+    total_service = await _direct_service_in_period(day_start, day_end, db)
     counted_orders = 0
 
-    # Vendas fiado só entram no módulo quando totalmente quitadas (ConsignmentOrder status "pago").
-    fiado_order_ids = [o.id for o in orders if o.payment_method == "fiado"]
-    fully_paid_fiado_ids: set[int] = set()
-    if fiado_order_ids:
-        fiado_cons_result = await db.execute(
-            select(ConsignmentOrder.source_order_id).where(
-                ConsignmentOrder.source_order_id.in_(fiado_order_ids),
-                ConsignmentOrder.status == "pago",
-            )
-        )
-        fully_paid_fiado_ids = set(fiado_cons_result.scalars().all())
-
     for o in orders:
-        if o.payment_method == "fiado" and o.id not in fully_paid_fiado_ids:
+        if o.payment_method == "fiado":
             continue
-        total_service += o.service_charge_amount
         data.append(serialize_order_sale(o))
-        total_day += o.total
         counted_orders += 1
 
-    consignment_paid_total = 0.0
+    sales_total_query = select(func.coalesce(func.sum(Order.total), 0)).where(
+        Order.status == "finalizada",
+        or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
+    )
+    if day_start is not None and day_end is not None:
+        sales_total_query = sales_total_query.where(
+            Order.closed_at >= day_start,
+            Order.closed_at <= day_end,
+        )
+    total_day = money(await db.scalar(sales_total_query))
+
+    consignment_paid_total = ZERO
     if day_start is not None and day_end is not None:
         consignment_payments = await fetch_consignment_payments(day_start, day_end, db)
-        consignment_paid_total = sum(
-            round(max(0.0, float(p.amount) - float(p.service_portion or 0)), 2)
-            for p in consignment_payments
+        consignment_paid_total = money(
+            sum((payment.product_portion for payment in consignment_payments), ZERO)
         )
+        total_day = money(total_day + consignment_paid_total)
+        total_service = money(
+            total_service
+            + money(
+                sum(
+                    (await _consignment_tips_paid_in_period(day_start, day_end, db)).values(),
+                    ZERO,
+                )
+            )
+        )
+
+    refund_query = select(
+        func.coalesce(
+            func.sum(
+                case(
+                    (
+                        PaymentRefund.sale_was_recognized == True,
+                        PaymentRefund.product_amount,
+                    ),
+                    else_=0,
+                )
+            ),
+            0,
+        ),
+        func.coalesce(
+            func.sum(
+                case(
+                    (
+                        and_(
+                            PaymentRefund.service_was_recognized == True,
+                            PaymentRefund.service_already_repassed == False,
+                        ),
+                        PaymentRefund.service_amount,
+                    ),
+                    else_=0,
+                )
+            ),
+            0,
+        ),
+    )
+    if day_start is not None and day_end is not None:
+        refund_query = refund_query.where(
+            PaymentRefund.created_at >= day_start,
+            PaymentRefund.created_at <= day_end,
+        )
+    refunded_product, refundable_service = (await db.execute(refund_query)).one()
+    total_day = money(total_day - money(refunded_product))
+    total_service = money(total_service - money(refundable_service))
 
     return {
         "sales": data,
         "summary": {
-            "total_sales": round(total_day, 2),
-            "total_service_charge": round(total_service, 2),
+            "total_sales": as_float(total_day),
+            "total_service_charge": as_float(total_service),
             "orders_count": counted_orders,
             "consignment_paid": round(consignment_paid_total, 2),
         },
     }
 
 
-def _order_cash_received(order: Order) -> float:
-    """Total cash (dinheiro) received for an order: cash partials + cash close."""
-    total = 0.0
-    for pd in order.partial_payments_detail or []:
-        if pd.get("method") == "dinheiro":
-            total += float(pd.get("amount", 0))
-    if order.payment_method == "dinheiro":
-        remaining_product = max(0.0, order.total - order.partial_payment)
-        remaining_service = (
-            remaining_product * (order.service_charge_pct / 100)
-            if order.service_charge_applied
-            else 0.0
-        )
-        total += remaining_product + remaining_service
-    return total
+class RefundSaleRequest(BaseModel):
+    reason: str = Field(default="Estorno solicitado pelo gerente", min_length=3, max_length=500)
+    idempotency_key: str | None = Field(default=None, max_length=64)
 
 
 @router.delete("/vendas/{order_id}")
 async def estornar_venda(
     order_id: int,
+    req: RefundSaleRequest | None = None,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     if user.role != "gerente":
         raise HTTPException(status_code=403, detail="Acesso restrito ao gerente")
 
-    order = await _load_reversal_order(order_id, db)
-    if not order:
-        raise HTTPException(status_code=404, detail="Venda não encontrada")
-
-    if order.status != "finalizada":
-        return {"error": "Apenas vendas finalizadas podem ser estornadas"}
-
-    linked_consignment = None
-    consignment_result = await db.execute(
-        select(ConsignmentOrder).where(ConsignmentOrder.source_order_id == order_id)
+    open_session = await db.scalar(
+        select(CashRegisterSession)
+        .where(CashRegisterSession.status == "open")
+        .with_for_update()
     )
-    linked_consignment = consignment_result.scalars().first()
+    if not open_session:
+        return {"error": "Abra o caixa antes de registrar o estorno"}
 
-    stock_broadcast_infos = []
-
-    if linked_consignment is not None:
-        if linked_consignment.status == "pago" or linked_consignment.amount_paid > 0:
-            return {
-                "error": (
-                    "A consignação (fiado) vinculada a esta venda já recebeu pagamentos. "
-                    "Não é possível estornar automaticamente."
-                )
-            }
-        if linked_consignment.status != "cancelado":
-            products_to_broadcast = await _return_stock_for_items(db, linked_consignment.id)
-            for p in products_to_broadcast:
-                stock_broadcast_infos.append(_build_stock_broadcast_info(p))
-            linked_consignment.status = "cancelado"
-            linked_consignment.closed_at = datetime.now(timezone.utc)
-            linked_consignment.balance = 0.0
-    else:
-        for item in order.items:
-            product = item.product
-            if not product:
-                continue
-            try:
-                stock_product, unit_quantity = await _resolve_pack_stock(db, product, item.quantity)
-            except ValueError:
-                stock_product = product
-                unit_quantity = item.quantity
-            stock_product.stock += unit_quantity
-            stock_broadcast_infos.append(_build_stock_broadcast_info(product))
-            if is_pack(product):
-                stock_broadcast_infos.append(_build_stock_broadcast_info(stock_product))
-            db.add(StockHistory(
-                product_id=stock_product.id,
-                order_id=order.id,
-                table_id=order.table_id,
-                type="entrada",
-                quantity=unit_quantity,
-                note=f"Estorno da venda #{order.id}",
-            ))
-
-    order.status = "cancelada"
-    order.is_estorno = True
-    await _sync_session_cash_position(order.closed_at, db)
-
-    cash_refund = _order_cash_received(order)
-    if cash_refund > 0:
-        open_cash_result = await db.execute(
-            select(CashRegisterSession).where(CashRegisterSession.status == "open")
+    payload = req or RefundSaleRequest()
+    try:
+        refund = await refund_full_order(
+            db,
+            order_id=order_id,
+            user=user,
+            cash_session=open_session,
+            reason=payload.reason.strip(),
+            idempotency_key=payload.idempotency_key,
         )
-        open_session = open_cash_result.scalar_one_or_none()
-        if open_session:
-            db.add(CashPositionMovement(
-                type="saida",
-                source="manual",
-                title=f"Estorno venda #{order.id}",
-                amount=round(cash_refund, 2),
-                observation="Devolução em dinheiro ao cliente no estorno",
-                session_id=open_session.id,
-                created_by_id=user.id,
-            ))
+    except ValueError as exc:
+        return {"error": str(exc)}
 
     await db.commit()
 
     seen = set()
-    for pid, pstock, pstatus in stock_broadcast_infos:
+    for pid, pstock, pstatus in refund.stock_updates:
         if pid in seen:
             continue
         seen.add(pid)
         await broadcast_stock_update(pid, pstock, pstatus)
 
-    return {"message": "Venda estornada com sucesso", "order_id": order.id}
+    return {
+        "message": "Venda estornada com sucesso",
+        "order_id": order_id,
+        "refund_group_key": refund.group_key,
+        "refund_ids": refund.refund_ids,
+        "refunded_amount": as_float(refund.gross_amount),
+        "idempotent_replay": refund.replayed,
+    }
 
 
 @router.post("/vendas/{order_id}/reabrir")
@@ -1410,68 +1559,12 @@ async def reabrir_venda(
     if user.role != "gerente":
         raise HTTPException(status_code=403, detail="Acesso restrito ao gerente")
 
-    order = await _load_reversal_order(order_id, db)
-    if not order:
-        raise HTTPException(status_code=404, detail="Venda não encontrada")
-
-    if order.status != "cancelada" or not order.is_estorno:
-        return {"error": "Apenas vendas estornadas podem ser reabertas"}
-
-    consignment_result = await db.execute(
-        select(ConsignmentOrder.id).where(ConsignmentOrder.source_order_id == order_id)
-    )
-    if consignment_result.scalars().first() is not None:
-        return {
-            "error": (
-                "Esta venda foi estornada junto com a consignação (fiado) vinculada. "
-                "Não é possível reabrir; registre uma nova venda se necessário."
-            )
-        }
-
-    stock_broadcast_infos = []
-    for item in order.items:
-        product = item.product
-        if not product:
-            continue
-        try:
-            stock_product, unit_quantity = await _resolve_pack_stock(db, product, item.quantity)
-        except ValueError:
-            stock_product = product
-            unit_quantity = item.quantity
-        if stock_product.stock < unit_quantity:
-            available = (
-                stock_product.stock // (product.pack_size or 1)
-                if product.pack_unit_product_id
-                else stock_product.stock
-            )
-            return {
-                "error": (
-                    f"Estoque insuficiente para reabrir a venda. "
-                    f"{product.name} disponível: {available}"
-                )
-            }
-        stock_product.stock -= unit_quantity
-        stock_broadcast_infos.append(_build_stock_broadcast_info(product))
-        if is_pack(product):
-            stock_broadcast_infos.append(_build_stock_broadcast_info(stock_product))
-        db.add(StockHistory(
-            product_id=stock_product.id,
-            order_id=order.id,
-            table_id=order.table_id,
-            type="saida",
-            quantity=unit_quantity,
-            note=f"Reabertura da venda #{order.id}",
-        ))
-
-    order.status = "finalizada"
-    order.is_estorno = False
-    await _sync_session_cash_position(order.closed_at, db)
-    await db.commit()
-
-    for pid, pstock, pstatus in stock_broadcast_infos:
-        await broadcast_stock_update(pid, pstock, pstatus)
-
-    return {"message": "Venda reaberta com sucesso", "order_id": order.id}
+    return {
+        "error": (
+            "Estornos financeiros são imutáveis e não podem ser reabertos. "
+            "Registre uma nova venda se necessário."
+        )
+    }
 
 
 @router.get("/vendas/estornadas")
@@ -1485,7 +1578,7 @@ async def list_estornadas(
 
     query = (
         select(Order)
-        .where(Order.status == "cancelada", Order.is_estorno == True)
+        .where(Order.is_estorno == True)
         .options(
             selectinload(Order.table),
             selectinload(Order.waiter),
@@ -1493,6 +1586,8 @@ async def list_estornadas(
             selectinload(Order.closed_waiter),
             selectinload(Order.customer),
             selectinload(Order.items).selectinload(OrderItem.product),
+            selectinload(Order.payments),
+            selectinload(Order.refunds),
         )
         .order_by(desc(Order.closed_at))
     )
@@ -1501,21 +1596,26 @@ async def list_estornadas(
         filter_date = parse_local_date(date_filter)
         if filter_date:
             day_start, day_end = local_day_to_utc_range(filter_date)
-            query = query.where(Order.closed_at >= day_start, Order.closed_at <= day_end)
+            query = query.where(
+                or_(
+                    Order.refunds.any(
+                        PaymentRefund.created_at.between(day_start, day_end)
+                    ),
+                    and_(
+                        ~Order.refunds.any(),
+                        Order.closed_at.between(day_start, day_end),
+                    ),
+                )
+            )
 
     result = await db.execute(query)
     orders = result.scalars().all()
 
     data = []
-    consignment_order_ids = set()
-    consignment_result = await db.execute(
-        select(ConsignmentOrder.source_order_id).where(ConsignmentOrder.source_order_id.is_not(None))
-    )
-    consignment_order_ids = {row[0] for row in consignment_result.all()}
     for o in orders:
         payload = serialize_order_sale(o)
         payload["can_estornar"] = False
-        payload["can_reabrir"] = o.id not in consignment_order_ids
+        payload["can_reabrir"] = False
         data.append(payload)
 
     return {"estornadas": data}
@@ -1543,8 +1643,6 @@ async def list_consignment_payments(
 
     data = []
     for p in payments:
-        if p.notes and p.notes.startswith("Pagamento parcial da comanda"):
-            continue
         consignment = p.consignment_order
         method = p.payment_method or "nao_informado"
         data.append({
@@ -1556,9 +1654,7 @@ async def list_consignment_payments(
                 else None
             ),
             "waiter_name": (
-                consignment.waiter.name
-                if consignment and consignment.waiter
-                else None
+                consignment.credited_waiter_name if consignment else None
             ),
             "amount": round(float(p.amount), 2),
             "payment_method": method,
@@ -1606,7 +1702,6 @@ async def dashboard(
         sales_result = await db.execute(
             select(
                 func.coalesce(func.sum(Order.total), 0),
-                func.coalesce(func.sum(Order.service_charge_amount), 0),
                 func.count(Order.id),
             ).where(
                 Order.status == "finalizada",
@@ -1615,19 +1710,56 @@ async def dashboard(
                 or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
             )
         )
-        sales_total, service_charge, sales_count = sales_result.one()
+        sales_total, sales_count = sales_result.one()
+        service_charge = await _direct_service_in_period(start, end, db)
 
         payments_result = await db.execute(
             select(
-                func.coalesce(func.sum(ConsignmentPayment.amount - ConsignmentPayment.service_portion), 0),
-                func.coalesce(func.sum(ConsignmentPayment.service_portion), 0),
+                func.coalesce(func.sum(ConsignmentPayment.product_portion), 0),
             ).where(
                 ConsignmentPayment.created_at >= start,
                 ConsignmentPayment.created_at <= end,
             )
         )
-        payments_product, payments_service = payments_result.one()
+        payments_product = payments_result.scalar_one()
         payments_total = float(payments_product)
+
+        refund_result = await db.execute(
+            select(
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                PaymentRefund.sale_was_recognized == True,
+                                PaymentRefund.product_amount,
+                            ),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                and_(
+                                    PaymentRefund.service_was_recognized == True,
+                                    PaymentRefund.service_already_repassed == False,
+                                ),
+                                PaymentRefund.service_amount,
+                            ),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ),
+            ).where(
+                PaymentRefund.created_at >= start,
+                PaymentRefund.created_at <= end,
+            )
+        )
+        refunded_product, refunded_service = refund_result.one()
+        consignment_tips = await _consignment_tips_paid_in_period(start, end, db)
 
         pending_result = await db.execute(
             select(
@@ -1643,8 +1775,14 @@ async def dashboard(
         pending_count, pending_total = pending_result.one()
 
         return {
-            "total": round(float(sales_total) + payments_total, 2),
-            "service_charge": round(float(service_charge) + float(payments_service), 2),
+            "total": as_float(
+                money(sales_total) + money(payments_total) - money(refunded_product)
+            ),
+            "service_charge": as_float(
+                money(service_charge)
+                + money(sum(consignment_tips.values()))
+                - money(refunded_service)
+            ),
             "orders": sales_count,
             "consignments": pending_count,
             "consignments_total": round(float(pending_total), 2),
@@ -1985,4 +2123,3 @@ def _build_pdf_bytes(report: dict, filename_suffix: str) -> io.BytesIO:
     pdf.output(buffer)
     buffer.seek(0)
     return buffer
-

@@ -1,5 +1,7 @@
 from datetime import datetime
-from sqlalchemy import Integer, String, Float, DateTime, ForeignKey, func, Text
+from decimal import Decimal
+
+from sqlalchemy import Integer, String, Numeric, DateTime, ForeignKey, func, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -10,7 +12,7 @@ class Expense(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     description: Mapped[str] = mapped_column(String(255), nullable=False)
-    amount: Mapped[float] = mapped_column(Float, nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     category: Mapped[str] = mapped_column(String(50), nullable=False)
     expense_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     reference_id: Mapped[int | None] = mapped_column(Integer, nullable=True)

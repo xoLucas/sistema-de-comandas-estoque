@@ -1,5 +1,7 @@
 from datetime import datetime
-from sqlalchemy import Integer, String, Float, DateTime, Boolean, ForeignKey, Table, Column, func
+from decimal import Decimal
+
+from sqlalchemy import Integer, String, Numeric, DateTime, Boolean, ForeignKey, Table, Column, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -19,7 +21,7 @@ class Promotion(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(150), nullable=False)
     description: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    discount_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    discount_pct: Mapped[Decimal] = mapped_column(Numeric(7, 4), nullable=False, default=0)
     start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

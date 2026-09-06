@@ -11,6 +11,7 @@ from app.models.order_item import OrderItem
 from app.models.order_round import OrderRound
 from app.models.product import Product
 from app.models.user import User
+from app.models.payment import OrderPaymentAllocation, PaymentRefundItem
 from app.core.timezone import as_local
 from app.routers.auth_deps import get_current_user, require_role
 from app.services.stock_service import is_pack, pack_stock_for_product, stock_status
@@ -98,6 +99,33 @@ async def get_table_detail(
     order_result = await db.execute(order_query)
     open_orders = order_result.scalars().all()
 
+    item_ids = [item.id for order in open_orders for item in order.items]
+    paid_quantity_map: dict[int, int] = {}
+    refunded_quantity_map: dict[int, int] = {}
+    if item_ids:
+        paid_result = await db.execute(
+            select(
+                OrderPaymentAllocation.order_item_id,
+                func.sum(OrderPaymentAllocation.quantity),
+            )
+            .where(OrderPaymentAllocation.order_item_id.in_(item_ids))
+            .group_by(OrderPaymentAllocation.order_item_id)
+        )
+        paid_quantity_map = {
+            item_id: int(quantity or 0) for item_id, quantity in paid_result.all()
+        }
+        refund_result = await db.execute(
+            select(
+                PaymentRefundItem.order_item_id,
+                func.sum(PaymentRefundItem.quantity),
+            )
+            .where(PaymentRefundItem.order_item_id.in_(item_ids))
+            .group_by(PaymentRefundItem.order_item_id)
+        )
+        refunded_quantity_map = {
+            item_id: int(quantity or 0) for item_id, quantity in refund_result.all()
+        }
+
     def _item_payload(item: OrderItem) -> dict:
         product = item.product
         product_stock = pack_stock_for_product(product) if is_pack(product) else product.stock
@@ -106,6 +134,11 @@ async def get_table_detail(
             "product_id": item.product_id,
             "product_name": product.name,
             "quantity": item.quantity,
+            "paid_quantity": max(
+                0,
+                paid_quantity_map.get(item.id, 0)
+                - refunded_quantity_map.get(item.id, 0),
+            ),
             "unit_price": float(item.unit_price),
             "subtotal": float(item.unit_price * item.quantity),
             "category": product.category,

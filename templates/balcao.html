@@ -49,8 +49,11 @@
         </div>
 
         <div class="balcao-cart-actions">
-            <button onclick="showBalcaoCloseModal()" class="btn-primary-full" id="btn-balcao-close" style="font-size:16px;padding:14px;">
+            <button onclick="showBalcaoCloseModal(true)" class="btn-primary-full" id="btn-balcao-close" style="font-size:16px;padding:14px;">
                 Finalizar Venda
+            </button>
+            <button onclick="closeBalcaoOperation()" class="btn-secondary-full" id="btn-balcao-operation" style="padding:12px;">
+                Fechar Balcão
             </button>
             <button onclick="clearBalcaoQuantities()" class="btn-secondary-full" style="padding:12px;">
                 Limpar Comanda
@@ -68,7 +71,7 @@
                 <span id="balcao-close-total">R$ 0,00</span>
             </div>
             <div class="summary-row" id="balcao-service-row" style="display:none;">
-                <span>Taxa serviço (10%)</span>
+                <span>Taxa serviço (<span data-service-charge-pct>…</span>%)</span>
                 <span id="balcao-close-service">R$ 0,00</span>
             </div>
             <div class="summary-row" style="font-size:18px;font-weight:700;border-top:1px solid var(--border);padding-top:8px;margin-top:6px;">
@@ -88,7 +91,7 @@
         <div style="margin-bottom:14px;">
             <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
                 <input type="checkbox" id="balcao-apply-service-charge" onchange="updateBalcaoChange()" style="width:18px;height:18px;accent-color:var(--accent);">
-                Aplicar taxa de serviço (10%)
+                Aplicar taxa de serviço (<span data-service-charge-pct>…</span>%)
             </label>
         </div>
         <div id="balcao-close-card-section" style="display:none;margin-bottom:14px;">

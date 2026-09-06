@@ -186,6 +186,11 @@ async def _rebuild_printer_data(notification, printer_width: int, db) -> bytes |
                     tickets.extend(build_ficha_ticket(store_name, name, printer_width))
             return bytes(tickets) if tickets else None
 
+        receipt_snapshot = details.get("receipt_data")
+        if receipt_snapshot:
+            store_info = details.get("receipt_store_info") or {}
+            return build_order_receipt(receipt_snapshot, store_info, printer_width)
+
         order_data = {
             "order_id": order_id,
             "table_label": details.get("table_label", "Balcão"),
@@ -195,6 +200,9 @@ async def _rebuild_printer_data(notification, printer_width: int, db) -> bytes |
             "service_charge_pct": float(details.get("service_charge_pct", 0)),
             "service_charge_amount": float(details.get("service_charge_amount", 0)),
             "partial_payment": float(details.get("partial_payment", 0)),
+            "partial_service_charge": float(
+                details.get("partial_service_charge", 0)
+            ),
             "final_total": float(details.get("final_total", 0)),
             "payment_method": details.get("payment_method", ""),
         }

@@ -31,11 +31,18 @@ from app.models.cash_register_movement import CashRegisterMovement
 from app.models.expense import Expense
 from app.models.stock_history import StockHistory
 from app.models.cash_position_movement import CashPositionMovement
+from app.models.payment import PaymentRefund, PaymentRefundItem
 from app.routers.auth_deps import get_current_user
-from app.routers.financial import compute_period_profit, _consignment_tips_paid_in_period
+from app.routers.financial import (
+    compute_period_profit,
+    _consignment_tips_paid_in_period,
+    _direct_service_in_period,
+    _resolve_waiter_name,
+)
 from app.services.cash_service import compute_payment_breakdown
 from app.services.stock_service import stock_status, is_pack, pack_stock_for_product
 from app.services.consignment_service import fetch_consignment_payments
+from app.services.money_service import ZERO, as_float, money
 
 router = APIRouter(prefix="/api/dashboards", tags=["dashboards"])
 
@@ -83,11 +90,10 @@ async def dashboard_geral(
 
     start_dt, end_dt, start_local, end_local = _parse_dates(start_date, end_date, default_days=1)
 
-    # Vendas no período
+    # Direct product sales recognized when the order is closed.
     sales_result = await db.execute(
         select(
             func.coalesce(func.sum(Order.total), 0.0),
-            func.coalesce(func.sum(Order.service_charge_amount), 0.0),
             func.count(Order.id),
         ).where(
             Order.status == "finalizada",
@@ -96,21 +102,69 @@ async def dashboard_geral(
             or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
         )
     )
-    sales_total, service_charge, sales_count = sales_result.one()
+    sales_total, sales_count = sales_result.one()
+    service_charge = await _direct_service_in_period(start_dt, end_dt, db)
 
-    # Pagamentos de consignação recebidos no período (só contam como faturamento)
+    # Consignment product revenue is recognized as installments are received.
     consignment_payments = await fetch_consignment_payments(start_dt, end_dt, db)
-    consignment_paid_total = sum(float(p.amount) for p in consignment_payments)
-    # Faturamento usa só a parte de PRODUTO; a gorjeta (service_portion) é repasse ao garçom.
-    consignment_product_total = sum(
-        round(max(0.0, float(p.amount) - float(p.service_portion or 0)), 2) for p in consignment_payments
+    consignment_paid_total = as_float(
+        money(sum((p.amount for p in consignment_payments), ZERO))
     )
-    # Repasse creditado só quando o consignado é 100% pago no período.
+    consignment_product_total = as_float(
+        money(sum((p.product_portion for p in consignment_payments), ZERO))
+    )
+    # Service is credited only when the consignment is fully paid.
     tips = await _consignment_tips_paid_in_period(start_dt, end_dt, db)
     consignment_service_total = sum(tips.values())
-    service_charge = float(service_charge) + consignment_service_total
 
-    # Comandas abertas agora
+    refunds_result = await db.execute(
+        select(PaymentRefund)
+        .where(
+            PaymentRefund.created_at >= start_dt,
+            PaymentRefund.created_at <= end_dt,
+        )
+        .options(
+            selectinload(PaymentRefund.items).selectinload(PaymentRefundItem.product),
+        )
+    )
+    refunds = refunds_result.scalars().all()
+    refunded_product = as_float(
+        money(
+            sum(
+                (
+                    refund.product_amount
+                    for refund in refunds
+                    if refund.sale_was_recognized
+                ),
+                ZERO,
+            )
+        )
+    )
+    refundable_service = as_float(
+        money(
+            sum(
+                (
+                    refund.service_amount
+                    for refund in refunds
+                    if refund.service_was_recognized
+                    and not refund.service_already_repassed
+                ),
+                ZERO,
+            )
+        )
+    )
+    net_sales_total = as_float(
+        money(sales_total)
+        + money(consignment_product_total)
+        - money(refunded_product)
+    )
+    service_charge = as_float(
+        money(service_charge)
+        + money(consignment_service_total)
+        - money(refundable_service)
+    )
+
+    # Orders currently open.
     open_orders_result = await db.execute(
         select(func.coalesce(func.sum(Order.total), 0.0), func.count(Order.id)).where(
             Order.status == "aberta"
@@ -118,7 +172,7 @@ async def dashboard_geral(
     )
     open_total, open_count = open_orders_result.one()
 
-    # Consignados pendentes (todos, não filtrados por data)
+    # All currently pending consignments.
     consignments_result = await db.execute(
         select(
             func.count(ConsignmentOrder.id),
@@ -130,7 +184,7 @@ async def dashboard_geral(
     )
     consignments_count, consignments_total = consignments_result.one()
 
-    # Consignados criados no período
+    # Consignments created in the selected period.
     consignments_period_result = await db.execute(
         select(
             func.count(ConsignmentOrder.id),
@@ -143,7 +197,7 @@ async def dashboard_geral(
     )
     consignments_period_count, consignments_period_total = consignments_period_result.one()
 
-    # Caixa aberto
+    # Current open cash register.
     cash_result = await db.execute(
         select(CashRegisterSession)
         .where(CashRegisterSession.status == "open")
@@ -166,7 +220,7 @@ async def dashboard_geral(
             "suprimento": round(suprimento, 2),
         }
 
-    # Produtos em falta/risco
+    # Products at risk or out of stock.
     products_result = await db.execute(
         select(Product).options(selectinload(Product.pack_unit_product))
     )
@@ -192,20 +246,9 @@ async def dashboard_geral(
                 "min_stock": p.min_stock,
             })
 
-    # Vendas por hora e formas de pagamento — mesma semântica dos relatórios
-    # financeiros (final no método/hora do fechamento + parciais no próprio
-    # método/hora, com taxa de serviço incluída).
-    breakdown_orders_result = await db.execute(
-        select(Order).where(
-            Order.status == "finalizada",
-            Order.closed_at >= start_dt,
-            Order.closed_at <= end_dt,
-            or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
-        )
-    )
-    breakdown_orders = breakdown_orders_result.scalars().all()
+    # Payment-method and hourly totals use canonical transaction timestamps.
     method_totals, hour_totals = await compute_payment_breakdown(
-        breakdown_orders, consignment_payments, start_dt, end_dt
+        start_dt, end_dt, db
     )
 
     payment_labels = {
@@ -229,7 +272,7 @@ async def dashboard_geral(
         for method, entry in method_totals.items()
     ]
 
-    # Top produtos
+    # Direct-sale product ranking uses the sale date.
     items_result = await db.execute(
         select(
             Product.name,
@@ -246,21 +289,32 @@ async def dashboard_geral(
         )
         .group_by(Product.name)
         .order_by(func.sum(OrderItem.unit_price * OrderItem.quantity).desc())
-        .limit(10)
     )
     top_products = [
         {"name": name, "quantity": int(quantity or 0), "total": round(float(total or 0), 2)}
         for name, quantity, total in items_result.all()
     ]
 
-    # Merge itens dos consignados pagos no top produtos
-    processed_consignment_ids: set[int] = set()
+    # Consignment ranking uses the credit-sale creation date, not payment dates.
+    consignment_sales_result = await db.execute(
+        select(ConsignmentOrder)
+        .where(
+            ConsignmentOrder.created_at >= start_dt,
+            ConsignmentOrder.created_at <= end_dt,
+            or_(
+                ConsignmentOrder.status != "cancelado",
+                ConsignmentOrder.source_order.has(Order.is_estorno == True),
+                ConsignmentOrder.refunds.any(),
+            ),
+        )
+        .options(
+            selectinload(ConsignmentOrder.items).selectinload(
+                ConsignmentOrderItem.product
+            )
+        )
+    )
     consignment_product_totals: dict[str, dict] = {}
-    for p in consignment_payments:
-        consignment = p.consignment_order
-        if not consignment or consignment.id in processed_consignment_ids:
-            continue
-        processed_consignment_ids.add(consignment.id)
+    for consignment in consignment_sales_result.scalars().all():
         for item in consignment.items:
             product = item.product
             if not product:
@@ -268,6 +322,19 @@ async def dashboard_geral(
             entry = consignment_product_totals.setdefault(product.name, {"quantity": 0, "total": 0.0})
             entry["quantity"] += item.quantity
             entry["total"] += float(item.unit_price or 0) * item.quantity
+
+    for refund in refunds:
+        if not refund.sale_was_recognized:
+            continue
+        for item in refund.items:
+            product = item.product
+            if not product:
+                continue
+            entry = consignment_product_totals.setdefault(
+                product.name, {"quantity": 0, "total": 0.0}
+            )
+            entry["quantity"] -= item.quantity
+            entry["total"] -= as_float(item.product_amount)
     top_product_map = {item["name"]: item for item in top_products}
     for name, entry in consignment_product_totals.items():
         if name in top_product_map:
@@ -286,7 +353,7 @@ async def dashboard_geral(
             "Indicador", "Valor", "Periodo Inicio", "Periodo Fim"
         ]
         rows = [
-            ["Faturamento", round(float(sales_total) + consignment_product_total, 2), start_local.isoformat(), end_local.isoformat()],
+            ["Faturamento", net_sales_total, start_local.isoformat(), end_local.isoformat()],
             ["Pagamentos de Consignados", round(float(consignment_paid_total), 2), start_local.isoformat(), end_local.isoformat()],
             ["Taxa de Servico", round(float(service_charge), 2), start_local.isoformat(), end_local.isoformat()],
             ["Comandas Finalizadas", sales_count, start_local.isoformat(), end_local.isoformat()],
@@ -304,7 +371,7 @@ async def dashboard_geral(
     return {
         "period": {"start": start_local.isoformat(), "end": end_local.isoformat()},
         "sales": {
-            "total": round(float(sales_total) + consignment_product_total, 2),
+            "total": net_sales_total,
             "service_charge": round(float(service_charge), 2),
             "orders_count": sales_count,
             "consignment_paid": round(float(consignment_paid_total), 2),
@@ -344,14 +411,73 @@ async def dashboard_vendas(
 
     start_dt, end_dt, start_local, end_local = _parse_dates(start_date, end_date, default_days=7)
 
-    # Pagamentos de consignação recebidos no período (só pagos contam como faturamento)
+    # Consignment revenue follows the installment payment date.
     consignment_payments = await fetch_consignment_payments(start_dt, end_dt, db)
-    consignment_paid_total = sum(float(p.amount) for p in consignment_payments)
-    consignment_product_total = sum(
-        round(max(0.0, float(p.amount) - float(p.service_portion or 0)), 2) for p in consignment_payments
+    consignment_paid_total = as_float(
+        money(sum((payment.amount for payment in consignment_payments), ZERO))
+    )
+    consignment_product_total = as_float(
+        money(
+            sum((payment.product_portion for payment in consignment_payments), ZERO)
+        )
     )
 
-    # Vendas por dia
+    refunds_result = await db.execute(
+        select(PaymentRefund)
+        .where(
+            PaymentRefund.created_at >= start_dt,
+            PaymentRefund.created_at <= end_dt,
+        )
+        .options(
+            selectinload(PaymentRefund.items).selectinload(PaymentRefundItem.product),
+            selectinload(PaymentRefund.order).selectinload(Order.table),
+            selectinload(PaymentRefund.order).selectinload(Order.waiter),
+            selectinload(PaymentRefund.order).selectinload(Order.closed_by),
+            selectinload(PaymentRefund.order).selectinload(Order.closed_waiter),
+            selectinload(PaymentRefund.consignment_order).selectinload(
+                ConsignmentOrder.waiter
+            ),
+            selectinload(PaymentRefund.consignment_order).selectinload(
+                ConsignmentOrder.credited_waiter
+            ),
+        )
+    )
+    refunds = refunds_result.scalars().all()
+    refunded_product_total = as_float(
+        money(
+            sum(
+                (
+                    refund.product_amount
+                    for refund in refunds
+                    if refund.sale_was_recognized
+                ),
+                ZERO,
+            )
+        )
+    )
+
+    consignment_sales_result = await db.execute(
+        select(ConsignmentOrder)
+        .where(
+            ConsignmentOrder.created_at >= start_dt,
+            ConsignmentOrder.created_at <= end_dt,
+            or_(
+                ConsignmentOrder.status != "cancelado",
+                ConsignmentOrder.source_order.has(Order.is_estorno == True),
+                ConsignmentOrder.refunds.any(),
+            ),
+        )
+        .options(
+            selectinload(ConsignmentOrder.items).selectinload(
+                ConsignmentOrderItem.product
+            ),
+            selectinload(ConsignmentOrder.waiter),
+            selectinload(ConsignmentOrder.credited_waiter),
+        )
+    )
+    consignment_sales = consignment_sales_result.scalars().all()
+
+    # Revenue by day uses each revenue or refund transaction date.
     daily_expr = cast(func.timezone("America/Sao_Paulo", Order.closed_at), Date)
     daily_result = await db.execute(
         select(
@@ -371,18 +497,31 @@ async def dashboard_vendas(
         for day, total, count in daily_result.all()
     ]
 
-    # Merge pagamentos de consignação nas vendas por dia
+    # Add consignment product installments to their payment day.
     consignment_by_day: dict[str, float] = {}
     for p in consignment_payments:
         if p.created_at:
             day_key = as_local(p.created_at).date().isoformat()
-            consignment_by_day[day_key] = consignment_by_day.get(day_key, 0.0) + float(p.amount)
+            consignment_by_day[day_key] = (
+                consignment_by_day.get(day_key, 0.0)
+                + as_float(p.product_portion)
+            )
     sales_by_day_map = {item["date"]: item for item in sales_by_day}
     for day_key, amount in consignment_by_day.items():
         if day_key in sales_by_day_map:
             sales_by_day_map[day_key]["total"] = round(sales_by_day_map[day_key]["total"] + amount, 2)
         else:
             sales_by_day_map[day_key] = {"date": day_key, "total": round(amount, 2), "orders": 0}
+    for refund in refunds:
+        if not refund.created_at or not refund.sale_was_recognized:
+            continue
+        day_key = as_local(refund.created_at).date().isoformat()
+        entry = sales_by_day_map.setdefault(
+            day_key, {"date": day_key, "total": 0.0, "orders": 0}
+        )
+        entry["total"] = as_float(
+            money(entry["total"]) - money(refund.product_amount)
+        )
     sales_by_day = [sales_by_day_map[k] for k in sorted(sales_by_day_map.keys())]
 
     # Por categoria
@@ -493,19 +632,25 @@ async def dashboard_vendas(
             "total": round(float(total), 2),
             "orders": count,
         })
+    table_map = {entry["id"]: entry for entry in by_table}
+    for refund in refunds:
+        if (
+            not refund.sale_was_recognized
+            or refund.payment_id is None
+            or not refund.order
+            or not refund.order.table
+        ):
+            continue
+        table_entry = table_map.get(refund.order.table.id)
+        if table_entry:
+            table_entry["total"] = as_float(
+                money(table_entry["total"]) - money(refund.product_amount)
+            )
+    by_table.sort(key=lambda entry: entry["total"], reverse=True)
 
-    # Formas de pagamento — mesma semântica dos relatórios financeiros
-    breakdown_orders_result = await db.execute(
-        select(Order).where(
-            Order.status == "finalizada",
-            Order.closed_at >= start_dt,
-            Order.closed_at <= end_dt,
-            or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
-        )
-    )
-    breakdown_orders = breakdown_orders_result.scalars().all()
+    # Payment totals use canonical transaction timestamps.
     method_totals, _ = await compute_payment_breakdown(
-        breakdown_orders, consignment_payments, start_dt, end_dt
+        start_dt, end_dt, db
     )
     payment_labels = {
         "dinheiro": "Dinheiro",
@@ -524,14 +669,9 @@ async def dashboard_vendas(
         for method, entry in method_totals.items()
     ]
 
-    # Merge pagamentos de consignação em produto/categoria (só pagamentos contam)
-    processed_consignment_ids: set[int] = set()
+    # Product and category rankings recognize consignments at creation.
     consignment_product_totals: dict[str, dict] = {}
-    for p in consignment_payments:
-        consignment = p.consignment_order
-        if not consignment or consignment.id in processed_consignment_ids:
-            continue
-        processed_consignment_ids.add(consignment.id)
+    for consignment in consignment_sales:
         for item in consignment.items:
             product = item.product
             if not product:
@@ -540,7 +680,21 @@ async def dashboard_vendas(
             entry["quantity"] += item.quantity
             entry["total"] += float(item.unit_price or 0) * item.quantity
 
-    # Merge em by_product
+    for refund in refunds:
+        if not refund.sale_was_recognized:
+            continue
+        for item in refund.items:
+            product = item.product
+            if not product:
+                continue
+            entry = consignment_product_totals.setdefault(
+                product.name,
+                {"quantity": 0, "total": 0.0, "category": product.category},
+            )
+            entry["quantity"] -= item.quantity
+            entry["total"] -= as_float(item.product_amount)
+
+    # Merge into the direct-sale product ranking.
     by_product_map = {prod["name"]: prod for prod in by_product}
     for name, entry in consignment_product_totals.items():
         if name in by_product_map:
@@ -554,7 +708,7 @@ async def dashboard_vendas(
             }
     by_product = sorted(by_product_map.values(), key=lambda x: x["total"], reverse=True)
 
-    # Merge em by_category
+    # Merge into the direct-sale category ranking.
     consignment_category_totals: dict[str, dict] = {}
     for entry in consignment_product_totals.values():
         cat = entry["category"]
@@ -574,15 +728,30 @@ async def dashboard_vendas(
             }
     by_category = sorted(by_category_map.values(), key=lambda x: x["total"], reverse=True)
 
-    # Merge em by_waiter (atribuído ao garçom do consignado)
+    # Waiter ranking recognizes consignments at creation and refunds when issued.
     consignment_waiter_totals: dict[str, float] = {}
-    for p in consignment_payments:
-        consignment = p.consignment_order
-        if not consignment or not consignment.waiter:
-            consignment_waiter_totals["N/A"] = consignment_waiter_totals.get("N/A", 0.0) + float(p.amount)
+    for consignment in consignment_sales:
+        waiter_name = consignment.credited_waiter_name or "N/A"
+        consignment_waiter_totals[waiter_name] = (
+            consignment_waiter_totals.get(waiter_name, 0.0)
+            + as_float(consignment.product_total)
+        )
+    for refund in refunds:
+        if not refund.sale_was_recognized:
             continue
-        waiter_name = consignment.waiter.name or "N/A"
-        consignment_waiter_totals[waiter_name] = consignment_waiter_totals.get(waiter_name, 0.0) + float(p.amount)
+        if refund.order:
+            waiter_name = _resolve_waiter_name(refund.order)
+        elif refund.consignment_order:
+            waiter_name = refund.consignment_order.credited_waiter_name or "N/A"
+        else:
+            continue
+        reversed_sale_product = as_float(
+            money(sum((item.product_amount for item in refund.items), ZERO))
+        )
+        consignment_waiter_totals[waiter_name] = (
+            consignment_waiter_totals.get(waiter_name, 0.0)
+            - reversed_sale_product
+        )
     by_waiter_map = {w["name"]: w for w in by_waiter}
     for waiter_name, amount in consignment_waiter_totals.items():
         if waiter_name in by_waiter_map:
@@ -591,7 +760,7 @@ async def dashboard_vendas(
             by_waiter_map[waiter_name] = {"name": waiter_name, "total": round(amount, 2), "orders": 0}
     by_waiter = sorted(by_waiter_map.values(), key=lambda x: x["total"], reverse=True)
 
-    # Resumo
+    # Revenue summary.
     summary_result = await db.execute(
         select(
             func.coalesce(func.sum(Order.total), 0.0),
@@ -614,7 +783,11 @@ async def dashboard_vendas(
     return {
         "period": {"start": start_local.isoformat(), "end": end_local.isoformat()},
         "summary": {
-            "total_sales": round(float(total_sales) + consignment_product_total, 2),
+            "total_sales": as_float(
+                money(total_sales)
+                + money(consignment_product_total)
+                - money(refunded_product_total)
+            ),
             "orders_count": orders_count,
             "ticket_medio": ticket_medio,
             "consignment_paid": round(float(consignment_paid_total), 2),
@@ -763,7 +936,7 @@ async def dashboard_clientes(
             "created_at": c.created_at.isoformat() if c.created_at else None,
         })
 
-    # Top clientes por consumo
+    # Customer consumption is recognized at sale/consignment creation.
     top_customers_result = await db.execute(
         select(
             Customer.id,
@@ -778,31 +951,69 @@ async def dashboard_clientes(
         )
         .group_by(Customer.id, Customer.name)
         .order_by(func.coalesce(func.sum(Order.total), 0.0).desc())
-        .limit(10)
     )
     top_customers = [
         {"id": cid, "name": name, "total": round(float(total), 2), "orders": count}
         for cid, name, total, count in top_customers_result.all()
     ]
 
-    # Merge pagamentos de consignação por cliente (só pagamentos contam)
-    consignment_payments = await fetch_consignment_payments(
-        datetime.min.replace(tzinfo=timezone.utc),
-        datetime.max.replace(tzinfo=timezone.utc),
-        db,
-    )
-    consignment_customer_totals: dict[int, float] = {}
-    for p in consignment_payments:
-        consignment = p.consignment_order
-        if not consignment or not consignment.customer_id:
-            continue
-        consignment_customer_totals[consignment.customer_id] = (
-            consignment_customer_totals.get(consignment.customer_id, 0.0) + float(p.amount)
+    consignment_customer_result = await db.execute(
+        select(
+            ConsignmentOrder.customer_id,
+            func.coalesce(func.sum(ConsignmentOrder.product_total), 0),
+            func.count(ConsignmentOrder.id),
         )
+        .where(
+            or_(
+                ConsignmentOrder.status != "cancelado",
+                ConsignmentOrder.source_order.has(Order.is_estorno == True),
+                ConsignmentOrder.refunds.any(),
+            )
+        )
+        .group_by(ConsignmentOrder.customer_id)
+    )
+    consignment_customer_totals = {
+        customer_id: {"total": as_float(total), "orders": int(count)}
+        for customer_id, total, count in consignment_customer_result.all()
+    }
+    refund_customer_id = func.coalesce(
+        Order.customer_id,
+        ConsignmentOrder.customer_id,
+    )
+    refunded_customer_result = await db.execute(
+        select(
+            refund_customer_id,
+            func.coalesce(func.sum(PaymentRefundItem.product_amount), 0),
+        )
+        .join(PaymentRefund, PaymentRefund.id == PaymentRefundItem.refund_id)
+        .outerjoin(Order, Order.id == PaymentRefund.order_id)
+        .outerjoin(
+            ConsignmentOrder,
+            ConsignmentOrder.id == PaymentRefund.consignment_order_id,
+        )
+        .where(refund_customer_id.isnot(None))
+        .where(PaymentRefund.sale_was_recognized == True)
+        .group_by(refund_customer_id)
+    )
+    refunded_customer_totals = {
+        customer_id: as_float(total)
+        for customer_id, total in refunded_customer_result.all()
+    }
     top_customers_map = {c["id"]: c for c in top_customers}
-    for customer_id, amount in consignment_customer_totals.items():
+    customer_ids = set(consignment_customer_totals) | set(refunded_customer_totals)
+    for customer_id in customer_ids:
+        adjustment = consignment_customer_totals.get(
+            customer_id, {"total": 0.0, "orders": 0}
+        )
+        net_adjustment = adjustment["total"] - refunded_customer_totals.get(
+            customer_id, 0.0
+        )
         if customer_id in top_customers_map:
-            top_customers_map[customer_id]["total"] = round(top_customers_map[customer_id]["total"] + amount, 2)
+            top_customers_map[customer_id]["total"] = as_float(
+                money(top_customers_map[customer_id]["total"])
+                + money(net_adjustment)
+            )
+            top_customers_map[customer_id]["orders"] += adjustment["orders"]
         else:
             customer_result = await db.execute(select(Customer).where(Customer.id == customer_id))
             customer = customer_result.scalars().first()
@@ -810,8 +1021,8 @@ async def dashboard_clientes(
                 top_customers_map[customer_id] = {
                     "id": customer.id,
                     "name": customer.name,
-                    "total": round(amount, 2),
-                    "orders": 0,
+                    "total": round(net_adjustment, 2),
+                    "orders": adjustment["orders"],
                 }
     top_customers = sorted(top_customers_map.values(), key=lambda x: x["total"], reverse=True)[:10]
 
@@ -864,8 +1075,44 @@ async def dashboard_funcionarios(
 
     start_dt, end_dt, start_local, end_local = _parse_dates(start_date, end_date, default_days=7)
 
-    # Pagamentos de consignação recebidos no período
-    consignment_payments = await fetch_consignment_payments(start_dt, end_dt, db)
+    consignment_sales_result = await db.execute(
+        select(ConsignmentOrder)
+        .where(
+            ConsignmentOrder.created_at >= start_dt,
+            ConsignmentOrder.created_at <= end_dt,
+            or_(
+                ConsignmentOrder.status != "cancelado",
+                ConsignmentOrder.source_order.has(Order.is_estorno == True),
+                ConsignmentOrder.refunds.any(),
+            ),
+        )
+        .options(
+            selectinload(ConsignmentOrder.waiter),
+            selectinload(ConsignmentOrder.credited_waiter),
+        )
+    )
+    consignment_sales = consignment_sales_result.scalars().all()
+
+    refunds_result = await db.execute(
+        select(PaymentRefund)
+        .where(
+            PaymentRefund.created_at >= start_dt,
+            PaymentRefund.created_at <= end_dt,
+        )
+        .options(
+            selectinload(PaymentRefund.items),
+            selectinload(PaymentRefund.order).selectinload(Order.waiter),
+            selectinload(PaymentRefund.order).selectinload(Order.closed_by),
+            selectinload(PaymentRefund.order).selectinload(Order.closed_waiter),
+            selectinload(PaymentRefund.consignment_order).selectinload(
+                ConsignmentOrder.waiter
+            ),
+            selectinload(PaymentRefund.consignment_order).selectinload(
+                ConsignmentOrder.credited_waiter
+            ),
+        )
+    )
+    refunds = refunds_result.scalars().all()
 
     # Vendas por garçom
     waiter_user = aliased(User)
@@ -913,41 +1160,57 @@ async def dashboard_funcionarios(
             "ticket_medio": round(float(total) / count, 2) if count else 0.0,
         })
 
-    # Merge pagamentos de consignação por garçom
-    consignment_waiter_totals: dict[str, float] = {}
-    for p in consignment_payments:
-        consignment = p.consignment_order
-        if not consignment or not consignment.waiter:
-            consignment_waiter_totals["N/A"] = consignment_waiter_totals.get("N/A", 0.0) + float(p.amount)
+    # Rankings use the sale or consignment creation date and reverse on refund.
+    consignment_waiter_totals: dict[str, dict] = {}
+    for consignment in consignment_sales:
+        waiter_name = consignment.credited_waiter_name or "N/A"
+        entry = consignment_waiter_totals.setdefault(
+            waiter_name, {"total": 0.0, "orders": 0}
+        )
+        entry["total"] += as_float(consignment.product_total)
+        entry["orders"] += 1
+    for refund in refunds:
+        if not refund.sale_was_recognized:
             continue
-        waiter_name = consignment.waiter.name or "N/A"
-        consignment_waiter_totals[waiter_name] = consignment_waiter_totals.get(waiter_name, 0.0) + float(p.amount)
+        if refund.order:
+            waiter_name = _resolve_waiter_name(refund.order)
+        elif refund.consignment_order:
+            waiter_name = refund.consignment_order.credited_waiter_name or "N/A"
+        else:
+            continue
+        entry = consignment_waiter_totals.setdefault(
+            waiter_name, {"total": 0.0, "orders": 0}
+        )
+        entry["total"] -= as_float(
+            money(sum((item.product_amount for item in refund.items), ZERO))
+        )
     by_waiter_map = {w["name"]: w for w in by_waiter}
-    for waiter_name, amount in consignment_waiter_totals.items():
+    for waiter_name, adjustment in consignment_waiter_totals.items():
         if waiter_name in by_waiter_map:
-            by_waiter_map[waiter_name]["total"] = round(by_waiter_map[waiter_name]["total"] + amount, 2)
+            by_waiter_map[waiter_name]["total"] = as_float(
+                money(by_waiter_map[waiter_name]["total"])
+                + money(adjustment["total"])
+            )
+            by_waiter_map[waiter_name]["orders"] += adjustment["orders"]
         else:
             by_waiter_map[waiter_name] = {
                 "id": None,
                 "name": waiter_name,
-                "total": round(amount, 2),
-                "orders": 0,
+                "total": round(adjustment["total"], 2),
+                "orders": adjustment["orders"],
                 "ticket_medio": 0.0,
             }
+    for entry in by_waiter_map.values():
+        entry["ticket_medio"] = (
+            round(entry["total"] / entry["orders"], 2)
+            if entry["orders"]
+            else 0.0
+        )
     by_waiter = sorted(by_waiter_map.values(), key=lambda x: x["total"], reverse=True)
 
-    # Vendas por hora (horário de pico) — mesma semântica dos relatórios
-    breakdown_orders_result = await db.execute(
-        select(Order).where(
-            Order.status == "finalizada",
-            Order.closed_at >= start_dt,
-            Order.closed_at <= end_dt,
-            or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
-        )
-    )
-    breakdown_orders = breakdown_orders_result.scalars().all()
+    # Hourly values use canonical payment and refund timestamps.
     _, hour_totals = await compute_payment_breakdown(
-        breakdown_orders, consignment_payments, start_dt, end_dt
+        start_dt, end_dt, db
     )
     by_hour = [
         {"hour": hour, "total": entry["gross"], "orders": entry["count"]}

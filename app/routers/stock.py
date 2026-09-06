@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel
+from decimal import Decimal
+from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,8 +16,14 @@ from app.models.user import User
 from app.routers.auth_deps import get_current_user, can_manage_stock, can_view_product_cost
 from app.routers.ws import broadcast_stock_update
 from app.services.pricing_service import calculate_selling_price
-from app.services.stock_service import is_pack, pack_stock_for_product, stock_status
+from app.services.stock_service import (
+    is_pack,
+    pack_stock_for_product,
+    stock_status,
+    validate_pack_configuration,
+)
 from app.services.notification_service import notify_stock_alert, broadcast_stock_notification
+from app.services.money_service import ZERO, cost, money, rate
 
 
 def _build_stock_broadcast_info(product: Product) -> tuple[int, int, str]:
@@ -41,32 +48,32 @@ class ProductUpdate(BaseModel):
     code: str | None = None
     name: str | None = None
     category: str | None = None
-    cost: float | None = None
-    margin_pct: float | None = None
-    price: float | None = None
+    cost: Decimal | None = None
+    margin_pct: Decimal | None = None
+    price: Decimal | None = None
     stock: int | None = None
     min_stock: int | None = None
     printer: str | None = None
     active: bool | None = None
     supplier_ids: list[int] | None = None
     pack_unit_product_id: int | None = None
-    pack_size: int | None = None
+    pack_size: int | None = Field(default=None, ge=1)
 
 
 class ProductCreate(BaseModel):
     code: str | None = None
     name: str
     category: str
-    cost: float = 0.0
-    margin_pct: float = 0.0
-    price: float | None = None
+    cost: Decimal = ZERO
+    margin_pct: Decimal = ZERO
+    price: Decimal | None = None
     stock: int = 0
     min_stock: int = 10
     printer: str | None = None
     active: bool = True
     supplier_ids: list[int] = []
     pack_unit_product_id: int | None = None
-    pack_size: int = 1
+    pack_size: int = Field(default=1, ge=1)
 
 
 class StockMovementRequest(BaseModel):
@@ -77,23 +84,23 @@ class StockMovementRequest(BaseModel):
 
 def _apply_pricing(
     product: Product,
-    cost: float | None,
-    margin_pct: float | None,
-    price: float | None,
+    cost_value: Decimal | None,
+    margin_pct: Decimal | None,
+    price: Decimal | None,
 ) -> None:
     """Apply cost/margin/price ensuring selling_price = cost / (1 - margin_pct / 100).
 
     If a price is explicitly provided it is respected. The formula is only used
     to recalculate the price when no price is supplied and cost/margin are set.
     """
-    if cost is not None:
-        product.cost = cost
+    if cost_value is not None:
+        product.cost = cost(cost_value)
     if margin_pct is not None:
-        product.margin_pct = margin_pct
+        product.margin_pct = rate(margin_pct)
     if price is not None:
-        product.price = price
+        product.price = money(price)
 
-    if (price is None or price <= 0) and product.cost > 0 and product.margin_pct >= 0:
+    if (price is None or price <= ZERO) and product.cost > ZERO and product.margin_pct >= ZERO:
         calculated = calculate_selling_price(product.cost, product.margin_pct)
         if calculated > 0:
             product.price = calculated
@@ -153,9 +160,15 @@ async def _apply_pack_stock_change(
     """
     notification = None
     if is_pack(product):
-        await db.refresh(product, ["pack_unit_product"])
-        unit = product.pack_unit_product
-        size = product.pack_size or 1
+        validate_pack_configuration(product)
+        unit = await db.scalar(
+            select(Product)
+            .where(Product.id == product.pack_unit_product_id)
+            .with_for_update()
+        )
+        if not unit:
+            raise ValueError("Produto unitário vinculado não encontrado")
+        size = product.pack_size
         unit_quantity = quantity * size
 
         if movement_type == "saida" and unit.stock < unit_quantity:
@@ -173,11 +186,18 @@ async def _apply_pack_stock_change(
             product_id=unit.id,
             type=movement_type,
             quantity=unit_quantity,
+            unit_cost_snapshot=unit.cost,
+            source_product_id=product.id,
+            source_quantity=quantity,
+            conversion_factor=size,
             note=f"{note} (engradado: {product.name}, {quantity} x {size})",
         ))
         notification = await _notify_stock_status(db, product)
         return unit, unit_quantity, notification
     else:
+        product = await db.scalar(
+            select(Product).where(Product.id == product.id).with_for_update()
+        )
         if movement_type == "saida" and product.stock < quantity:
             raise ValueError(
                 f"Estoque insuficiente para {product.name}. Disponível: {product.stock}"
@@ -192,6 +212,9 @@ async def _apply_pack_stock_change(
             product_id=product.id,
             type=movement_type,
             quantity=quantity,
+            unit_cost_snapshot=product.cost,
+            source_quantity=quantity,
+            conversion_factor=1,
             note=note,
         ))
         notification = await _notify_stock_status(db, product)
@@ -348,15 +371,22 @@ async def create_product(
         product.suppliers = supplier_result.scalars().all()
 
     db.add(product)
+    changed_product = None
+    notification = None
     try:
+        await db.flush()
+        if req.stock > 0:
+            changed_product, _, notification = await _apply_pack_stock_change(
+                product, req.stock, "entrada", "Estoque inicial", db
+            )
         await db.commit()
-    except IntegrityError:
+    except (IntegrityError, ValueError) as exc:
         await db.rollback()
+        if isinstance(exc, ValueError):
+            return {"error": str(exc)}
         return {"error": "Código do produto já cadastrado"}
 
-    if req.stock > 0:
-        changed_product, _, notification = await _apply_pack_stock_change(product, req.stock, "entrada", "Estoque inicial", db)
-        await db.commit()
+    if changed_product:
         if notification:
             await broadcast_stock_notification(notification.id)
         await broadcast_stock_update(*_build_stock_broadcast_info(changed_product))
@@ -364,7 +394,10 @@ async def create_product(
             await broadcast_stock_update(*_build_stock_broadcast_info(product))
 
     result = await db.execute(
-        select(Product).where(Product.id == product.id).options(selectinload(Product.suppliers))
+        select(Product).where(Product.id == product.id).options(
+            selectinload(Product.suppliers),
+            selectinload(Product.pack_unit_product),
+        )
     )
     product = result.scalars().first()
     return _product_to_dict(product, user, include_suppliers=True)
@@ -425,7 +458,16 @@ async def update_product(
     if req.pack_size is not None:
         if is_pack(product) and req.pack_size < 2:
             return {"error": "Engradado deve conter pelo menos 2 unidades"}
+        if not is_pack(product) and req.pack_size != 1:
+            return {"error": "Produto unitário deve usar quantidade por engradado igual a 1"}
         product.pack_size = req.pack_size
+    elif is_pack(product) and product.pack_size < 2:
+        return {
+            "error": (
+                "O engradado possui quantidade por engradado inválida. "
+                "Corrija esse campo antes de atualizar o produto."
+            )
+        }
 
     stock_changed = False
     if req.stock is not None and req.stock != product.stock:
@@ -445,7 +487,10 @@ async def update_product(
         await broadcast_stock_update(*_build_stock_broadcast_info(product))
 
     result = await db.execute(
-        select(Product).where(Product.id == product.id).options(selectinload(Product.suppliers))
+        select(Product).where(Product.id == product.id).options(
+            selectinload(Product.suppliers),
+            selectinload(Product.pack_unit_product),
+        )
     )
     product = result.scalars().first()
     return _product_to_dict(product, user, include_suppliers=True)
@@ -489,7 +534,10 @@ async def add_stock_movement(
         return {"error": str(e)}
 
     result = await db.execute(
-        select(Product).where(Product.id == product_id).options(selectinload(Product.suppliers))
+        select(Product).where(Product.id == product_id).options(
+            selectinload(Product.suppliers),
+            selectinload(Product.pack_unit_product),
+        )
     )
     product = result.scalars().first()
 
@@ -517,7 +565,10 @@ async def get_stock_history(
     if not product:
         return {"error": "Produto não encontrado"}
 
-    query = select(StockHistory).where(StockHistory.product_id == product_id)
+    query = select(StockHistory).where(
+        (StockHistory.product_id == product_id)
+        | (StockHistory.source_product_id == product_id)
+    )
     if type_filter in ("entrada", "saida"):
         query = query.where(StockHistory.type == type_filter)
     query = query.order_by(StockHistory.created_at.desc())
@@ -532,6 +583,9 @@ async def get_stock_history(
                 "id": h.id,
                 "type": h.type,
                 "quantity": h.quantity,
+                "source_quantity": h.source_quantity,
+                "conversion_factor": h.conversion_factor,
+                "physical_product_id": h.product_id,
                 "note": h.note,
                 "table_id": h.table_id,
                 "order_id": h.order_id,
@@ -578,9 +632,9 @@ async def add_stock_batch(
                     "new_stock": pack_stock_for_product(product) if is_pack(product) else changed_product.stock,
                 }
             )
-        except ValueError:
+        except ValueError as exc:
             await db.rollback()
-            return {"error": f"Erro ao carregar {product.name}. Estoque insuficiente?"}
+            return {"error": f"Erro ao carregar {product.name}: {exc}"}
 
     await db.commit()
 

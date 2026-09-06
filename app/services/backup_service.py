@@ -1,12 +1,16 @@
 import csv
+import asyncio
 import io
+import os
 import zipfile
 from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import DATABASE_URL
 from app.models.product import Product
 from app.models.stock_history import StockHistory
 from app.models.category import Category
@@ -15,9 +19,18 @@ from app.models.order_item import OrderItem
 from app.models.customer import Customer
 from app.models.employee import Employee
 from app.models.supplier import Supplier
-from app.models.consignment import ConsignmentOrder, ConsignmentPayment
+from app.models.consignment import ConsignmentOrder, ConsignmentOrderItem, ConsignmentPayment
 from app.models.cash_register_session import CashRegisterSession
 from app.models.cash_register_movement import CashRegisterMovement
+from app.models.cash_position_movement import CashPositionMovement
+from app.models.daily_payment import DailyPayment
+from app.models.expense import Expense
+from app.models.payment import (
+    OrderPayment,
+    OrderPaymentAllocation,
+    PaymentRefund,
+    PaymentRefundItem,
+)
 from app.models.user import User
 
 
@@ -31,9 +44,17 @@ EXPORTABLE_ENTITIES = {
     "funcionarios": Employee,
     "fornecedores": Supplier,
     "consignados": ConsignmentOrder,
+    "itens_consignados": ConsignmentOrderItem,
     "pagamentos_consignados": ConsignmentPayment,
+    "pagamentos_comandas": OrderPayment,
+    "alocacoes_pagamentos_comandas": OrderPaymentAllocation,
+    "estornos_pagamentos": PaymentRefund,
+    "itens_estornos_pagamentos": PaymentRefundItem,
     "caixa_sessoes": CashRegisterSession,
     "caixa_movimentacoes": CashRegisterMovement,
+    "movimentos_posicao_caixa": CashPositionMovement,
+    "pagamentos_diarias": DailyPayment,
+    "despesas": Expense,
     "usuarios": User,
 }
 
@@ -90,3 +111,52 @@ async def export_entities_zip(db: AsyncSession, entity_keys: list[str]) -> tuple
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     zip_filename = f"backup_ladsbeer_{timestamp}.zip"
     return zip_filename, zip_buffer.getvalue()
+
+
+def _postgres_connection_args() -> tuple[list[str], dict[str, str]]:
+    url = make_url(DATABASE_URL)
+    if not url.drivername.startswith("postgresql"):
+        raise ValueError("O backup completo requer PostgreSQL")
+    if not url.database:
+        raise ValueError("Banco de dados não configurado")
+
+    args = ["--dbname", url.database]
+    if url.host:
+        args.extend(["--host", url.host])
+    if url.port:
+        args.extend(["--port", str(url.port)])
+    if url.username:
+        args.extend(["--username", url.username])
+
+    environment = os.environ.copy()
+    if url.password:
+        environment["PGPASSWORD"] = url.password
+    return args, environment
+
+
+async def export_full_database() -> tuple[str, bytes]:
+    """Create a transactionally consistent, restorable PostgreSQL custom dump."""
+    connection_args, environment = _postgres_connection_args()
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "pg_dump",
+            *connection_args,
+            "--format=custom",
+            "--compress=9",
+            "--no-owner",
+            "--no-acl",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=environment,
+        )
+    except FileNotFoundError as exc:
+        raise ValueError("Ferramenta pg_dump não instalada no servidor") from exc
+
+    content, stderr = await process.communicate()
+    if process.returncode != 0 or not content:
+        raise ValueError(
+            "Não foi possível gerar o backup completo do banco de dados"
+        )
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"backup_ladsbeer_completo_{timestamp}.dump", content

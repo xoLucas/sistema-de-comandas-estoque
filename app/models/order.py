@@ -1,5 +1,7 @@
 from datetime import datetime
-from sqlalchemy import Integer, String, Float, Boolean, ForeignKey, DateTime, func, JSON
+from decimal import Decimal
+
+from sqlalchemy import Integer, String, Numeric, Boolean, ForeignKey, DateTime, func, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -16,15 +18,18 @@ class Order(Base):
     customer_id: Mapped[int | None] = mapped_column(ForeignKey("customers.id"), nullable=True)
     customer_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="aberta", nullable=False)
-    total: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
-    partial_payment: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
-    partial_service_charge: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    total: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    partial_payment: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    partial_service_charge: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
     partial_payments_detail: Mapped[list | None] = mapped_column(JSON, default=list, nullable=True)
-    service_charge_pct: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    service_charge_pct: Mapped[Decimal] = mapped_column(Numeric(7, 4), default=0, nullable=False)
     service_charge_applied: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    service_charge_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    service_charge_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
     payment_method: Mapped[str | None] = mapped_column(String(30), nullable=True)
     card_machine: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    close_idempotency_key: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, unique=True
+    )
     is_estorno: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -38,4 +43,8 @@ class Order(Base):
     customer = relationship("Customer", back_populates="orders")
     items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
     rounds = relationship("OrderRound", back_populates="order", cascade="all, delete-orphan")
-    consignment_order = relationship("ConsignmentOrder", back_populates="source_order")
+    consignment_order = relationship(
+        "ConsignmentOrder", back_populates="source_order", uselist=False
+    )
+    payments = relationship("OrderPayment", back_populates="order")
+    refunds = relationship("PaymentRefund", back_populates="order")

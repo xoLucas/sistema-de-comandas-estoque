@@ -31,6 +31,8 @@ async def fetch_consignment_payments(
             .selectinload(ConsignmentOrder.customer),
             selectinload(ConsignmentPayment.consignment_order)
             .selectinload(ConsignmentOrder.waiter),
+            selectinload(ConsignmentPayment.consignment_order)
+            .selectinload(ConsignmentOrder.credited_waiter),
         )
     )
     if with_items:

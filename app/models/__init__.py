@@ -7,5 +7,25 @@ from app.models.order_round import OrderRound
 from app.models.user import User
 from app.models.employee import Employee
 from app.models.cash_position_movement import CashPositionMovement
+from app.models.payment import (
+    OrderPayment,
+    OrderPaymentAllocation,
+    PaymentRefund,
+    PaymentRefundItem,
+)
 
-__all__ = ["Table", "Product", "Category", "Order", "OrderItem", "OrderRound", "User", "Employee", "CashPositionMovement"]
+__all__ = [
+    "Table",
+    "Product",
+    "Category",
+    "Order",
+    "OrderItem",
+    "OrderRound",
+    "User",
+    "Employee",
+    "CashPositionMovement",
+    "OrderPayment",
+    "OrderPaymentAllocation",
+    "PaymentRefund",
+    "PaymentRefundItem",
+]

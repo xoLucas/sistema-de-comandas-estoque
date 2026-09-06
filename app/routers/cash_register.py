@@ -1,7 +1,9 @@
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
-from sqlalchemy import select, desc, func
+from sqlalchemy import select, desc, func, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -17,7 +19,8 @@ from app.models.user import User
 from app.routers.auth_deps import get_current_user, can_manage_cash_register, require_role
 from app.services.settings_service import get_setting, get_setting_as_bool
 from app.services.email_service import send_email_with_attachment
-from app.services.cash_service import compute_cash_inflows
+from app.services.cash_service import compute_session_cash_summary
+from app.services.money_service import as_float, money
 from app.routers.financial import (
     _build_session_report,
     _build_pdf_bytes,
@@ -31,24 +34,24 @@ router = APIRouter(prefix="/api/caixa", tags=["caixa"])
 
 
 class OpenCashRegisterRequest(BaseModel):
-    initial_cash: float
+    initial_cash: Decimal
 
 
 class CloseCashRegisterRequest(BaseModel):
-    final_cash: float
+    final_cash: Decimal
     observations: str | None = None
 
 
 class CashMovementRequest(BaseModel):
     type: str  # sangria or suprimento
-    amount: float
+    amount: Decimal
     note: str | None = None
 
 
 class CashPositionMovementRequest(BaseModel):
     type: str  # entrada or saida
     title: str
-    amount: float
+    amount: Decimal
     observation: str | None = None
 
 
@@ -74,19 +77,13 @@ async def get_active_session(
     if not session:
         return {"active": False, "session": None}
 
-    total_sangria = sum(float(m.amount) for m in session.movements if m.type == "sangria")
-    total_suprimento = sum(float(m.amount) for m in session.movements if m.type == "suprimento")
-
     end_time = datetime.now(timezone.utc)
-    cash_inflows = await compute_cash_inflows(
-        session, session.opened_at, end_time, db
-    )
-    expected_cash = round(
-        float(session.initial_cash)
-        + cash_inflows
-        - total_sangria
-        + total_suprimento,
-        2,
+    cash_summary = await compute_session_cash_summary(
+        session,
+        session.opened_at,
+        end_time,
+        db,
+        movements=session.movements,
     )
 
     return {
@@ -97,10 +94,10 @@ async def get_active_session(
             "opened_by": session.opened_by.name if session.opened_by else "N/A",
             "initial_cash": float(session.initial_cash),
             "status": session.status,
-            "total_sangria": round(total_sangria, 2),
-            "total_suprimento": round(total_suprimento, 2),
-            "cash_inflows": cash_inflows,
-            "expected_cash": expected_cash,
+            "total_sangria": cash_summary["total_sangria"],
+            "total_suprimento": cash_summary["total_suprimento"],
+            "cash_inflows": cash_summary["cash_inflows"],
+            "expected_cash": cash_summary["expected_cash"],
             "movements": [
                 {
                     "id": m.id,
@@ -166,6 +163,8 @@ async def open_cash_register(
     if req.initial_cash < 0:
         return {"error": "O dinheiro inicial não pode ser negativo"}
 
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext('cash_register_open'))"))
+
     result = await db.execute(
         select(CashRegisterSession)
         .where(CashRegisterSession.status == "open")
@@ -176,11 +175,15 @@ async def open_cash_register(
 
     session = CashRegisterSession(
         opened_by_id=user.id,
-        initial_cash=req.initial_cash,
+        initial_cash=money(req.initial_cash),
         status="open",
     )
     db.add(session)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        return {"error": "Já existe um caixa aberto. Feche-o antes de abrir um novo."}
     await db.refresh(session)
 
     return {
@@ -219,21 +222,19 @@ async def close_cash_register(
         return {"error": "O dinheiro final não pode ser negativo"}
 
     pending_count_result = await db.execute(
-        select(func.count(Order.id))
-        .join(Table)
-        .where(Order.status == "aberta", Table.is_balcao == False)
+        select(func.count(Order.id)).where(Order.status == "aberta")
     )
     pending_count = pending_count_result.scalar_one() or 0
     if pending_count > 0:
         return {
-            "error": f"Tem {pending_count} comanda(s) pendente(s). Encerre elas para concluir a operação.",
+            "error": f"Tem {pending_count} comanda(s) aberta(s), incluindo balcão. Encerre todas para fechar o caixa.",
             "pending_orders": pending_count,
         }
 
     session.status = "closed"
     session.closed_at = datetime.now(timezone.utc)
     session.closed_by_id = user.id
-    session.final_cash = req.final_cash
+    session.final_cash = money(req.final_cash)
     session.observations = req.observations or session.observations
 
     metrics = await compute_session_close_metrics(session, db)
@@ -327,7 +328,9 @@ async def create_cash_movement(
         return {"error": "Valor deve ser maior que zero"}
 
     result = await db.execute(
-        select(CashRegisterSession).where(CashRegisterSession.status == "open")
+        select(CashRegisterSession)
+        .where(CashRegisterSession.status == "open")
+        .with_for_update()
     )
     session = result.scalar_one_or_none()
     if not session:
@@ -336,7 +339,7 @@ async def create_cash_movement(
     movement = CashRegisterMovement(
         session_id=session.id,
         type=req.type,
-        amount=req.amount,
+        amount=money(req.amount),
         note=req.note,
         created_by_id=user.id,
     )
@@ -432,7 +435,7 @@ async def create_cash_position_movement(
         type=req.type,
         source="manual",
         title=req.title.strip(),
-        amount=req.amount,
+        amount=money(req.amount),
         observation=req.observation,
         created_by_id=user.id,
     )

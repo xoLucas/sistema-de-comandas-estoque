@@ -1,4 +1,6 @@
 from datetime import date, datetime, timezone
+from decimal import Decimal
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
@@ -13,12 +15,15 @@ from app.models.consignment import (
     ConsignmentPayment,
 )
 from app.models.customer import Customer
+from app.models.employee import Employee
 from app.models.order import Order
 from app.models.order_item import OrderItem
 from app.models.product import Product
 from app.models.stock_history import StockHistory
 from app.models.table import Table
 from app.models.user import User
+from app.models.cash_register_session import CashRegisterSession
+from app.models.payment import OrderPayment
 from app.routers.auth_deps import get_current_user, require_role
 from app.routers.orders import (
     _check_and_consume_stock,
@@ -31,6 +36,9 @@ from app.routers.ws import broadcast_table_update, broadcast_stock_update
 from app.services.notification_service import broadcast_stock_notification
 from app.services.settings_service import get_setting_as_float
 from app.services.stock_service import is_pack, pack_stock_for_product, stock_status
+from app.services.money_service import ZERO, as_float, money, percentage_amount, rate
+from app.services.payment_service import PAYMENT_METHODS, card_fee_snapshot, order_net_paid
+from app.services.refund_service import refund_full_consignment, refund_full_order
 
 
 def _build_stock_broadcast_info(product):
@@ -50,10 +58,20 @@ def _can_initiate(user: User) -> bool:
     return user.role in ("gerente", "caixa", "garcom")
 
 
+def _consignment_refund_totals(consignment: ConsignmentOrder) -> tuple[Decimal, Decimal]:
+    refunded_amount = money(
+        sum((refund.gross_amount for refund in consignment.refunds), ZERO)
+    )
+    net_amount_paid = money(
+        max(ZERO, money(consignment.amount_paid) - refunded_amount)
+    )
+    return refunded_amount, net_amount_paid
+
+
 class ConsignmentItemRequest(BaseModel):
     product_id: int
     quantity: int = Field(..., ge=1)
-    unit_price: float | None = None
+    unit_price: Decimal | None = None
 
 
 class ConsignmentCreateRequest(BaseModel):
@@ -71,16 +89,25 @@ class ConsignmentUpdateRequest(BaseModel):
 
 
 class ConsignmentPaymentRequest(BaseModel):
-    amount: float = Field(..., gt=0)
+    amount: Decimal = Field(..., gt=0)
     payment_method: str
     card_machine: str | None = None
     notes: str | None = None
+    idempotency_key: str | None = Field(default=None, max_length=64)
 
 
 class ConvertToFiadoRequest(BaseModel):
     customer_id: int | None = None
     apply_service_charge: bool = False
-    service_charge_custom: float | None = None
+    service_charge_custom: Decimal | None = None
+    waiter_id: int | None = None
+
+
+class CancelConsignmentRequest(BaseModel):
+    reason: str = Field(
+        default="Cancelamento de consignado", min_length=3, max_length=500
+    )
+    idempotency_key: str | None = Field(default=None, max_length=64)
 
 
 async def _consume_stock_for_items(
@@ -93,7 +120,11 @@ async def _consume_stock_for_items(
     stock_notifications = []
     products_to_broadcast = set()
     for entry in items:
-        product = await db.execute(select(Product).where(Product.id == entry.product_id))
+        product = await db.execute(
+            select(Product)
+            .where(Product.id == entry.product_id)
+            .options(selectinload(Product.pack_unit_product))
+        )
         product = product.scalars().first()
         if not product:
             continue
@@ -122,8 +153,8 @@ async def _consume_stock_for_items(
             "product_id": product.id,
             "product_name": product.name,
             "quantity": entry.quantity,
-            "unit_price": unit_price,
-            "subtotal": round(unit_price * entry.quantity, 2),
+            "unit_price": as_float(unit_price),
+            "subtotal": as_float(money(unit_price * entry.quantity)),
             "stock_remaining": stock_product.stock,
         })
 
@@ -132,7 +163,7 @@ async def _consume_stock_for_items(
             product_id=product.id,
             quantity=entry.quantity,
             unit_price=unit_price,
-            unit_cost=float(product.cost) if product.cost is not None else 0.0,
+            unit_cost=product.cost or ZERO,
         ))
     return created_items, stock_notifications, products_to_broadcast
 
@@ -150,11 +181,7 @@ async def _return_stock_for_items(db: AsyncSession, consignment_id: int) -> set:
         product = item.product
         if not product:
             continue
-        try:
-            stock_product, unit_quantity = await _resolve_pack_stock(db, product, item.quantity)
-        except ValueError:
-            stock_product = product
-            unit_quantity = item.quantity
+        stock_product, unit_quantity = await _resolve_pack_stock(db, product, item.quantity)
 
         stock_product.stock += unit_quantity
         products_to_broadcast.add(stock_product)
@@ -162,9 +189,13 @@ async def _return_stock_for_items(db: AsyncSession, consignment_id: int) -> set:
             products_to_broadcast.add(product)
         db.add(StockHistory(
             product_id=stock_product.id,
+            source_product_id=product.id if is_pack(product) else None,
             consignment_order_id=consignment_id,
             type="entrada",
             quantity=unit_quantity,
+            source_quantity=item.quantity,
+            conversion_factor=product.pack_size if is_pack(product) else 1,
+            unit_cost_snapshot=stock_product.cost,
             note=f"Cancelamento consignado {consignment_id}",
         ))
     return products_to_broadcast
@@ -182,11 +213,13 @@ async def _recalculate_totals(db: AsyncSession, consignment_id: int) -> None:
             select(func.coalesce(func.sum(ConsignmentOrderItem.unit_price * ConsignmentOrderItem.quantity), 0.0))
             .where(ConsignmentOrderItem.consignment_order_id == consignment_id)
         )
-        consignment.total = round(float(total_result.scalar_one()), 2)
+        consignment.product_total = money(total_result.scalar_one())
+        consignment.service_total = ZERO
+        consignment.total = consignment.product_total
 
     # Conversões (source_order_id preenchido) já trazem o total com a taxa de
     # serviço do restante embutida; o saldo é sempre total - amount_paid.
-    consignment.balance = round(max(0.0, consignment.total - consignment.amount_paid), 2)
+    consignment.balance = money(max(ZERO, consignment.total - consignment.amount_paid))
 
 
 @router.get("/consignados")
@@ -206,7 +239,9 @@ async def list_consignments(
         selectinload(ConsignmentOrder.customer),
         selectinload(ConsignmentOrder.items).selectinload(ConsignmentOrderItem.product),
         selectinload(ConsignmentOrder.payments),
+        selectinload(ConsignmentOrder.refunds),
         selectinload(ConsignmentOrder.waiter),
+        selectinload(ConsignmentOrder.credited_waiter),
     )
 
     if status and status != "todos":
@@ -230,6 +265,7 @@ async def list_consignments(
     now = datetime.now(timezone.utc)
     out = []
     for c in consignments:
+        refunded_amount, net_amount_paid = _consignment_refund_totals(c)
         created_at = c.created_at
         pending_days = 0
         if created_at:
@@ -245,15 +281,19 @@ async def list_consignments(
             "customer_document": c.customer.document if c.customer else None,
             "order_type": c.order_type,
             "status": c.status,
-            "total": float(c.total),
-            "amount_paid": float(c.amount_paid),
-            "balance": float(c.balance),
+            "product_total": as_float(c.product_total),
+            "service_total": as_float(c.service_total),
+            "total": as_float(c.total),
+            "amount_paid": as_float(c.amount_paid),
+            "net_amount_paid": as_float(net_amount_paid),
+            "refunded_amount": as_float(refunded_amount),
+            "balance": as_float(c.balance),
             "pending_days": pending_days,
             "due_date": c.due_date.isoformat() if c.due_date else None,
             "notes": c.notes,
             "created_at": c.created_at.isoformat() if c.created_at else None,
             "closed_at": c.closed_at.isoformat() if c.closed_at else None,
-            "waiter_name": c.waiter.name if c.waiter else None,
+            "waiter_name": c.credited_waiter_name,
             "items_count": len(c.items),
             "payments_count": len(c.payments),
         })
@@ -269,6 +309,14 @@ async def create_consignment(
 ):
     if not _can_manage(user):
         return {"error": "Acesso restrito ao gerente ou caixa"}
+
+    open_session = await db.scalar(
+        select(CashRegisterSession)
+        .where(CashRegisterSession.status == "open")
+        .with_for_update()
+    )
+    if not open_session:
+        return {"error": "Abra o caixa antes de registrar uma venda fiado"}
 
     customer = await db.execute(select(Customer).where(Customer.id == req.customer_id))
     customer = customer.scalars().first()
@@ -294,9 +342,11 @@ async def create_consignment(
         notes=req.notes,
         waiter_id=user.id,
         status="pendente",
-        total=0.0,
-        amount_paid=0.0,
-        balance=0.0,
+        product_total=ZERO,
+        service_total=ZERO,
+        total=ZERO,
+        amount_paid=ZERO,
+        balance=ZERO,
     )
     db.add(consignment)
     await db.flush()
@@ -331,6 +381,8 @@ async def create_consignment(
         "customer_name": customer.name,
         "order_type": consignment.order_type,
         "status": consignment.status,
+        "product_total": as_float(consignment.product_total),
+        "service_total": as_float(consignment.service_total),
         "total": float(consignment.total),
         "balance": float(consignment.balance),
         "items": items_out,
@@ -353,13 +405,17 @@ async def get_consignment(
             selectinload(ConsignmentOrder.customer),
             selectinload(ConsignmentOrder.items).selectinload(ConsignmentOrderItem.product),
             selectinload(ConsignmentOrder.payments).selectinload(ConsignmentPayment.user),
+            selectinload(ConsignmentOrder.refunds),
             selectinload(ConsignmentOrder.waiter),
+            selectinload(ConsignmentOrder.credited_waiter),
             selectinload(ConsignmentOrder.source_order),
         )
     )
     consignment = result.scalars().first()
     if not consignment:
         return {"error": "Consignado não encontrado"}
+
+    refunded_amount, net_amount_paid = _consignment_refund_totals(consignment)
 
     created_at = consignment.created_at
     pending_days = 0
@@ -378,15 +434,17 @@ async def get_consignment(
         "customer_type": consignment.customer.customer_type if consignment.customer else None,
         "order_type": consignment.order_type,
         "status": consignment.status,
-        "total": float(consignment.total),
-        "amount_paid": float(consignment.amount_paid),
-        "balance": float(consignment.balance),
+        "total": as_float(consignment.total),
+        "amount_paid": as_float(consignment.amount_paid),
+        "net_amount_paid": as_float(net_amount_paid),
+        "refunded_amount": as_float(refunded_amount),
+        "balance": as_float(consignment.balance),
         "pending_days": pending_days,
         "due_date": consignment.due_date.isoformat() if consignment.due_date else None,
         "notes": consignment.notes,
         "created_at": consignment.created_at.isoformat() if consignment.created_at else None,
         "closed_at": consignment.closed_at.isoformat() if consignment.closed_at else None,
-        "waiter_name": consignment.waiter.name if consignment.waiter else None,
+        "waiter_name": consignment.credited_waiter_name,
         "source_order_id": consignment.source_order_id,
         "items": [
             {
@@ -403,6 +461,8 @@ async def get_consignment(
             {
                 "id": p.id,
                 "amount": float(p.amount),
+                "product_portion": as_float(p.product_portion),
+                "service_portion": as_float(p.service_portion),
                 "payment_method": p.payment_method,
                 "card_machine": p.card_machine,
                 "notes": p.notes,
@@ -410,6 +470,18 @@ async def get_consignment(
                 "user_name": p.user.name if p.user else None,
             }
             for p in consignment.payments
+        ],
+        "refunds": [
+            {
+                "id": refund.id,
+                "amount": as_float(refund.gross_amount),
+                "payment_method": refund.payment_method,
+                "reason": refund.reason,
+                "created_at": (
+                    refund.created_at.isoformat() if refund.created_at else None
+                ),
+            }
+            for refund in consignment.refunds
         ],
     }
 
@@ -459,8 +531,44 @@ async def add_payment(
     if not _can_manage(user):
         return {"error": "Acesso restrito ao gerente ou caixa"}
 
+    if req.payment_method not in PAYMENT_METHODS:
+        return {"error": "Forma de pagamento inválida"}
+
+    open_session = await db.scalar(
+        select(CashRegisterSession)
+        .where(CashRegisterSession.status == "open")
+        .with_for_update()
+    )
+    if not open_session:
+        return {"error": "Abra o caixa antes de receber um pagamento"}
+
+    normalized_key = req.idempotency_key.strip() if req.idempotency_key else None
+    if normalized_key:
+        existing_payment = await db.scalar(
+            select(ConsignmentPayment).where(
+                ConsignmentPayment.idempotency_key == normalized_key
+            )
+        )
+        if existing_payment:
+            if existing_payment.consignment_order_id != consignment_id:
+                return {"error": "Identificador de pagamento já utilizado"}
+            existing_consignment = await db.get(
+                ConsignmentOrder, existing_payment.consignment_order_id
+            )
+            return {
+                "id": existing_payment.id,
+                "consignment_id": existing_payment.consignment_order_id,
+                "amount": as_float(existing_payment.amount),
+                "payment_method": existing_payment.payment_method,
+                "balance": as_float(existing_consignment.balance),
+                "status": existing_consignment.status,
+                "idempotent_replay": True,
+            }
+
     result = await db.execute(
-        select(ConsignmentOrder).where(ConsignmentOrder.id == consignment_id)
+        select(ConsignmentOrder)
+        .where(ConsignmentOrder.id == consignment_id)
+        .with_for_update()
     )
     consignment = result.scalars().first()
     if not consignment:
@@ -469,27 +577,49 @@ async def add_payment(
     if consignment.status == "cancelado":
         return {"error": "Consignado cancelado"}
 
-    if req.amount > consignment.balance + 0.01:
+    payment_amount = money(req.amount)
+    if payment_amount > money(consignment.balance):
         return {"error": "Valor maior que o saldo devedor"}
 
-    if req.amount <= 0:
+    if payment_amount <= ZERO:
         return {"error": "Valor deve ser maior que zero"}
+
+    paid_product = await db.scalar(
+        select(func.coalesce(func.sum(ConsignmentPayment.product_portion), 0)).where(
+            ConsignmentPayment.consignment_order_id == consignment.id
+        )
+    )
+    outstanding_product = money(
+        max(ZERO, money(consignment.product_total) - money(paid_product))
+    )
+    product_portion = money(min(payment_amount, outstanding_product))
+    service_portion = money(payment_amount - product_portion)
+    fee_rate, fee_amount = await card_fee_snapshot(
+        db, payment_amount, req.payment_method, req.card_machine
+    )
 
     payment = ConsignmentPayment(
         consignment_order_id=consignment.id,
         user_id=user.id,
-        amount=req.amount,
-        service_portion=0.0,
+        amount=payment_amount,
+        product_portion=product_portion,
+        service_portion=service_portion,
         payment_method=req.payment_method,
         card_machine=req.card_machine,
+        card_fee_rate=fee_rate,
+        card_fee_amount=fee_amount,
+        cash_session_id=open_session.id,
+        idempotency_key=normalized_key or str(uuid4()),
         notes=req.notes,
     )
     db.add(payment)
 
-    consignment.amount_paid = round(consignment.amount_paid + req.amount, 2)
-    consignment.balance = round(max(0.0, consignment.balance - req.amount), 2)
+    consignment.amount_paid = money(consignment.amount_paid + payment_amount)
+    consignment.balance = money(
+        max(ZERO, consignment.total - consignment.amount_paid)
+    )
 
-    if consignment.balance <= 0.01:
+    if consignment.balance == ZERO:
         consignment.status = "pago"
         consignment.closed_at = datetime.now(timezone.utc)
     else:
@@ -501,9 +631,9 @@ async def add_payment(
     return {
         "id": payment.id,
         "consignment_id": consignment.id,
-        "amount": float(payment.amount),
+        "amount": as_float(payment.amount),
         "payment_method": payment.payment_method,
-        "balance": float(consignment.balance),
+        "balance": as_float(consignment.balance),
         "status": consignment.status,
     }
 
@@ -511,46 +641,68 @@ async def add_payment(
 @router.post("/consignados/{consignment_id}/cancelar")
 async def cancel_consignment(
     consignment_id: int,
+    req: CancelConsignmentRequest | None = None,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     if user.role != "gerente":
         return {"error": "Apenas gerente pode cancelar"}
 
-    result = await db.execute(
+    open_session = await db.scalar(
+        select(CashRegisterSession)
+        .where(CashRegisterSession.status == "open")
+        .with_for_update()
+    )
+    if not open_session:
+        return {"error": "Abra o caixa antes de cancelar ou estornar um consignado"}
+
+    consignment = await db.scalar(
         select(ConsignmentOrder)
         .where(ConsignmentOrder.id == consignment_id)
-        .options(selectinload(ConsignmentOrder.items).selectinload(ConsignmentOrderItem.product))
     )
-    consignment = result.scalars().first()
     if not consignment:
         return {"error": "Consignado não encontrado"}
 
-    if consignment.status == "cancelado":
-        return {"error": "Consignado já cancelado"}
-
-    payments_count_result = await db.execute(
-        select(func.count(ConsignmentPayment.id)).where(
-            ConsignmentPayment.consignment_order_id == consignment_id
-        )
-    )
-    has_payments = (payments_count_result.scalar_one() or 0) > 0
-
-    if consignment.amount_paid > 0 or has_payments:
-        return {"error": "Não é possível cancelar consignado com pagamentos registrados"}
-
-    products_to_broadcast = await _return_stock_for_items(db, consignment.id)
-
-    consignment.status = "cancelado"
-    consignment.closed_at = datetime.now(timezone.utc)
-    consignment.balance = 0.0
+    payload = req or CancelConsignmentRequest()
+    try:
+        if consignment.source_order_id is not None:
+            refund = await refund_full_order(
+                db,
+                order_id=consignment.source_order_id,
+                user=user,
+                cash_session=open_session,
+                reason=payload.reason.strip(),
+                idempotency_key=payload.idempotency_key,
+            )
+        else:
+            refund = await refund_full_consignment(
+                db,
+                consignment_id=consignment.id,
+                user=user,
+                cash_session=open_session,
+                reason=payload.reason.strip(),
+                idempotency_key=payload.idempotency_key,
+            )
+    except ValueError as exc:
+        return {"error": str(exc)}
 
     await db.commit()
 
-    for p in products_to_broadcast:
-        await broadcast_stock_update(*_build_stock_broadcast_info(p))
+    seen: set[int] = set()
+    for product_id, stock, status in refund.stock_updates:
+        if product_id in seen:
+            continue
+        seen.add(product_id)
+        await broadcast_stock_update(product_id, stock, status)
 
-    return {"id": consignment.id, "status": consignment.status}
+    return {
+        "id": consignment.id,
+        "status": "cancelado",
+        "refund_group_key": refund.group_key,
+        "refund_ids": refund.refund_ids,
+        "refunded_amount": as_float(refund.gross_amount),
+        "idempotent_replay": refund.replayed,
+    }
 
 
 @router.post("/comanda/{order_id}/converter-fiado")
@@ -563,6 +715,29 @@ async def convert_order_to_consignment(
     if not _can_initiate(user):
         return {"error": "Acesso restrito"}
 
+    existing_consignment = await db.scalar(
+        select(ConsignmentOrder).where(
+            ConsignmentOrder.source_order_id == order_id
+        )
+    )
+    if existing_consignment:
+        return {
+            "success": True,
+            "consignment_id": existing_consignment.id,
+            "order_id": order_id,
+            "customer_id": existing_consignment.customer_id,
+            "total": as_float(existing_consignment.total),
+            "idempotent_replay": True,
+        }
+
+    open_session = await db.scalar(
+        select(CashRegisterSession)
+        .where(CashRegisterSession.status == "open")
+        .with_for_update()
+    )
+    if not open_session:
+        return {"error": "Abra o caixa antes de finalizar uma venda fiado"}
+
     order = await db.execute(
         select(Order)
         .where(Order.id == order_id, Order.status == "aberta")
@@ -570,7 +745,10 @@ async def convert_order_to_consignment(
             selectinload(Order.items).selectinload(OrderItem.product),
             selectinload(Order.customer),
             selectinload(Order.table),
+            selectinload(Order.payments),
+            selectinload(Order.waiter),
         )
+        .with_for_update()
     )
     order = order.scalars().first()
     if not order:
@@ -587,39 +765,69 @@ async def convert_order_to_consignment(
     if not customer.active:
         return {"error": "Cliente inativo"}
 
+    credited_employee = None
+    if req.waiter_id is not None:
+        if user.role != "gerente":
+            return {"error": "Apenas gerente pode escolher o garçom a creditar"}
+        credited_employee = await db.scalar(
+            select(Employee).where(
+                Employee.id == req.waiter_id,
+                Employee.active == True,
+            )
+        )
+        if not credited_employee:
+            return {"error": "Funcionário não encontrado ou inativo"}
+
     confirmed_items = [item for item in order.items if not item.is_pending]
     if not confirmed_items:
         return {"error": "Comanda não possui itens confirmados"}
+    for item in order.items:
+        if item.product and is_pack(item.product) and item.product.pack_size < 2:
+            return {
+                "error": (
+                    f"Engradado '{item.product.name}' possui quantidade por "
+                    "engradado inválida. Corrija o cadastro antes de converter a comanda."
+                )
+            }
 
-    remaining_product = max(0.0, float(order.total) - float(order.partial_payment))
-    remaining_service = 0.0
+    paid_product, paid_service = await order_net_paid(db, order.id)
+    product_total = money(order.total)
+    remaining_product = money(max(ZERO, product_total - paid_product))
+    remaining_service = ZERO
     if req.apply_service_charge:
-        if req.service_charge_custom is not None and req.service_charge_custom > 0:
-            remaining_service = round(float(req.service_charge_custom), 2)
+        if req.service_charge_custom is not None and req.service_charge_custom > ZERO:
+            remaining_service = money(req.service_charge_custom)
         else:
-            service_pct = await get_setting_as_float(db, "service_charge_pct", 10.0)
-            remaining_service = round(remaining_product * (service_pct / 100), 2)
-    consignment_total = round(float(order.total) + remaining_service, 2)
-    # O amount_paid do fiado reflete apenas o que abateu nos PRODUTOS. A gorjeta/
-    # serviço paga no parcial (partial_service_charge) é receita já recebida e fica
-    # registrada nas ConsignmentPayment (faturamento/caixa), mas NÃO abate o saldo.
-    amount_paid = round(float(order.partial_payment), 2)
-    balance = round(max(0.0, consignment_total - amount_paid), 2)
+            service_pct = rate(
+                await get_setting_as_float(db, "service_charge_pct", 10.0)
+            )
+            remaining_service = percentage_amount(remaining_product, service_pct)
+    service_total = money(paid_service + remaining_service)
+    consignment_total = money(product_total + service_total)
+    amount_paid = money(paid_product + paid_service)
+    balance = money(max(ZERO, consignment_total - amount_paid))
 
-    # Garçom a creditar: segue o garçom da comanda (mesma lógica de uma comanda
-    # normal fechada sem override). O repasse da gorjeta vai para ele.
+    # Without a manager override, keep the user who originally opened the order.
     credited_waiter_id = order.waiter_id or user.id
 
     consignment = ConsignmentOrder(
         customer_id=customer.id,
         source_order_id=order.id,
         order_type="pf",
-        status="pago" if balance <= 0 else "pendente",
+        status="pago" if balance == ZERO else "pendente",
+        product_total=product_total,
+        service_total=service_total,
         total=consignment_total,
         amount_paid=amount_paid,
         balance=balance,
         waiter_id=credited_waiter_id,
-        closed_at=datetime.now(timezone.utc) if balance <= 0 else None,
+        credited_waiter_id=(
+            credited_employee.id if credited_employee else None
+        ),
+        credited_waiter_name_snapshot=(
+            credited_employee.name if credited_employee else None
+        ),
+        closed_at=datetime.now(timezone.utc) if balance == ZERO else None,
         notes=f"Gerado da comanda da mesa {order.table.label if order.table else order.table_id}",
     )
     db.add(consignment)
@@ -631,29 +839,28 @@ async def convert_order_to_consignment(
             consignment_order_id=consignment.id,
             product_id=item.product_id,
             quantity=item.quantity,
-            unit_price=float(item.unit_price),
-            unit_cost=float(item.unit_cost) if item.unit_cost is not None else (float(item.product.cost) if item.product else 0.0),
+            unit_price=money(item.unit_price),
+            unit_cost=item.unit_cost if item.unit_cost is not None else (item.product.cost if item.product else ZERO),
         ))
 
-    # Registra como pagamentos de consignação os pagamentos parciais já feitos na
-    # comanda. Sem isso, o valor já pago não entra no faturamento (que lê
-    # ConsignmentPayment.amount) e ficaria fora dos relatórios e dashboards.
-    for partial in order.partial_payments_detail or []:
-        paid_at = None
-        if partial.get("created_at"):
-            try:
-                paid_at = datetime.fromisoformat(partial["created_at"])
-            except ValueError:
-                paid_at = None
+    # The copied rows become the sole revenue source for a converted sale. Their
+    # source link prevents the original order payment from being counted twice.
+    for payment in order.payments:
         db.add(ConsignmentPayment(
             consignment_order_id=consignment.id,
-            user_id=user.id,
-            amount=round(float(partial.get("amount", 0)), 2),
-            service_portion=round(float(partial.get("service_portion", 0)), 2),
-            payment_method=partial.get("method") or "nao_informado",
-            card_machine=partial.get("card_machine"),
+            user_id=payment.user_id,
+            amount=payment.gross_amount,
+            product_portion=payment.product_amount,
+            service_portion=payment.service_amount,
+            payment_method=payment.payment_method,
+            card_machine=payment.card_machine,
+            card_fee_rate=payment.card_fee_rate,
+            card_fee_amount=payment.card_fee_amount,
+            cash_session_id=payment.cash_session_id,
+            source_order_payment_id=payment.id,
+            idempotency_key=f"source-order-payment:{payment.id}",
             notes=f"Pagamento parcial da comanda #{order.id}",
-            created_at=paid_at,
+            created_at=payment.created_at,
         ))
 
     await _recalculate_totals(db, consignment.id)
@@ -665,11 +872,7 @@ async def convert_order_to_consignment(
         product = item.product
         if not product:
             continue
-        try:
-            stock_product, unit_quantity = await _resolve_pack_stock(db, product, item.quantity)
-        except ValueError:
-            stock_product = product
-            unit_quantity = item.quantity
+        stock_product, unit_quantity = await _resolve_pack_stock(db, product, item.quantity)
         stock_product.stock += unit_quantity
         stock_broadcast_infos.append(_build_stock_broadcast_info(product))
         if is_pack(product):
@@ -680,6 +883,10 @@ async def convert_order_to_consignment(
             table_id=order.table_id,
             type="entrada",
             quantity=unit_quantity,
+            source_product_id=product.id if is_pack(product) else None,
+            source_quantity=item.quantity,
+            conversion_factor=product.pack_size if is_pack(product) else 1,
+            unit_cost_snapshot=stock_product.cost,
             note=f"Cancelamento itens pendentes na conversão para consignado mesa {order.table.label if order.table else order.table_id}",
         ))
         await db.delete(item)
@@ -687,6 +894,15 @@ async def convert_order_to_consignment(
     order.status = "finalizada"
     order.closed_at = datetime.now(timezone.utc)
     order.payment_method = "fiado"
+    order.partial_payment = paid_product
+    order.partial_service_charge = paid_service
+    order.service_charge_applied = service_total > ZERO
+    order.service_charge_amount = service_total
+    order.close_idempotency_key = f"fiado:{order.id}:{uuid4()}"[:64]
+    order.closed_by_id = user.id
+    order.closed_waiter_id = (
+        credited_employee.id if credited_employee else None
+    )
 
     if order.table:
         has_open = await db.execute(
@@ -711,5 +927,6 @@ async def convert_order_to_consignment(
         "order_id": order.id,
         "customer_id": customer.id,
         "customer_name": customer.name,
-        "total": float(consignment.total),
+        "total": as_float(consignment.total),
+        "waiter_name": consignment.credited_waiter_name,
     }

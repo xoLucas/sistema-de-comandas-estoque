@@ -2,12 +2,15 @@ from contextlib import asynccontextmanager
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import JSONResponse, RedirectResponse
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.database import get_db
 from app.core.seed import run_seed
 from app.core.scheduler import start_scheduler, shutdown_scheduler
 from app.routers.tables import router as tables_router
@@ -44,6 +47,21 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Lads Beer - Sistema de Comandas", lifespan=lifespan)
 
 logger = logging.getLogger("uvicorn.error")
+
+
+@app.get("/health/live", include_in_schema=False)
+async def health_live():
+    return {"status": "ok"}
+
+
+@app.get("/health/ready", include_in_schema=False)
+async def health_ready(db: AsyncSession = Depends(get_db)):
+    try:
+        await db.scalar(text("SELECT 1"))
+    except Exception:
+        logger.exception("Readiness database check failed")
+        return JSONResponse(status_code=503, content={"status": "unavailable"})
+    return {"status": "ready"}
 
 
 @app.exception_handler(Exception)

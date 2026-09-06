@@ -26,6 +26,8 @@ async def create_printer_failure_notification(
     waiter_name: str | None = None,
     observation: str | None = None,
     ficha_mode: bool = False,
+    receipt_data: dict | None = None,
+    receipt_store_info: dict | None = None,
 ) -> Notification:
     function_label = _function_label(function)
     title = f"Falha na impressora {function_label}"
@@ -53,6 +55,8 @@ async def create_printer_failure_notification(
         "waiter_name": waiter_name,
         "observation": observation,
         "ficha_mode": ficha_mode,
+        "receipt_data": receipt_data,
+        "receipt_store_info": receipt_store_info,
     }
 
     notification = Notification(

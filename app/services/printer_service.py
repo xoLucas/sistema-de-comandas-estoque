@@ -2,6 +2,7 @@ import asyncio
 import logging
 import socket
 from datetime import datetime
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from app.core.database import async_session
@@ -10,6 +11,7 @@ from app.services.notification_service import (
     notification_to_dict,
 )
 from app.services.settings_service import get_setting, get_setting_as_int
+from app.services.money_service import money, rate
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +48,37 @@ def _line(char: str = "-", width: int = 32) -> str:
     return char * width
 
 
-def _format_money(value: float) -> str:
-    return f"R$ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+def _format_money(value: object) -> str:
+    amount = money(value)
+    return f"R$ {amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _format_rate(value: object) -> str:
+    amount = rate(value)
+    text = format(amount, "f").rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _receipt_total_line(label: str, value: object, width: int) -> str:
+    value_text = _format_money(value)
+    available = width - len(value_text)
+    label_text = label[: max(available - 2, 0)]
+    return f"{label_text}{' ' * (available - len(label_text))}{value_text}"
+
+
+def _receipt_item_lines(
+    name: str,
+    quantity: object,
+    unit_price: object,
+    subtotal: object,
+    width: int,
+) -> list[str]:
+    max_name_len = max(1, width - 10)
+    display_name = str(name)[:max_name_len]
+    quantity_text = f"{quantity}x"
+    first_line = f"{display_name:<{max_name_len}} {quantity_text:>8}"
+    values = f"{_format_money(unit_price)}  {_format_money(subtotal)}"
+    return [first_line, _right(values, width)]
 
 
 def _wrap_text(text: str, width: int) -> list[str]:
@@ -78,7 +109,12 @@ def _wrap_text(text: str, width: int) -> list[str]:
     return lines
 
 
-def _print_terminal_preview(title: str, lines: list[str]) -> None:
+def _print_terminal_preview(
+    title: str, lines: list[str], *, exact_receipt: bool = False
+) -> None:
+    if exact_receipt:
+        print("\n".join(lines))
+        return
     print()
     print("=" * 40)
     print(f"IMPRESSORA TERMINAL - {title}")
@@ -268,6 +304,8 @@ async def _background_send_to_function_printer(
                 waiter_name=context.get("waiter_name"),
                 observation=context.get("observation"),
                 ficha_mode=bool(context.get("ficha_mode")),
+                receipt_data=context.get("receipt_data"),
+                receipt_store_info=context.get("receipt_store_info"),
             )
             await broadcast_notification(notification_to_dict(notification))
     except Exception:
@@ -289,97 +327,150 @@ def build_order_receipt(
 ) -> bytes:
     b = EscPosBuilder(width=printer_width)
 
-    b.align_center()
-    b.bold_on()
-    b.line(store_info.get("name", "LADS BEER"))
-    b.bold_off()
+    preview_lines: list[str] = []
 
-    b.separator()
+    def write_line(text: str, *, align: str = "left", bold: bool = False) -> None:
+        if align == "center":
+            b.align_center()
+            preview_lines.append(_center(text, printer_width))
+        else:
+            b.align_left()
+            preview_lines.append(text)
+        if bold:
+            b.bold_on()
+        else:
+            b.bold_off()
+        b.line(text)
 
-    b.align_left()
-    b.bold_on()
-    b.line("NOTA NAO FISCAL")
-    b.bold_off()
-    b.line(f"Comanda: #{order_data.get('order_id', '')}")
-    b.line(f"Mesa: {order_data.get('table_label', '')}")
+    def write_total(label: str, value: object, *, bold: bool = False) -> None:
+        write_line(_receipt_total_line(label, value, printer_width), bold=bold)
+
+    def separator(char: str = "-") -> None:
+        write_line(_line(char, printer_width))
+
+    printed_at = order_data.get("printed_at")
+    if isinstance(printed_at, str):
+        try:
+            printed_at = datetime.fromisoformat(printed_at)
+        except ValueError:
+            printed_at = None
+    if not isinstance(printed_at, datetime):
+        printed_at = datetime.now(ZoneInfo("America/Sao_Paulo"))
+    elif printed_at.tzinfo is None:
+        printed_at = printed_at.replace(tzinfo=ZoneInfo("America/Sao_Paulo"))
+    else:
+        printed_at = printed_at.astimezone(ZoneInfo("America/Sao_Paulo"))
+
+    receipt_type = order_data.get("receipt_type", "counter_receipt")
+    status_text = (order_data.get("status_text") or "").strip()
+    product_total = money(order_data.get("total", 0))
+    paid_product = money(order_data.get("partial_payment", 0))
+    paid_service = money(order_data.get("partial_service_charge", 0))
+    service_total = money(order_data.get("service_charge_amount", 0))
+    service_pct = rate(order_data.get("service_charge_pct", 0))
+    payment_method = order_data.get("payment_method")
+    payment_labels = {
+        "dinheiro": "Dinheiro",
+        "pix": "PIX",
+        "cartao_credito": "Cartão de crédito",
+        "cartao_debito": "Cartão de débito",
+        "nao_informado": "Não informado",
+    }
+
+    write_line(store_info.get("name", "LADS BEER"), align="center", bold=True)
+    separator()
+    write_line("NOTA NAO FISCAL", bold=True)
+    if receipt_type == "table_quote" and not status_text:
+        write_line("OPCOES DE PAGAMENTO", bold=True)
+    if status_text:
+        separator("=")
+        write_line(status_text, align="center", bold=True)
+        write_line("NAO COBRAR", align="center", bold=True)
+        separator("=")
+    write_line(f"Comanda: #{order_data.get('order_id', '')}")
+    write_line(f"Mesa: {order_data.get('table_label', '')}")
     if order_data.get("customer_name"):
-        b.line(f"Cliente: {order_data['customer_name']}")
-
-    now = datetime.now(ZoneInfo("America/Sao_Paulo"))
-    b.line(f"Data: {now.strftime('%d/%m/%Y %H:%M')}")
-    b.separator()
-
-    b.line("ITENS CONSUMIDOS")
-    b.separator()
+        write_line(f"Cliente: {order_data['customer_name']}")
+    write_line(f"Data: {printed_at.strftime('%d/%m/%Y %H:%M')}")
+    separator()
+    write_line("ITENS CONSUMIDOS", bold=True)
+    separator()
 
     for item in order_data.get("items", []):
-        b.item_line(
-            name=item.get("product_name", ""),
-            qty=item.get("quantity", 1),
-            unit_price=item.get("unit_price", 0.0),
-            total=item.get("subtotal", 0.0),
+        for item_line in _receipt_item_lines(
+            item.get("product_name", ""),
+            item.get("quantity", 1),
+            item.get("unit_price", 0),
+            item.get("subtotal", 0),
+            printer_width,
+        ):
+            write_line(item_line)
+
+    separator()
+
+    if status_text:
+        write_total("VALOR ORIGINAL", money(product_total + service_total), bold=True)
+    elif receipt_type == "table_quote":
+        remaining_product = money(
+            order_data.get("amount_without_service", max(Decimal("0.00"), product_total - paid_product))
         )
-
-    b.separator()
-
-    total = order_data.get("total", 0.0)
-    service_charge = order_data.get("service_charge_amount", 0.0)
-    final_total = order_data.get("final_total", total)
-    partial_payment = order_data.get("partial_payment", 0.0)
-    valor_total_real = total + service_charge
-
-    if service_charge > 0:
-        b.total_line("Subtotal", total)
-        b.total_line(f"Taxa Servico ({order_data.get('service_charge_pct', 0):.0f}%)", service_charge)
-        b.double_separator()
-        b.bold_on()
-        b.total_line("TOTAL", valor_total_real)
-        b.bold_off()
+        optional_service = money(order_data.get("optional_service_amount", 0))
+        amount_with_service = money(
+            order_data.get("amount_with_service", remaining_product + optional_service)
+        )
+        write_total("TOTAL PRODUTOS", product_total)
+        if paid_product > 0:
+            write_total("PAGO ANTES (PRODUTOS)", paid_product)
+        if paid_service > 0:
+            write_total("GORJETA JA PAGA", paid_service)
+        write_total("RESTANTE PRODUTOS", remaining_product)
+        write_total(f"TAXA OPCIONAL ({_format_rate(service_pct)}%)", optional_service)
+        separator("=")
+        write_total("A PAGAR SEM TAXA", remaining_product, bold=True)
+        write_total("A PAGAR COM TAXA", amount_with_service, bold=True)
     else:
-        b.bold_on()
-        b.total_line("TOTAL", valor_total_real)
-        b.bold_off()
-
-    if order_data.get("payment_method"):
-            b.line(f"Forma de pagamento: {order_data['payment_method']}")
-
-    if partial_payment > 0:
-        b.total_line("Pago anteriormente", partial_payment)
-        
-        # Se houver taxa de serviço, exibe as duas opções de restante
-        if service_charge > 0:
-            restante_sem_taxa = max(0, total - partial_payment)
-            b.total_line("Restante (SEM taxa de serviço)", restante_sem_taxa)
-            b.total_line("Restante (COM taxa de serviço)", final_total)
+        remaining_service = money(max(Decimal("0.00"), service_total - paid_service))
+        paid_now = money(
+            order_data.get(
+                "final_total",
+                max(Decimal("0.00"), product_total - paid_product) + remaining_service,
+            )
+        )
+        gross_total = money(product_total + service_total)
+        write_total("TOTAL PRODUTOS", product_total)
+        if paid_service > 0:
+            write_total("GORJETA JA PAGA", paid_service)
+        if remaining_service > 0:
+            service_label = (
+                f"TAXA ATUAL ({_format_rate(service_pct)}%)"
+                if service_pct > 0
+                else "GORJETA ATUAL"
+            )
+            write_total(service_label, remaining_service)
+        if paid_product > 0 or paid_service > 0:
+            write_total("TOTAL DA COMANDA", gross_total)
+            write_total("PAGO ANTES", money(paid_product + paid_service))
+            separator("=")
+            write_total("PAGO AGORA", paid_now, bold=True)
         else:
-            # Se não tiver taxa na comanda, exibe o restante normal
-            b.total_line("Restante a pagar", final_total)
+            write_total("TOTAL PAGO", paid_now, bold=True)
+        if payment_method:
+            write_line(
+                f"Pagamento: {payment_labels.get(payment_method, payment_method)}"
+            )
+        if order_data.get("amount_received") is not None:
+            write_total("VALOR RECEBIDO", order_data["amount_received"])
+        if order_data.get("change_amount") is not None:
+            write_total("TROCO", order_data["change_amount"])
 
-    b.separator()
-    b.align_center()
+    separator()
     footer = store_info.get("ticket_footer")
     if footer:
-        b.line(footer)
-    b.line("Obrigado pela preferencia!")
+        write_line(footer, align="center")
+    write_line("Obrigado pela preferencia!", align="center")
     b.cut()
 
-    preview_lines = [
-        store_info.get("name", "LADS BEER"),
-        f"NOTA NAO FISCAL - Comanda #{order_data.get('order_id', '')}",
-        f"Mesa: {order_data.get('table_label', '')}",
-    ]
-    if order_data.get("customer_name"):
-        preview_lines.append(f"Cliente: {order_data['customer_name']}")
-    preview_lines.append(f"Data: {now.strftime('%d/%m/%Y %H:%M')}")
-    preview_lines.append("-" * 32)
-    for item in order_data.get("items", []):
-        preview_lines.append(f"{item.get('quantity', 1)}x {item.get('product_name', '')} - {_format_money(item.get('subtotal', 0.0))}")
-    preview_lines.append("-" * 32)
-    preview_lines.append(f"TOTAL: {_format_money(valor_total_real)}")
-    
-    if order_data.get("payment_method"):
-        preview_lines.append(f"Pagamento: {order_data['payment_method']}")
-    _print_terminal_preview("NOTA", preview_lines)
+    _print_terminal_preview("NOTA", preview_lines, exact_receipt=True)
 
     return b.build()
 

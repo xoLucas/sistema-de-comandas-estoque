@@ -1,6 +1,9 @@
 from datetime import datetime, timezone
+from decimal import Decimal
+from uuid import uuid4
+
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -20,12 +23,26 @@ from app.models.user import User
 from app.models.customer import Customer
 from app.models.employee import Employee
 from app.models.cash_register_session import CashRegisterSession
+from app.models.payment import OrderPayment, OrderPaymentAllocation
 from app.routers.auth_deps import get_current_user
 from app.services.promotion_service import get_discounted_price
 from app.services.settings_service import get_setting_as_float, get_setting
-from app.services.stock_service import is_pack, pack_stock_for_product, stock_status
+from app.services.stock_service import (
+    is_pack,
+    pack_stock_for_product,
+    stock_status,
+    validate_pack_configuration,
+)
 from app.services.printer_service import build_order_receipt, build_kitchen_ticket, build_bar_ticket, build_ficha_ticket, schedule_function_printer_send, get_printer_for_function
 from app.services.notification_service import notify_stock_alert, broadcast_stock_notification
+from app.services.money_service import ZERO, as_float, decimal_value, money, percentage_amount, rate
+from app.services.payment_service import (
+    create_order_payment,
+    distribute_service_amount,
+    item_net_paid_quantity,
+    order_net_paid,
+)
+from app.services.refund_service import refund_full_order, refund_paid_items
 
 router = APIRouter(prefix="/api", tags=["orders"])
 
@@ -33,10 +50,13 @@ _PAYMENT_METHODS = {"dinheiro", "pix", "cartao_debito", "cartao_credito", "nao_i
 _CLOSE_PAYMENT_METHODS = _PAYMENT_METHODS | {"fiado"}
 
 
-async def _require_open_cash_register(db: AsyncSession) -> CashRegisterSession | None:
-    result = await db.execute(
-        select(CashRegisterSession).where(CashRegisterSession.status == "open")
-    )
+async def _require_open_cash_register(
+    db: AsyncSession, *, for_update: bool = False
+) -> CashRegisterSession | None:
+    query = select(CashRegisterSession).where(CashRegisterSession.status == "open")
+    if for_update:
+        query = query.with_for_update()
+    result = await db.execute(query)
     return result.scalar_one_or_none()
 
 
@@ -71,17 +91,16 @@ async def _resolve_pack_stock(
 
     If product is a pack, the unit product stock is used; requested_quantity is in packs.
     """
-    if product.pack_unit_product_id is not None:
-        result = await db.execute(
-            select(Product).where(Product.id == product.pack_unit_product_id)
-        )
-        unit_product = result.scalars().first()
-        if not unit_product:
-            raise ValueError("Produto unitário do engradado não encontrado")
-        size = product.pack_size or 1
-        unit_quantity = requested_quantity * size
-        return unit_product, unit_quantity
-    return product, requested_quantity
+    validate_pack_configuration(product)
+    target_id = product.pack_unit_product_id or product.id
+    result = await db.execute(
+        select(Product).where(Product.id == target_id).with_for_update()
+    )
+    stock_product = result.scalars().first()
+    if not stock_product:
+        raise ValueError("Produto físico vinculado não encontrado")
+    size = product.pack_size if product.pack_unit_product_id else 1
+    return stock_product, requested_quantity * size
 
 
 async def _check_and_consume_stock(
@@ -97,11 +116,13 @@ async def _check_and_consume_stock(
     For pack products, consumes from the linked unit product.
     Returns the product whose stock was actually changed and an optional stock notification.
     """
+    if quantity <= 0:
+        raise ValueError("A quantidade deve ser maior que zero")
     stock_product, unit_quantity = await _resolve_pack_stock(db, product, quantity)
 
     if stock_product.stock < unit_quantity:
         available_packs = (
-            stock_product.stock // (product.pack_size or 1)
+            stock_product.stock // product.pack_size
             if product.pack_unit_product_id
             else stock_product.stock
         )
@@ -113,10 +134,14 @@ async def _check_and_consume_stock(
     stock_product.stock -= unit_quantity
     db.add(StockHistory(
         product_id=stock_product.id,
+        source_product_id=product.id if is_pack(product) else None,
         order_id=order_id,
         table_id=table_id,
         type="saida",
         quantity=unit_quantity,
+        source_quantity=quantity,
+        conversion_factor=product.pack_size if is_pack(product) else 1,
+        unit_cost_snapshot=stock_product.cost,
         note=note,
     ))
     notification = await _notify_stock_status(db, product)
@@ -141,19 +166,19 @@ async def _return_order_stock(
         product = item.product
         if not product:
             continue
-        try:
-            stock_product, unit_quantity = await _resolve_pack_stock(db, product, item.quantity)
-        except ValueError:
-            stock_product = product
-            unit_quantity = item.quantity
+        stock_product, unit_quantity = await _resolve_pack_stock(db, product, item.quantity)
 
         stock_product.stock += unit_quantity
         db.add(StockHistory(
             product_id=stock_product.id,
+            source_product_id=product.id if is_pack(product) else None,
             order_id=order_id,
             table_id=table_id,
             type="entrada",
             quantity=unit_quantity,
+            source_quantity=item.quantity,
+            conversion_factor=product.pack_size if is_pack(product) else 1,
+            unit_cost_snapshot=stock_product.cost,
             note=note,
         ))
 
@@ -177,11 +202,7 @@ async def _release_pending_items(
         product = item.product
         if not product:
             continue
-        try:
-            stock_product, unit_quantity = await _resolve_pack_stock(db, product, item.quantity)
-        except ValueError:
-            stock_product = product
-            unit_quantity = item.quantity
+        stock_product, unit_quantity = await _resolve_pack_stock(db, product, item.quantity)
 
         stock_product.stock += unit_quantity
         stock_broadcast_infos.append(_build_stock_broadcast_info(product))
@@ -189,10 +210,14 @@ async def _release_pending_items(
             stock_broadcast_infos.append(_build_stock_broadcast_info(stock_product))
         db.add(StockHistory(
             product_id=stock_product.id,
+            source_product_id=product.id if is_pack(product) else None,
             order_id=order.id,
             table_id=table_id,
             type="entrada",
             quantity=unit_quantity,
+            source_quantity=item.quantity,
+            conversion_factor=product.pack_size if is_pack(product) else 1,
+            unit_cost_snapshot=stock_product.cost,
             note=note,
         ))
         await db.delete(item)
@@ -208,11 +233,13 @@ async def _check_and_consume_stock_consignment(
     note: str,
 ) -> tuple[Product, Notification | None]:
     """Check stock availability, consume it, and write StockHistory for a consignment."""
+    if quantity <= 0:
+        raise ValueError("A quantidade deve ser maior que zero")
     stock_product, unit_quantity = await _resolve_pack_stock(db, product, quantity)
 
     if stock_product.stock < unit_quantity:
         available_packs = (
-            stock_product.stock // (product.pack_size or 1)
+            stock_product.stock // product.pack_size
             if product.pack_unit_product_id
             else stock_product.stock
         )
@@ -227,6 +254,10 @@ async def _check_and_consume_stock_consignment(
         consignment_order_id=consignment_order_id,
         type="saida",
         quantity=unit_quantity,
+        source_product_id=product.id if is_pack(product) else None,
+        source_quantity=quantity,
+        conversion_factor=product.pack_size if is_pack(product) else 1,
+        unit_cost_snapshot=stock_product.cost,
         note=note,
     ))
     notification = await _notify_stock_status(db, product)
@@ -286,32 +317,47 @@ class OrderItemRequest(BaseModel):
     order_round_id: int | None = None
     order_id: int | None = None
 
+    @field_validator("quantity")
+    @classmethod
+    def validate_non_zero_quantity(cls, value: int) -> int:
+        if value == 0:
+            raise ValueError("A quantidade não pode ser zero")
+        return value
+
 
 class CloseOrderRequest(BaseModel):
     table_id: int
     apply_service_charge: bool = False
-    service_charge_custom: float | None = None
+    service_charge_custom: Decimal | None = None
     payment_method: str | None = None
     card_machine: str | None = None
     order_id: int | None = None
-    amount: float | None = None
+    amount: Decimal | None = None
     waiter_id: int | None = None
     ficha_mode: bool = False
+    idempotency_key: str | None = Field(default=None, max_length=64)
+
+
+class PartialPaymentItemRequest(BaseModel):
+    order_item_id: int = Field(..., gt=0)
+    quantity: int = Field(..., gt=0)
 
 
 class PartialPaymentRequest(BaseModel):
     table_id: int
-    amount: float
+    amount: Decimal = Field(..., gt=0)
     payment_method: str | None = None
     card_machine: str | None = None
     apply_service_charge: bool = False
-    service_charge_custom: float | None = None
+    service_charge_custom: Decimal | None = None
     order_id: int | None = None
+    items: list[PartialPaymentItemRequest] | None = None
+    idempotency_key: str | None = Field(default=None, max_length=64)
 
 
 class PedidoItem(BaseModel):
     product_id: int
-    quantity: int = 1
+    quantity: int = Field(default=1, gt=0)
 
 
 class CreatePedidoRequest(BaseModel):
@@ -327,24 +373,48 @@ class PendingOrderItemRequest(BaseModel):
     product_id: int
     quantity: int = 1
 
+    @field_validator("quantity")
+    @classmethod
+    def validate_non_zero_quantity(cls, value: int) -> int:
+        if value == 0:
+            raise ValueError("A quantidade não pode ser zero")
+        return value
+
+
+class RefundItemsRequest(BaseModel):
+    items: list[PartialPaymentItemRequest] = Field(..., min_length=1)
+    reason: str = Field(..., min_length=3, max_length=500)
+    idempotency_key: str | None = Field(default=None, max_length=64)
+
+
+class CancelOrderRequest(BaseModel):
+    reason: str = Field(default="Cancelamento de comanda", min_length=3, max_length=500)
+    idempotency_key: str | None = Field(default=None, max_length=64)
+
 
 class PrintReceiptItem(BaseModel):
     product_name: str
-    quantity: float
-    unit_price: float
+    quantity: float = Field(gt=0)
+    unit_price: Decimal = Field(ge=0)
     subtotal: float | None = None
 
 
 class PrintReceiptRequest(BaseModel):
     """Optional print-only overrides. Never persisted to the database."""
+    is_modified: bool = False
     items: list[PrintReceiptItem] | None = None
     customer_name: str | None = None
     table_label: str | None = None
-    total: float | None = None
-    service_charge_pct: float | None = None
-    service_charge_amount: float | None = None
-    partial_payment: float | None = None
-    final_total: float | None = None
+    amount_received: Decimal | None = Field(default=None, ge=0)
+    change_amount: Decimal | None = Field(default=None, ge=0)
+    # Legacy client fields are intentionally ignored. The server recomputes every
+    # monetary amount from the current order or from the explicit print-only items.
+    total: Decimal | None = None
+    service_charge_pct: Decimal | None = None
+    service_charge_amount: Decimal | None = None
+    partial_payment: Decimal | None = None
+    partial_service_charge: Decimal | None = None
+    final_total: Decimal | None = None
     payment_method: str | None = None
 
 
@@ -460,14 +530,24 @@ async def open_order(
                             stock_product.stock += unit_quantity
                             db.add(StockHistory(
                                 product_id=stock_product.id,
+                                source_product_id=(
+                                    product.id if is_pack(product) else None
+                                ),
                                 order_id=extra_order.id,
                                 table_id=extra_order.table_id,
                                 type="entrada",
                                 quantity=unit_quantity,
+                                source_quantity=item.quantity,
+                                conversion_factor=(
+                                    product.pack_size
+                                    if is_pack(product)
+                                    else 1
+                                ),
+                                unit_cost_snapshot=stock_product.cost,
                                 note=f"Cancelamento comanda duplicada Balcão {table.number if table else extra_order.table_id}",
                             ))
-                        except ValueError:
-                            pass
+                        except ValueError as exc:
+                            return {"error": str(exc)}
                     extra_order.status = "cancelada"
                     extra_order.closed_at = datetime.now(timezone.utc)
                 await db.commit()
@@ -498,7 +578,7 @@ async def open_order(
         customer_id=customer.id if customer else None,
         customer_name=req.customer_name or (customer.name if customer else None),
         status="aberta",
-        total=0.0,
+        total=ZERO,
     )
     db.add(order)
     await db.commit()
@@ -523,15 +603,19 @@ async def create_pedido(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    if not await _require_open_cash_register(db, for_update=True):
+        return {"error": "caixa_fechado", "detail": "O caixa está fechado. Abra o caixa para lançar pedidos."}
+
     order = await _get_open_order_for_table(
-        db, req.table_id, req.order_id, options=[selectinload(Order.rounds)]
+        db,
+        req.table_id,
+        req.order_id,
+        options=[selectinload(Order.rounds)],
+        for_update=True,
     )
 
     if not order:
         return {"error": "Nenhuma comanda aberta para esta mesa"}
-
-    if not await _require_open_cash_register(db):
-        return {"error": "caixa_fechado", "detail": "O caixa está fechado. Abra o caixa para lançar pedidos."}
 
     if not req.items:
         return {"error": "Pedido deve conter ao menos 1 item"}
@@ -583,7 +667,7 @@ async def create_pedido(
             product_id=product.id,
             quantity=entry.quantity,
             unit_price=unit_price,
-            unit_cost=float(product.cost) if product.cost is not None else 0.0,
+            unit_cost=product.cost or ZERO,
         )
         db.add(item)
 
@@ -600,7 +684,7 @@ async def create_pedido(
         select(func.coalesce(func.sum(OrderItem.unit_price * OrderItem.quantity), 0.0))
         .where(OrderItem.order_id == order.id, OrderItem.is_pending == False)
     )
-    order.total = float(total_result.scalar_one())
+    order.total = money(total_result.scalar_one())
 
     await db.commit()
 
@@ -642,7 +726,7 @@ async def create_pedido(
         "pedido_id": rnd.id,
         "round_number": round_number,
         "order_id": order.id,
-        "total": float(order.total),
+        "total": as_float(order.total),
         "items": items_out,
     }
 
@@ -653,17 +737,28 @@ async def add_order_item(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    if not await _require_open_cash_register(db, for_update=True):
+        return {
+            "error": "caixa_fechado",
+            "detail": "O caixa está fechado. Abra o caixa para lançar pedidos.",
+        }
+
     order = await _get_open_order_for_table(
-        db, req.table_id, req.order_id, options=[selectinload(Order.items)]
+        db,
+        req.table_id,
+        req.order_id,
+        options=[selectinload(Order.items)],
+        for_update=True,
     )
 
     if not order:
         return {"error": "Nenhuma comanda aberta para esta mesa"}
 
-    if not await _require_open_cash_register(db):
-        return {"error": "caixa_fechado", "detail": "O caixa está fechado. Abra o caixa para lançar pedidos."}
-
-    result = await db.execute(select(Product).where(Product.id == req.product_id))
+    result = await db.execute(
+        select(Product)
+        .where(Product.id == req.product_id)
+        .options(selectinload(Product.pack_unit_product))
+    )
     product = result.scalars().first()
 
     if not product:
@@ -672,7 +767,7 @@ async def add_order_item(
     table_result = await db.execute(select(Table).where(Table.id == req.table_id))
     table = table_result.scalars().first()
 
-    unit_price = await _get_promotional_price(product, db)
+    unit_price = money(await _get_promotional_price(product, db))
 
     existing_item = None
     for item in order.items:
@@ -701,7 +796,7 @@ async def add_order_item(
         if existing_item:
             existing_item.quantity += req.quantity
             if existing_item.unit_cost is None:
-                existing_item.unit_cost = float(product.cost) if product.cost is not None else 0.0
+                existing_item.unit_cost = product.cost or ZERO
         else:
             order_item = OrderItem(
                 order_id=order.id,
@@ -709,18 +804,40 @@ async def add_order_item(
                 product_id=product.id,
                 quantity=req.quantity,
                 unit_price=unit_price,
-                unit_cost=float(product.cost) if product.cost is not None else 0.0,
+                unit_cost=product.cost or ZERO,
             )
             db.add(order_item)
     else:
-        qty_change = abs(req.quantity)
         if not existing_item:
             return {"error": "Item não encontrado na comanda"}
 
-        if existing_item.quantity <= qty_change:
+        qty_change = min(abs(req.quantity), existing_item.quantity)
+        paid_quantity = await item_net_paid_quantity(db, existing_item.id)
+        remaining_quantity = existing_item.quantity - qty_change
+        if remaining_quantity < paid_quantity:
+            return {
+                "error": (
+                    "Não é possível remover uma quantidade já paga. "
+                    "Estorne os itens pagos antes de removê-los."
+                )
+            }
+
+        paid_product, _ = await order_net_paid(db, order.id)
+        projected_total = money(
+            money(order.total) - money(existing_item.unit_price * qty_change)
+        )
+        if projected_total < paid_product:
+            return {
+                "error": (
+                    "O ajuste deixaria o total da comanda abaixo do valor já pago. "
+                    "Estorne o pagamento antes de remover o item."
+                )
+            }
+
+        if remaining_quantity == 0:
             await db.delete(existing_item)
         else:
-            existing_item.quantity -= qty_change
+            existing_item.quantity = remaining_quantity
 
         try:
             stock_product, unit_quantity = await _resolve_pack_stock(db, product, qty_change)
@@ -734,6 +851,10 @@ async def add_order_item(
                 table_id=req.table_id,
                 type="entrada",
                 quantity=unit_quantity,
+                source_product_id=product.id if is_pack(product) else None,
+                source_quantity=qty_change,
+                conversion_factor=product.pack_size if is_pack(product) else 1,
+                unit_cost_snapshot=stock_product.cost,
                 note=f"Cancelamento/ajuste mesa {table.number if table else req.table_id}",
             ))
         except ValueError as e:
@@ -742,10 +863,10 @@ async def add_order_item(
     await db.flush()
 
     total_result = await db.execute(
-        select(func.coalesce(func.sum(OrderItem.unit_price * OrderItem.quantity), 0.0))
+        select(func.coalesce(func.sum(OrderItem.unit_price * OrderItem.quantity), 0))
         .where(OrderItem.order_id == order.id, OrderItem.is_pending == False)
     )
-    total = float(total_result.scalar_one())
+    total = money(total_result.scalar_one())
     order.total = total
 
     await db.commit()
@@ -785,18 +906,16 @@ async def add_order_item(
                 table_label,
             )
 
-    try:
-        stock_product, _ = await _resolve_pack_stock(db, product, abs(req.quantity))
-    except ValueError:
-        stock_product = product
-
-    fresh_product_result = await db.execute(select(Product).where(Product.id == product.id))
-    fresh_product = fresh_product_result.scalars().first()
-    stock_remaining = fresh_product.stock if fresh_product else product.stock
+    stock_product, _ = await _resolve_pack_stock(db, product, 1)
+    stock_remaining = (
+        stock_product.stock // product.pack_size
+        if is_pack(product)
+        else stock_product.stock
+    )
 
     return {
         "order_id": order.id,
-        "total": float(total),
+        "total": as_float(total),
         "product": product.name,
         "quantity": req.quantity,
         "stock_remaining": stock_remaining,
@@ -809,69 +928,182 @@ async def partial_payment(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if req.amount <= 0:
-        return {"error": "O valor do pagamento deve ser maior que zero"}
-
     method = req.payment_method or "nao_informado"
     if method not in _PAYMENT_METHODS:
         return {"error": "Forma de pagamento inválida"}
 
-    open_session = await _require_open_cash_register(db)
+    open_session = await _require_open_cash_register(db, for_update=True)
     if not open_session:
         return {"error": "Não há caixa aberto para receber pagamentos"}
 
     order = await _get_open_order_for_table(
-        db, req.table_id, req.order_id, for_update=True
+        db,
+        req.table_id,
+        req.order_id,
+        for_update=True,
+        options=[selectinload(Order.items)],
     )
 
     if not order:
         return {"error": "Nenhuma comanda aberta para esta mesa"}
 
-    remaining_product = max(0.0, order.total - order.partial_payment)
+    if req.idempotency_key:
+        existing_payment = await db.scalar(
+            select(OrderPayment).where(
+                OrderPayment.idempotency_key == req.idempotency_key
+            )
+        )
+        if existing_payment:
+            if existing_payment.order_id != order.id:
+                return {"error": "Identificador de pagamento já utilizado"}
+            paid_product, paid_service = await order_net_paid(db, order.id)
+            return {
+                "order_id": order.id,
+                "payment_id": existing_payment.id,
+                "partial_payment": as_float(paid_product),
+                "partial_service_charge": as_float(paid_service),
+                "total": as_float(order.total),
+                "remaining": as_float(max(ZERO, money(order.total) - paid_product)),
+                "idempotent_replay": True,
+            }
+
+    paid_product, _ = await order_net_paid(db, order.id)
+    remaining_product = money(max(ZERO, money(order.total) - paid_product))
+    request_amount = money(req.amount)
 
     custom = req.service_charge_custom
-    if req.apply_service_charge and custom is not None and custom > 0:
-        if custom >= req.amount:
+    allocations_to_create: list[tuple[OrderItem, int, Decimal]] = []
+    selected_product_amount = ZERO
+    if req.items:
+        requested_by_id: dict[int, int] = {}
+        for selected in req.items:
+            requested_by_id[selected.order_item_id] = (
+                requested_by_id.get(selected.order_item_id, 0) + selected.quantity
+            )
+        item_result = await db.execute(
+            select(OrderItem)
+            .where(OrderItem.id.in_(sorted(requested_by_id)))
+            .order_by(OrderItem.id)
+            .with_for_update()
+        )
+        selected_items = {item.id: item for item in item_result.scalars().all()}
+        if len(selected_items) != len(requested_by_id):
+            return {"error": "Um dos itens selecionados não existe"}
+        for item_id, quantity in requested_by_id.items():
+            item = selected_items[item_id]
+            if item.order_id != order.id or item.is_pending:
+                return {"error": "Item não pertence à comanda ou ainda está pendente"}
+            paid_quantity = await item_net_paid_quantity(db, item.id)
+            if paid_quantity + quantity > item.quantity:
+                return {"error": "A quantidade selecionada já foi paga"}
+            subtotal = money(item.unit_price * quantity)
+            selected_product_amount = money(selected_product_amount + subtotal)
+            allocations_to_create.append((item, quantity, subtotal))
+
+    if allocations_to_create:
+        product_portion = selected_product_amount
+        if req.apply_service_charge and custom is not None and custom > ZERO:
+            service_portion = money(custom)
+        elif req.apply_service_charge:
+            service_pct = rate(
+                await get_setting_as_float(db, "service_charge_pct", 10.0)
+            )
+            service_portion = percentage_amount(product_portion, service_pct)
+        else:
+            service_portion = ZERO
+        if money(product_portion + service_portion) != request_amount:
+            return {"error": "O total enviado não corresponde aos itens selecionados"}
+    elif req.apply_service_charge and custom is not None and custom > ZERO:
+        if money(custom) >= request_amount:
             return {"error": "A gorjeta personalizada não pode ser maior ou igual ao valor a abater"}
-        product_portion = round(max(0.0, req.amount - custom), 2)
-        service_portion = round(custom, 2)
+        product_portion = money(request_amount - money(custom))
+        service_portion = money(custom)
     elif req.apply_service_charge:
-        service_charge_pct = await get_setting_as_float(db, "service_charge_pct", 10.0)
-        divisor = 1 + (service_charge_pct / 100)
-        product_portion = round(req.amount / divisor, 2)
-        service_portion = round(req.amount - product_portion, 2)
+        service_charge_pct = rate(
+            await get_setting_as_float(db, "service_charge_pct", 10.0)
+        )
+        divisor = Decimal("1") + (service_charge_pct / Decimal("100"))
+        product_portion = money(request_amount / divisor)
+        service_portion = money(request_amount - product_portion)
     else:
-        product_portion = req.amount
-        service_portion = 0.0
+        product_portion = request_amount
+        service_portion = ZERO
 
     if product_portion > remaining_product:
         return {"error": "O pagamento excede o valor restante da comanda"}
 
-    order.partial_payment += product_portion
-    order.partial_service_charge += service_portion
+    try:
+        payment, created = await create_order_payment(
+            db,
+            order=order,
+            user=user,
+            cash_session=open_session,
+            payment_type="partial",
+            product_amount=product_portion,
+            service_amount=service_portion,
+            payment_method=method,
+            card_machine=req.card_machine,
+            idempotency_key=req.idempotency_key,
+        )
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+    if not created:
+        return {"error": "Pagamento já registrado"}
+
+    if allocations_to_create:
+        service_shares = distribute_service_amount(
+            [entry[2] for entry in allocations_to_create], service_portion
+        )
+        for (item, quantity, subtotal), service_share in zip(
+            allocations_to_create, service_shares, strict=True
+        ):
+            db.add(
+                OrderPaymentAllocation(
+                    payment_id=payment.id,
+                    order_item_id=item.id,
+                    product_id=item.product_id,
+                    quantity=quantity,
+                    unit_price=money(item.unit_price),
+                    product_amount=subtotal,
+                    service_amount=service_share,
+                )
+            )
+
+    order.partial_payment = money(money(order.partial_payment) + product_portion)
+    order.partial_service_charge = money(
+        money(order.partial_service_charge) + service_portion
+    )
 
     detail = list(order.partial_payments_detail or [])
     detail.append({
-        "amount": req.amount,
-        "product_portion": product_portion,
-        "service_portion": service_portion,
+        "payment_id": payment.id,
+        "idempotency_key": payment.idempotency_key,
+        "amount": as_float(payment.gross_amount),
+        "product_portion": as_float(product_portion),
+        "service_portion": as_float(service_portion),
         "method": method,
         "card_machine": req.card_machine,
         "apply_service_charge": req.apply_service_charge,
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "items": [
+            {"order_item_id": item.id, "quantity": quantity}
+            for item, quantity, _ in allocations_to_create
+        ],
     })
     order.partial_payments_detail = detail
 
     await db.commit()
     await broadcast_table_update(req.table_id)
 
-    remaining_product = max(0.0, order.total - order.partial_payment)
+    remaining_product = money(max(ZERO, money(order.total) - money(order.partial_payment)))
     return {
         "order_id": order.id,
-        "partial_payment": float(order.partial_payment),
-        "partial_service_charge": float(order.partial_service_charge),
-        "total": float(order.total),
-        "remaining": float(remaining_product),
+        "payment_id": payment.id,
+        "partial_payment": as_float(order.partial_payment),
+        "partial_service_charge": as_float(order.partial_service_charge),
+        "total": as_float(order.total),
+        "remaining": as_float(remaining_product),
     }
 
 
@@ -881,8 +1113,82 @@ async def close_order(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    if req.idempotency_key:
+        replay_order = await db.scalar(
+            select(Order).where(
+                Order.close_idempotency_key == req.idempotency_key
+            )
+        )
+        if replay_order:
+            replay_payment = await db.scalar(
+                select(OrderPayment)
+                .where(
+                    OrderPayment.order_id == replay_order.id,
+                    OrderPayment.payment_type == "final",
+                )
+                .order_by(OrderPayment.id.desc())
+            )
+            return {
+                "order_id": replay_order.id,
+                "table_id": replay_order.table_id,
+                "payment_id": replay_payment.id if replay_payment else None,
+                "total": as_float(replay_order.total),
+                "service_charge_amount": as_float(replay_order.service_charge_amount),
+                "partial_payment": as_float(replay_order.partial_payment),
+                "partial_service_charge": as_float(replay_order.partial_service_charge),
+                "final_total": as_float(replay_payment.gross_amount if replay_payment else ZERO),
+                "payment_method": replay_order.payment_method,
+                "status": replay_order.status,
+                "idempotent_replay": True,
+            }
+
+        replay_payment = await db.scalar(
+            select(OrderPayment).where(
+                OrderPayment.idempotency_key == req.idempotency_key,
+                OrderPayment.payment_type == "final",
+            )
+        )
+        if replay_payment:
+            replay_order = await db.get(Order, replay_payment.order_id)
+            return {
+                "order_id": replay_order.id,
+                "table_id": replay_order.table_id,
+                "total": as_float(replay_order.total),
+                "service_charge_amount": as_float(replay_order.service_charge_amount),
+                "partial_payment": as_float(replay_order.partial_payment),
+                "partial_service_charge": as_float(replay_order.partial_service_charge),
+                "final_total": as_float(replay_payment.gross_amount),
+                "payment_method": replay_payment.payment_method,
+                "status": replay_order.status,
+                "idempotent_replay": True,
+            }
+
+    open_session = await _require_open_cash_register(db, for_update=True)
+    if not open_session:
+        return {"error": "Não há caixa aberto para finalizar a venda"}
+
+    if req.idempotency_key:
+        replay_order = await db.scalar(
+            select(Order).where(
+                Order.close_idempotency_key == req.idempotency_key
+            )
+        )
+        if replay_order:
+            return {
+                "order_id": replay_order.id,
+                "table_id": replay_order.table_id,
+                "total": as_float(replay_order.total),
+                "service_charge_amount": as_float(replay_order.service_charge_amount),
+                "partial_payment": as_float(replay_order.partial_payment),
+                "partial_service_charge": as_float(replay_order.partial_service_charge),
+                "final_total": 0.0,
+                "payment_method": replay_order.payment_method,
+                "status": replay_order.status,
+                "idempotent_replay": True,
+            }
+
     order = await _get_open_order_for_table(
-        db, req.table_id, req.order_id, options=[
+        db, req.table_id, req.order_id, for_update=True, options=[
             selectinload(Order.table),
             selectinload(Order.items).selectinload(OrderItem.product),
         ]
@@ -894,24 +1200,33 @@ async def close_order(
     table_result = await db.execute(select(Table).where(Table.id == req.table_id))
     table = table_result.scalars().first()
 
-    service_charge_pct = await get_setting_as_float(db, "service_charge_pct", 10.0)
-    remaining_product = max(0.0, order.total - order.partial_payment)
+    service_charge_pct = rate(
+        await get_setting_as_float(db, "service_charge_pct", 10.0)
+    )
+    paid_product, paid_service = await order_net_paid(db, order.id)
+    remaining_product = money(max(ZERO, money(order.total) - paid_product))
     if req.apply_service_charge:
         order.service_charge_applied = True
         custom = req.service_charge_custom
-        if custom is not None and custom > 0:
-            order.service_charge_pct = round(custom / remaining_product * 100, 2) if remaining_product > 0 else 0.0
-            service_charge_amount = round(custom, 2)
+        if custom is not None and custom > ZERO:
+            order.service_charge_pct = (
+                rate(money(custom) / remaining_product * Decimal("100"))
+                if remaining_product > ZERO
+                else rate(0)
+            )
+            service_charge_amount = money(custom)
         else:
             order.service_charge_pct = service_charge_pct
-            service_charge_amount = remaining_product * (order.service_charge_pct / 100)
+            service_charge_amount = percentage_amount(
+                remaining_product, order.service_charge_pct
+            )
     else:
-        order.service_charge_pct = 0.0
+        order.service_charge_pct = rate(0)
         order.service_charge_applied = False
-        service_charge_amount = 0.0
+        service_charge_amount = ZERO
 
-    remaining_service = max(0.0, service_charge_amount)
-    final_total = remaining_product + remaining_service
+    remaining_service = money(max(ZERO, service_charge_amount))
+    final_total = money(remaining_product + remaining_service)
 
     close_method = req.payment_method or "nao_informado"
     if close_method == "fiado":
@@ -919,26 +1234,54 @@ async def close_order(
     if close_method not in _CLOSE_PAYMENT_METHODS:
         return {"error": "Forma de pagamento inválida"}
 
+    tendered: Decimal | None = None
     if close_method == "dinheiro":
         if req.amount is None:
             return {"error": "Informe o valor pago"}
-        if req.amount < final_total:
-            return {"error": f"Valor pago (R$ {req.amount:.2f}) é menor que o total final (R$ {final_total:.2f})"}
+        tendered = money(req.amount)
+        if tendered < final_total:
+            return {"error": f"Valor pago (R$ {tendered:.2f}) é menor que o total final (R$ {final_total:.2f})"}
+
+    final_payment = None
+    if final_total > ZERO:
+        try:
+            final_payment, _ = await create_order_payment(
+                db,
+                order=order,
+                user=user,
+                cash_session=open_session,
+                payment_type="final",
+                product_amount=remaining_product,
+                service_amount=remaining_service,
+                payment_method=close_method,
+                card_machine=req.card_machine,
+                idempotency_key=req.idempotency_key,
+            )
+        except ValueError as exc:
+            return {"error": str(exc)}
 
     table_label = table.label if table else "Balcão"
-    stock_broadcast_infos = await _release_pending_items(
-        db,
-        order,
-        req.table_id,
-        f"Cancelamento itens pendentes no fechamento da {table_label}",
-    )
+    try:
+        stock_broadcast_infos = await _release_pending_items(
+            db,
+            order,
+            req.table_id,
+            f"Cancelamento itens pendentes no fechamento da {table_label}",
+        )
+    except ValueError as exc:
+        return {"error": str(exc)}
 
     order.status = "finalizada"
     order.closed_at = datetime.now(timezone.utc)
     order.payment_method = close_method
     order.card_machine = req.card_machine
+    order.close_idempotency_key = (
+        req.idempotency_key.strip() if req.idempotency_key else str(uuid4())
+    )
     order.closed_by_id = user.id
-    order.service_charge_amount = round(order.partial_service_charge + remaining_service, 2)
+    order.partial_payment = paid_product
+    order.partial_service_charge = paid_service
+    order.service_charge_amount = money(paid_service + remaining_service)
 
     if req.waiter_id is not None and user.role == "gerente":
         employee_result = await db.execute(select(Employee).where(Employee.id == req.waiter_id))
@@ -963,7 +1306,22 @@ async def close_order(
             if req.ficha_mode:
                 receipt_result = await _print_ficha_tickets(db, order)
             else:
-                receipt_result = await _print_order_receipt(db, order, user, PrintReceiptRequest(payment_method=req.payment_method))
+                amount_received = tendered if tendered is not None else final_total
+                change_amount = (
+                    money(tendered - final_total)
+                    if tendered is not None
+                    else ZERO
+                )
+                receipt_result = await _print_order_receipt(
+                    db,
+                    order,
+                    user,
+                    PrintReceiptRequest(
+                        payment_method=req.payment_method,
+                        amount_received=amount_received,
+                        change_amount=change_amount,
+                    ),
+                )
         except Exception as exc:
             import traceback
             print("ERRO AO IMPRIMIR NOTA DO BALCAO:", exc)
@@ -976,12 +1334,13 @@ async def close_order(
         "order_id": order.id,
         "table_id": table.id,
         "table_number": table.number,
-        "total": float(order.total),
+        "payment_id": final_payment.id if final_payment else None,
+        "total": as_float(order.total),
         "service_charge_pct": float(order.service_charge_pct),
-        "service_charge_amount": round(float(service_charge_amount), 2),
-        "partial_payment": float(order.partial_payment),
-        "partial_service_charge": float(order.partial_service_charge),
-        "final_total": round(float(final_total), 2),
+        "service_charge_amount": as_float(order.service_charge_amount),
+        "partial_payment": as_float(order.partial_payment),
+        "partial_service_charge": as_float(order.partial_service_charge),
+        "final_total": as_float(final_total),
         "payment_method": order.payment_method,
         "status": "finalizada",
         "customer_id": order.customer_id,
@@ -992,16 +1351,70 @@ async def close_order(
     return response
 
 
-@router.post("/comanda/{order_id}/cancelar")
-async def cancel_order(
+@router.post("/comanda/{order_id}/estornar-itens")
+async def refund_order_items(
     order_id: int,
+    req: RefundItemsRequest,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    if user.role != "gerente":
+        return {"error": "Acesso restrito ao gerente"}
+
+    open_session = await _require_open_cash_register(db, for_update=True)
+    if not open_session:
+        return {"error": "Abra o caixa antes de registrar o estorno"}
+
+    quantities: dict[int, int] = {}
+    for item in req.items:
+        quantities[item.order_item_id] = (
+            quantities.get(item.order_item_id, 0) + item.quantity
+        )
+    try:
+        refund = await refund_paid_items(
+            db,
+            order_id=order_id,
+            quantities=quantities,
+            user=user,
+            cash_session=open_session,
+            reason=req.reason.strip(),
+            idempotency_key=req.idempotency_key,
+        )
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+    order = await db.get(Order, order_id)
+    await db.commit()
+    if order:
+        await broadcast_table_update(order.table_id)
+    seen: set[int] = set()
+    for product_id, stock, status in refund.stock_updates:
+        if product_id in seen:
+            continue
+        seen.add(product_id)
+        await broadcast_stock_update(product_id, stock, status)
+    return {
+        "message": "Itens estornados com sucesso",
+        "refund_group_key": refund.group_key,
+        "refund_ids": refund.refund_ids,
+        "refunded_amount": as_float(refund.gross_amount),
+        "idempotent_replay": refund.replayed,
+    }
+
+
+@router.post("/comanda/{order_id}/cancelar")
+async def cancel_order(
+    order_id: int,
+    req: CancelOrderRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    open_session = await _require_open_cash_register(db, for_update=True)
     order_result = await db.execute(
         select(Order)
         .where(Order.id == order_id)
         .options(selectinload(Order.items).selectinload(OrderItem.product))
+        .with_for_update()
     )
     order = order_result.scalars().first()
 
@@ -1013,6 +1426,47 @@ async def cancel_order(
 
     table_result = await db.execute(select(Table).where(Table.id == order.table_id))
     table = table_result.scalars().first()
+
+    paid_product, paid_service = await order_net_paid(db, order.id)
+    if money(paid_product + paid_service) > ZERO:
+        if user.role != "gerente":
+            return {
+                "error": (
+                    "A comanda possui pagamentos. Solicite ao gerente o cancelamento "
+                    "com estorno no mesmo meio de pagamento."
+                )
+            }
+        if not open_session:
+            return {"error": "Abra o caixa antes de cancelar pagamentos recebidos"}
+        payload = req or CancelOrderRequest()
+        try:
+            refund = await refund_full_order(
+                db,
+                order_id=order.id,
+                user=user,
+                cash_session=open_session,
+                reason=payload.reason.strip(),
+                idempotency_key=payload.idempotency_key,
+                allow_open_order=True,
+            )
+        except ValueError as exc:
+            return {"error": str(exc)}
+
+        if table:
+            table.status = "vazia"
+        await db.commit()
+        await broadcast_table_update(order.table_id)
+        seen: set[int] = set()
+        for product_id, stock, status in refund.stock_updates:
+            if product_id in seen:
+                continue
+            seen.add(product_id)
+            await broadcast_stock_update(product_id, stock, status)
+        return {
+            "message": "Comanda cancelada e pagamentos estornados",
+            "refunded_amount": as_float(refund.gross_amount),
+            "refund_group_key": refund.group_key,
+        }
 
     stock_broadcast_infos = []
     for item in order.items:
@@ -1027,10 +1481,14 @@ async def cancel_order(
                 stock_broadcast_infos.append(_build_stock_broadcast_info(stock_product))
             db.add(StockHistory(
                 product_id=stock_product.id,
+                source_product_id=product.id if is_pack(product) else None,
                 order_id=order.id,
                 table_id=order.table_id,
                 type="entrada",
                 quantity=unit_quantity,
+                source_quantity=item.quantity,
+                conversion_factor=product.pack_size if is_pack(product) else 1,
+                unit_cost_snapshot=stock_product.cost,
                 note=f"Cancelamento comanda {table.number if table else order.table_id}",
             ))
         except ValueError as e:
@@ -1126,89 +1584,137 @@ async def _print_ficha_tickets(db: AsyncSession, order: Order) -> dict:
     return {"success": True, "message": f"{ficha_count} ficha(s) exibida(s) no terminal (nenhuma impressora configurada)"}
 
 
+def _confirmed_receipt_items(order: Order) -> list[dict]:
+    return [
+        {
+            "product_name": item.product.name if item.product else "Produto",
+            "quantity": item.quantity,
+            "unit_price": float(item.unit_price),
+            "subtotal": float(item.unit_price * item.quantity),
+        }
+        for item in order.items
+        if not item.is_pending
+    ]
+
+
 async def _print_order_receipt(
     db: AsyncSession,
     order: Order,
     user: User,
     req: PrintReceiptRequest | None = None,
 ) -> dict:
-    """Print receipt. Optional body overrides are print-only and never saved."""
+    """Print a table quote or a definitive counter receipt from canonical values."""
     req = req or PrintReceiptRequest()
 
-    if req.items is not None:
+    status_text = ""
+    if order.is_estorno:
+        status_text = "NOTA ESTORNADA"
+    elif order.status == "cancelada":
+        status_text = "NOTA CANCELADA"
+    is_counter_receipt = bool(order.table and order.table.is_balcao)
+    use_print_overrides = bool(
+        req.is_modified
+        and req.items is not None
+        and not is_counter_receipt
+        and order.status == "aberta"
+        and not status_text
+    )
+    if use_print_overrides:
         items = []
         for item in req.items:
-            qty = float(item.quantity)
-            unit = float(item.unit_price)
-            subtotal = float(item.subtotal) if item.subtotal is not None else round(qty * unit, 2)
-            if qty <= 0:
-                continue
+            qty = Decimal(str(item.quantity))
+            unit = money(item.unit_price)
+            subtotal = money(qty * unit)
             items.append({
                 "product_name": item.product_name.strip() or "Item",
-                "quantity": qty,
-                "unit_price": unit,
-                "subtotal": subtotal,
+                "quantity": float(qty),
+                "unit_price": as_float(unit),
+                "subtotal": as_float(subtotal),
             })
     else:
-        items = []
-        for item in order.items:
-            items.append({
-                "product_name": item.product.name if item.product else "Produto",
-                "quantity": item.quantity,
-                "unit_price": float(item.unit_price),
-                "subtotal": float(item.unit_price * item.quantity),
-            })
+        items = _confirmed_receipt_items(order)
 
     if not items:
         return {"error": "A nota precisa ter ao menos 1 item para imprimir"}
 
-    default_total = float(order.total)
-    default_partial = float(order.partial_payment)
-    default_service_pct = float(order.service_charge_pct)
-    remaining_product = max(0.0, default_total - default_partial)
-    default_service_amount = remaining_product * (default_service_pct / 100)
-    default_final = remaining_product + default_service_amount
+    computed_total = (
+        money(sum((money(item["subtotal"]) for item in items), ZERO))
+        if use_print_overrides
+        else money(order.total)
+    )
     default_table_label = (
         order.table.label
         if order.table and not order.table.is_balcao
         else ("Balcão" if order.table else "")
     )
 
-    if req.items is not None and req.total is None:
-        computed_total = round(sum(i["subtotal"] for i in items), 2)
+    is_table_quote = not is_counter_receipt and order.status == "aberta" and not status_text
+    if is_table_quote:
+        paid_product, paid_service = await order_net_paid(db, order.id)
+        service_charge_pct = rate(
+            await get_setting_as_float(db, "service_charge_pct", 10.0)
+        )
+        amount_without_service = money(max(ZERO, computed_total - paid_product))
+        optional_service_amount = percentage_amount(
+            amount_without_service, service_charge_pct
+        )
+        amount_with_service = money(
+            amount_without_service + optional_service_amount
+        )
+        service_charge_amount = optional_service_amount
+        final_total = amount_with_service
+        receipt_type = "table_quote"
     else:
-        computed_total = float(req.total) if req.total is not None else default_total
-
-    partial_payment = float(req.partial_payment) if req.partial_payment is not None else default_partial
-    service_charge_pct = (
-        float(req.service_charge_pct) if req.service_charge_pct is not None else default_service_pct
-    )
-
-    if req.service_charge_amount is not None:
-        service_charge_amount = float(req.service_charge_amount)
-    elif req.items is not None or req.total is not None:
-        remaining = max(0.0, computed_total - partial_payment)
-        service_charge_amount = round(remaining * (service_charge_pct / 100), 2) if service_charge_pct > 0 else 0.0
-    else:
-        service_charge_amount = round(float(default_service_amount), 2)
-
-    if req.final_total is not None:
-        final_total = float(req.final_total)
-    else:
-        remaining = max(0.0, computed_total - partial_payment)
-        final_total = round(remaining + service_charge_amount, 2)
+        paid_product = money(order.partial_payment)
+        paid_service = money(order.partial_service_charge)
+        service_charge_pct = rate(order.service_charge_pct)
+        service_charge_amount = money(order.service_charge_amount)
+        remaining_product = money(max(ZERO, computed_total - paid_product))
+        remaining_service = money(max(ZERO, service_charge_amount - paid_service))
+        final_total = money(remaining_product + remaining_service)
+        amount_without_service = remaining_product
+        optional_service_amount = remaining_service
+        amount_with_service = final_total
+        receipt_type = "counter_receipt"
 
     order_data = {
         "order_id": order.id,
-        "table_label": req.table_label if req.table_label is not None else default_table_label,
-        "customer_name": req.customer_name if req.customer_name is not None else order.customer_name,
+        "receipt_type": receipt_type,
+        "status_text": status_text,
+        "printed_at": datetime.now(timezone.utc).isoformat(),
+        "table_label": (
+            req.table_label
+            if use_print_overrides and req.table_label is not None
+            else default_table_label
+        ),
+        "customer_name": (
+            req.customer_name
+            if use_print_overrides and req.customer_name is not None
+            else order.customer_name
+        ),
         "items": items,
-        "total": computed_total,
-        "service_charge_pct": service_charge_pct,
-        "service_charge_amount": round(service_charge_amount, 2),
-        "partial_payment": partial_payment,
-        "final_total": round(final_total, 2),
-        "payment_method": req.payment_method if req.payment_method is not None else order.payment_method,
+        "total": as_float(computed_total),
+        "service_charge_pct": float(service_charge_pct),
+        "service_charge_amount": as_float(service_charge_amount),
+        "partial_payment": as_float(paid_product),
+        "partial_service_charge": as_float(paid_service),
+        "final_total": as_float(final_total),
+        "amount_without_service": as_float(amount_without_service),
+        "optional_service_amount": as_float(optional_service_amount),
+        "amount_with_service": as_float(amount_with_service),
+        "payment_method": (
+            req.payment_method
+            if req.payment_method is not None
+            else order.payment_method
+        ),
+        "amount_received": (
+            as_float(req.amount_received)
+            if req.amount_received is not None
+            else None
+        ),
+        "change_amount": (
+            as_float(req.change_amount) if req.change_amount is not None else None
+        ),
     }
 
     store_info = {
@@ -1236,12 +1742,8 @@ async def _print_order_receipt(
         "items": items,
         "customer_name": order_data.get("customer_name"),
         "waiter_name": user.name,
-        "total": order_data["total"],
-        "service_charge_pct": order_data["service_charge_pct"],
-        "service_charge_amount": order_data["service_charge_amount"],
-        "partial_payment": order_data["partial_payment"],
-        "final_total": order_data["final_total"],
-        "payment_method": order_data.get("payment_method") or "",
+        "receipt_data": order_data,
+        "receipt_store_info": store_info,
     }
     schedule_function_printer_send(receipt_bytes, "nota", nota_context)
 
@@ -1288,16 +1790,24 @@ async def add_pending_order_item(
     user: User = Depends(get_current_user),
 ):
     """Add/remove a pending item. Consumes or returns stock immediately but does not print."""
+    if not await _require_open_cash_register(db, for_update=True):
+        return {"error": "caixa_fechado", "detail": "O caixa está fechado. Abra o caixa para lançar pedidos."}
+
     order = await _get_open_order_for_table(
-        db, req.table_id, req.order_id, options=[selectinload(Order.items)]
+        db,
+        req.table_id,
+        req.order_id,
+        options=[selectinload(Order.items)],
+        for_update=True,
     )
     if not order:
         return {"error": "Nenhuma comanda aberta para esta mesa"}
 
-    if not await _require_open_cash_register(db):
-        return {"error": "caixa_fechado", "detail": "O caixa está fechado. Abra o caixa para lançar pedidos."}
-
-    result = await db.execute(select(Product).where(Product.id == req.product_id))
+    result = await db.execute(
+        select(Product)
+        .where(Product.id == req.product_id)
+        .options(selectinload(Product.pack_unit_product))
+    )
     product = result.scalars().first()
     if not product:
         return {"error": "Produto não encontrado"}
@@ -1305,7 +1815,7 @@ async def add_pending_order_item(
     table_result = await db.execute(select(Table).where(Table.id == req.table_id))
     table = table_result.scalars().first()
 
-    unit_price = await _get_promotional_price(product, db)
+    unit_price = money(await _get_promotional_price(product, db))
 
     existing_item = None
     for item in order.items:
@@ -1336,21 +1846,21 @@ async def add_pending_order_item(
         if existing_item:
             existing_item.quantity += req.quantity
             if existing_item.unit_cost is None:
-                existing_item.unit_cost = float(product.cost) if product.cost is not None else 0.0
+                existing_item.unit_cost = product.cost or ZERO
         else:
             order_item = OrderItem(
                 order_id=order.id,
                 product_id=product.id,
                 quantity=req.quantity,
                 unit_price=unit_price,
-                unit_cost=float(product.cost) if product.cost is not None else 0.0,
+                unit_cost=product.cost or ZERO,
                 is_pending=True,
             )
             db.add(order_item)
     else:
-        qty_change = abs(req.quantity)
         if not existing_item:
             return {"error": "Item não encontrado no pedido pendente"}
+        qty_change = min(abs(req.quantity), existing_item.quantity)
 
         if existing_item.quantity <= qty_change:
             await db.delete(existing_item)
@@ -1365,10 +1875,14 @@ async def add_pending_order_item(
                 stock_broadcast_infos.append(_build_stock_broadcast_info(stock_product))
             db.add(StockHistory(
                 product_id=stock_product.id,
+                source_product_id=product.id if is_pack(product) else None,
                 order_id=order.id,
                 table_id=req.table_id,
                 type="entrada",
                 quantity=unit_quantity,
+                source_quantity=qty_change,
+                conversion_factor=product.pack_size if is_pack(product) else 1,
+                unit_cost_snapshot=stock_product.cost,
                 note=f"Cancelamento reserva mesa {table.number if table else req.table_id}",
             ))
         except ValueError as e:
@@ -1397,6 +1911,9 @@ async def confirm_pending_order(
     user: User = Depends(get_current_user),
 ):
     """Confirm all pending items: attach to a round, update order total and print."""
+    if not await _require_open_cash_register(db, for_update=True):
+        return {"error": "caixa_fechado", "detail": "O caixa está fechado. Abra o caixa para confirmar pedidos."}
+
     order = await _get_open_order_for_table(
         db,
         req.table_id,
@@ -1406,6 +1923,7 @@ async def confirm_pending_order(
             selectinload(Order.rounds),
             selectinload(Order.table),
         ],
+        for_update=True,
     )
     if not order:
         return {"error": "Nenhuma comanda aberta para esta mesa"}
@@ -1443,7 +1961,7 @@ async def confirm_pending_order(
         select(func.coalesce(func.sum(OrderItem.unit_price * OrderItem.quantity), 0.0))
         .where(OrderItem.order_id == order.id, OrderItem.is_pending == False)
     )
-    order.total = float(total_result.scalar_one())
+    order.total = money(total_result.scalar_one())
 
     await db.commit()
     await broadcast_table_update(req.table_id)
@@ -1479,7 +1997,7 @@ async def confirm_pending_order(
     return {
         "round_number": round_number,
         "order_id": order.id,
-        "total": order.total,
+        "total": as_float(order.total),
         "items": confirmed_items,
     }
 
@@ -1496,6 +2014,7 @@ async def cancel_pending_order(
         req.table_id,
         req.order_id,
         options=[selectinload(Order.items).selectinload(OrderItem.product), selectinload(Order.table)],
+        for_update=True,
     )
     if not order:
         return {"error": "Nenhuma comanda aberta para esta mesa"}
@@ -1509,9 +2028,8 @@ async def cancel_pending_order(
         product = item.product
         try:
             stock_product, unit_quantity = await _resolve_pack_stock(db, product, item.quantity)
-        except ValueError:
-            stock_product = product
-            unit_quantity = item.quantity
+        except ValueError as exc:
+            return {"error": str(exc)}
 
         stock_product.stock += unit_quantity
         stock_broadcast_infos.append(_build_stock_broadcast_info(product))
@@ -1519,10 +2037,14 @@ async def cancel_pending_order(
             stock_broadcast_infos.append(_build_stock_broadcast_info(stock_product))
         db.add(StockHistory(
             product_id=stock_product.id,
+            source_product_id=product.id if is_pack(product) else None,
             order_id=order.id,
             table_id=req.table_id,
             type="entrada",
             quantity=unit_quantity,
+            source_quantity=item.quantity,
+                conversion_factor=product.pack_size if is_pack(product) else 1,
+            unit_cost_snapshot=stock_product.cost,
             note=f"Cancelamento pedido pendente mesa {order.table.number if order.table else req.table_id}",
         ))
         await db.delete(item)

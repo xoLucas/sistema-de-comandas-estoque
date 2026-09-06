@@ -91,12 +91,55 @@ async function apiFetch(url, options = {}) {
 }
 
 function formatCurrency(value) {
-    return 'R$ ' + parseFloat(value || 0).toFixed(2).replace('.', ',');
+    return 'R$ ' + roundMoney(value).toFixed(2).replace('.', ',');
+}
+
+function decimalToScaledInteger(value, scaleDigits) {
+    let raw = String(value ?? 0).trim().replace(',', '.');
+    if (!/^[-+]?\d*(\.\d*)?$/.test(raw)) raw = '0';
+    const negative = raw.startsWith('-');
+    raw = raw.replace(/^[-+]/, '');
+    const [wholeRaw = '0', fractionRaw = ''] = raw.split('.');
+    const whole = BigInt(wholeRaw || '0');
+    const padded = fractionRaw.padEnd(scaleDigits + 1, '0');
+    const kept = padded.slice(0, scaleDigits) || '0';
+    const roundingDigit = Number(padded.charAt(scaleDigits) || '0');
+    const factor = 10n ** BigInt(scaleDigits);
+    let scaled = whole * factor + BigInt(kept);
+    if (roundingDigit >= 5) scaled += 1n;
+    return negative ? -scaled : scaled;
+}
+
+function moneyCents(value) {
+    return decimalToScaledInteger(value, 2);
+}
+
+function roundMoney(value) {
+    return Number(moneyCents(value)) / 100;
+}
+
+function percentageMoney(base, percentage) {
+    const baseCents = moneyCents(base);
+    const rateUnits = decimalToScaledInteger(percentage, 4);
+    const denominator = 1000000n;
+    const numerator = baseCents * rateUnits;
+    const negative = numerator < 0n;
+    const absolute = negative ? -numerator : numerator;
+    const rounded = (absolute + denominator / 2n) / denominator;
+    return Number(negative ? -rounded : rounded) / 100;
 }
 
 function round(value, decimals = 2) {
+    if (decimals === 2) return roundMoney(value);
     const factor = Math.pow(10, decimals);
     return Math.round((parseFloat(value || 0) + Number.EPSILON) * factor) / factor;
+}
+
+function createRequestKey(prefix = 'request') {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+        return window.crypto.randomUUID();
+    }
+    return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function statusLabel(status) {
@@ -956,7 +999,7 @@ function renderPedidos(data) {
 
     container.innerHTML = data.pedidos.map(pedido => {
         const itemsHtml = pedido.items.map(item => {
-            const paidQty = getPaidQty(item.id);
+            const paidQty = Number(item.paid_quantity) || 0;
             const fullyPaid = paidQty >= item.quantity;
             const paidClass = fullyPaid ? 'partial-paid' : (paidQty > 0 ? 'partial-paid' : '');
             let paidBadge = '';
@@ -1419,27 +1462,7 @@ async function removeItemFromRound(productId, roundId) {
 
 // ====== PARTIAL PAYMENT ======
 let partialPaymentMode = 'value'; // 'value' | 'items'
-
-function paidItemsKey() {
-    return 'lads_paid_items_' + (typeof TABLE_ID !== 'undefined' ? TABLE_ID : '0') + '_' + (currentOrderId || '0');
-}
-
-function loadPaidQtyMap() {
-    try { return JSON.parse(localStorage.getItem(paidItemsKey()) || '{}'); } catch { return {}; }
-}
-
-function savePaidQtyMap(state) { localStorage.setItem(paidItemsKey(), JSON.stringify(state)); }
-
-function getPaidQty(orderItemId) {
-    return loadPaidQtyMap()[String(orderItemId)] || 0;
-}
-
-function addPaidQty(orderItemId, qty) {
-    const state = loadPaidQtyMap();
-    const current = state[String(orderItemId)] || 0;
-    state[String(orderItemId)] = current + qty;
-    savePaidQtyMap(state);
-}
+let partialPaymentRequestKey = null;
 
 function getCurrentOrderPedidos() {
     const order = getCurrentOrder();
@@ -1449,10 +1472,9 @@ function getCurrentOrderPedidos() {
 function countPaidItems() {
     const pedidos = getCurrentOrderPedidos();
     if (!pedidos) return 0;
-    const state = loadPaidQtyMap();
     let count = 0;
     pedidos.forEach(p => p.items.forEach(i => {
-        if ((state[String(i.id)] || 0) >= i.quantity) count++;
+        if ((Number(i.paid_quantity) || 0) >= i.quantity) count++;
     }));
     return count;
 }
@@ -1470,17 +1492,17 @@ function getRemainingAmount(includeServiceCharge = false, customService = null) 
     const total = order.total || 0;
     const paid = order.partial_payment || 0;
     const serviceChargePct = getSettingFloat('service_charge_pct', 10);
-    const remainingProduct = Math.max(0, total - paid);
+    const remainingProduct = Math.max(0, roundMoney(total - paid));
     let remainingService = 0;
     if (includeServiceCharge) {
         remainingService = (customService && customService > 0)
             ? customService
-            : remainingProduct * (serviceChargePct / 100);
+            : percentageMoney(remainingProduct, serviceChargePct);
     }
     return {
         product: remainingProduct,
         service: remainingService,
-        total: remainingProduct + remainingService
+        total: roundMoney(remainingProduct + remainingService)
     };
 }
 
@@ -1498,13 +1520,12 @@ function renderPartialPaymentItems() {
     const pedidos = getCurrentOrderPedidos();
     if (!container || !pedidos) return;
 
-    const state = loadPaidQtyMap();
     let rowsHtml = '';
     let hasUnpaid = false;
 
     pedidos.forEach(pedido => {
         pedido.items.forEach(item => {
-            const paidQty = state[String(item.id)] || 0;
+            const paidQty = Number(item.paid_quantity) || 0;
             const unpaidQty = item.quantity - paidQty;
             if (unpaidQty > 0) hasUnpaid = true;
 
@@ -1602,6 +1623,7 @@ function showPartialPaymentModal() {
     if (partialCustomSection) partialCustomSection.style.display = 'none';
 
     populateCardMachineSelect('partial');
+    partialPaymentRequestKey = createRequestKey('partial');
     renderPartialPaymentItems();
     switchPartialMode('value');
     document.getElementById('partial-payment-modal').style.display = 'flex';
@@ -1626,8 +1648,8 @@ function updatePartialPaymentSummary() {
         document.getElementById('partial-selected-total').textContent = formatCurrency(subtotal);
     }
 
-    const service = applyService ? (customValue > 0 ? customValue : abater * (serviceChargePct / 100)) : 0;
-    const totalAPagar = abater + service;
+    const service = applyService ? (customValue > 0 ? roundMoney(customValue) : percentageMoney(abater, serviceChargePct)) : 0;
+    const totalAPagar = roundMoney(abater + service);
 
     const abaterDisplay = document.getElementById('partial-abater-display');
     if (abaterDisplay) abaterDisplay.textContent = formatCurrency(abater);
@@ -1704,13 +1726,13 @@ async function submitPartialPayment() {
     }
 
     const serviceChargePct = getSettingFloat('service_charge_pct', 10);
-    const service = applyService ? (customService > 0 ? customService : abater * (serviceChargePct / 100)) : 0;
-    const totalAPagar = abater + service;
+    const service = applyService ? (customService > 0 ? roundMoney(customService) : percentageMoney(abater, serviceChargePct)) : 0;
+    const totalAPagar = roundMoney(abater + service);
 
     const tendered = parseFloat(tenderedInput?.value || 0);
     const remainingBase = getRemainingAmount(false);
 
-    if (abater > remainingBase.product + 0.01) {
+    if (moneyCents(abater) > moneyCents(remainingBase.product)) {
         errorEl.textContent = 'O valor a abater não pode ser maior que o restante da conta (sem a taxa)';
         errorEl.style.display = 'block';
         return;
@@ -1722,7 +1744,7 @@ async function submitPartialPayment() {
             errorEl.style.display = 'block';
             return;
         }
-        if (tendered < totalAPagar) {
+        if (moneyCents(tendered) < moneyCents(totalAPagar)) {
             errorEl.textContent = 'O valor pago em dinheiro não pode ser menor que o Total a pagar';
             errorEl.style.display = 'block';
             return;
@@ -1739,7 +1761,11 @@ async function submitPartialPayment() {
                 payment_method: method,
                 card_machine: cardMachine,
                 apply_service_charge: applyService,
-                service_charge_custom: applyService ? (customService > 0 ? customService : null) : null
+                service_charge_custom: applyService ? (customService > 0 ? customService : null) : null,
+                items: partialPaymentMode === 'items'
+                    ? itemsToPay.map(({ itemId, qty }) => ({ order_item_id: itemId, quantity: qty }))
+                    : null,
+                idempotency_key: partialPaymentRequestKey,
             })
         });
         const rawText = await res.text();
@@ -1753,7 +1779,7 @@ async function submitPartialPayment() {
             errorEl.style.display = 'block';
             return;
         }
-        itemsToPay.forEach(({ itemId, qty }) => addPaidQty(itemId, qty));
+        partialPaymentRequestKey = null;
         closePartialPaymentModal();
         loadTableDetail();
     } catch (err) {
@@ -1940,6 +1966,7 @@ document.addEventListener('click', (e) => {
 async function showCloseModal() {
     const order = getCurrentOrder();
     if (!order) return;
+    closeOrderRequestKey = createRequestKey('close');
 
     const total = order.total || 0;
     const paid = order.partial_payment || 0;
@@ -1947,7 +1974,7 @@ async function showCloseModal() {
     const serviceChargePct = getSettingFloat('service_charge_pct', 10);
     const service = 0;
     const serviceLabel = serviceChargePct + '% Serviço';
-    const remainingProduct = Math.max(0, total - paid);
+    const remainingProduct = Math.max(0, roundMoney(total - paid));
     const remainingService = Math.max(0, service - paidService);
     const final = remainingProduct + remainingService;
 
@@ -1998,8 +2025,8 @@ function updateCloseTotal() {
     const serviceChargePct = getSettingFloat('service_charge_pct', 10);
     const remainingProduct = Math.max(0, total - paid);
     const customValue = apply ? parseFloat(document.getElementById('close-service-custom')?.value || 0) : 0;
-    const service = apply ? (customValue > 0 ? customValue : remainingProduct * (serviceChargePct / 100)) : 0;
-    const final = remainingProduct + service;
+    const service = apply ? (customValue > 0 ? roundMoney(customValue) : percentageMoney(remainingProduct, serviceChargePct)) : 0;
+    const final = roundMoney(remainingProduct + service);
 
     document.getElementById('close-service-display').textContent = formatCurrency(service);
     document.getElementById('close-final-display').textContent = formatCurrency(final);
@@ -2016,13 +2043,14 @@ function updateCloseTotal() {
             tenderedInput.value = final.toFixed(2);
         }
         const tendered = parseFloat(tenderedInput.value || 0);
-        const change = Math.max(0, tendered - final);
+        const change = Math.max(0, roundMoney(tendered - final));
         document.getElementById('close-change').textContent = formatCurrency(change);
     }
 }
 
 let closeTenderedTouched = false;
 let balcaoTenderedTouched = false;
+let closeOrderRequestKey = null;
 
 function closeCloseModal() {
     selectedCloseWaiterId = null;
@@ -2033,10 +2061,15 @@ function closeCloseModal() {
 function openFiadoFromCloseModal() {
     const order = getCurrentOrder();
     if (!order) return;
+    const waiterId = selectedCloseWaiterId;
+    const waiterInput = document.getElementById('close-waiter-input');
+    const waiterName = waiterId && waiterInput && waiterInput.value.trim()
+        ? waiterInput.value.trim()
+        : (order.waiter_name || currentTableData?.waiter_name || '');
     closeCloseModal();
     const currentCustomerId = currentTableData?.customer_id || order.customer_id || null;
     const currentCustomerName = currentTableData?.customer_name || order.customer_name || '';
-    showFiadoModal(order.id, currentCustomerId, currentCustomerName);
+    showFiadoModal(order.id, currentCustomerId, currentCustomerName, waiterId, waiterName);
     const closeApply = document.getElementById('apply-service-charge');
     const applyEl = document.getElementById('fiado-apply-service-charge');
     if (applyEl && closeApply) applyEl.checked = closeApply.checked;
@@ -2048,6 +2081,7 @@ function openFiadoFromCloseModal() {
 
 let printReceiptDraft = null;
 let printReceiptEditing = false;
+let printReceiptModified = false;
 
 function buildPrintReceiptDraftFromOrder(order) {
     const items = [];
@@ -2064,10 +2098,10 @@ function buildPrintReceiptDraftFromOrder(order) {
 
     const total = items.reduce((sum, i) => sum + (Number(i.subtotal) || 0), 0);
     const partialPayment = Number(order.partial_payment || 0);
-    const serviceChargePct = Number(order.service_charge_applied ? (order.service_charge_pct || getSettingFloat('service_charge_pct', 10)) : 0) || 0;
-    const remainingProduct = Math.max(0, total - partialPayment);
-    const serviceChargeAmount = remainingProduct * (serviceChargePct / 100);
-    const finalTotal = remainingProduct + serviceChargeAmount;
+    const partialServiceCharge = Number(order.partial_service_charge || 0);
+    const serviceChargePct = getSettingFloat('service_charge_pct', 10);
+    const remainingProduct = Math.max(0, roundMoney(total - partialPayment));
+    const optionalService = percentageMoney(remainingProduct, serviceChargePct);
     const tableLabel = (currentTableData && currentTableData.label)
         ? currentTableData.label
         : (typeof TABLE_ID !== 'undefined' ? ('Mesa ' + TABLE_ID) : 'Mesa');
@@ -2077,13 +2111,14 @@ function buildPrintReceiptDraftFromOrder(order) {
         table_label: tableLabel,
         customer_name: order.customer_name || '',
         items,
-        total: Math.round(total * 100) / 100,
+        total: roundMoney(total),
         service_charge_pct: serviceChargePct,
-        service_charge_amount: Math.round(serviceChargeAmount * 100) / 100,
         partial_payment: partialPayment,
-        final_total: Math.round(finalTotal * 100) / 100,
-        payment_method: order.payment_method || '',
-        apply_service_charge: serviceChargePct > 0,
+        partial_service_charge: partialServiceCharge,
+        remaining_product: remainingProduct,
+        optional_service: optionalService,
+        total_without_service: remainingProduct,
+        total_with_service: roundMoney(remainingProduct + optionalService),
     };
 }
 
@@ -2094,22 +2129,22 @@ function recalculatePrintReceiptDraft() {
         const unit = parseFloat(item.unit_price) || 0;
         item.quantity = qty;
         item.unit_price = unit;
-        item.subtotal = Math.round(qty * unit * 100) / 100;
+        item.subtotal = roundMoney(qty * unit);
     });
-    printReceiptDraft.total = Math.round(
-        printReceiptDraft.items.reduce((sum, i) => sum + (Number(i.subtotal) || 0), 0) * 100
-    ) / 100;
-    const remaining = Math.max(0, printReceiptDraft.total - (printReceiptDraft.partial_payment || 0));
-    if (printReceiptDraft.apply_service_charge) {
-        const pct = parseFloat(printReceiptDraft.service_charge_pct) || 0;
-        printReceiptDraft.service_charge_pct = pct;
-        printReceiptDraft.service_charge_amount = Math.round(remaining * (pct / 100) * 100) / 100;
-    } else {
-        printReceiptDraft.service_charge_amount = 0;
-    }
-    printReceiptDraft.final_total = Math.round(
-        (remaining + (printReceiptDraft.service_charge_amount || 0)) * 100
-    ) / 100;
+    printReceiptDraft.total = roundMoney(
+        printReceiptDraft.items.reduce((sum, i) => sum + (Number(i.subtotal) || 0), 0)
+    );
+    const remaining = Math.max(0, roundMoney(
+        printReceiptDraft.total - (printReceiptDraft.partial_payment || 0)
+    ));
+    const pct = parseFloat(printReceiptDraft.service_charge_pct) || 0;
+    printReceiptDraft.service_charge_pct = pct;
+    printReceiptDraft.remaining_product = remaining;
+    printReceiptDraft.optional_service = percentageMoney(remaining, pct);
+    printReceiptDraft.total_without_service = remaining;
+    printReceiptDraft.total_with_service = roundMoney(
+        remaining + printReceiptDraft.optional_service
+    );
 }
 
 function renderPrintReceiptView() {
@@ -2137,11 +2172,16 @@ function renderPrintReceiptView() {
             ${itemsHtml}
         </div>
         <div class="payment-summary">
-            <div class="summary-row"><span>Subtotal</span><span>${formatCurrency(d.total)}</span></div>
-            ${d.service_charge_amount > 0 ? `<div class="summary-row"><span>Taxa serviço (${d.service_charge_pct}%)</span><span>${formatCurrency(d.service_charge_amount)}</span></div>` : ''}
-            ${d.partial_payment > 0 ? `<div class="summary-row"><span>Já pago</span><span>- ${formatCurrency(d.partial_payment)}</span></div>` : ''}
+            <div class="summary-row"><span>Total produtos</span><span>${formatCurrency(d.total)}</span></div>
+            ${(d.partial_payment || 0) > 0 ? `<div class="summary-row"><span>Pago antes (produtos)</span><span>- ${formatCurrency(d.partial_payment)}</span></div>` : ''}
+            ${(d.partial_service_charge || 0) > 0 ? `<div class="summary-row"><span>Gorjeta já paga</span><span>- ${formatCurrency(d.partial_service_charge)}</span></div>` : ''}
+            <div class="summary-row"><span>Restante produtos</span><span>${formatCurrency(d.remaining_product)}</span></div>
+            <div class="summary-row"><span>Taxa opcional (${d.service_charge_pct}%)</span><span>${formatCurrency(d.optional_service)}</span></div>
             <div class="summary-row" style="font-weight:700;border-top:1px solid var(--border);padding-top:8px;margin-top:6px;">
-                <span>Total a imprimir</span><span style="color:var(--accent);">${formatCurrency(d.final_total)}</span>
+                <span>A pagar sem taxa</span><span>${formatCurrency(d.total_without_service)}</span>
+            </div>
+            <div class="summary-row" style="font-weight:700;color:var(--accent);">
+                <span>A pagar com taxa</span><span>${formatCurrency(d.total_with_service)}</span>
             </div>
         </div>
     `;
@@ -2179,12 +2219,12 @@ function renderPrintReceiptEdit() {
             <div class="form-col">
                 <label class="input-label">Cliente (só na impressão)</label>
                 <input type="text" class="input-field" id="print-receipt-customer" value="${(d.customer_name || '').replace(/"/g, '&quot;')}"
-                       oninput="printReceiptDraft.customer_name = this.value">
+                       oninput="updatePrintReceiptText('customer_name', this.value)">
             </div>
             <div class="form-col">
                 <label class="input-label">Mesa / local</label>
                 <input type="text" class="input-field" id="print-receipt-table" value="${(d.table_label || '').replace(/"/g, '&quot;')}"
-                       oninput="printReceiptDraft.table_label = this.value">
+                       oninput="updatePrintReceiptText('table_label', this.value)">
             </div>
         </div>
         <div style="margin-bottom:10px;">
@@ -2192,21 +2232,14 @@ function renderPrintReceiptEdit() {
             <div id="print-receipt-edit-items">${itemsHtml || '<p class="empty-msg">Nenhum item</p>'}</div>
             <button type="button" onclick="addPrintReceiptItem()" class="btn-secondary-full" style="margin-top:8px;">+ Adicionar linha</button>
         </div>
-        <div style="margin-bottom:10px;">
-            <label style="display:flex;align-items:center;gap:10px;font-size:14px;cursor:pointer;">
-                <input type="checkbox" id="print-receipt-service" ${d.apply_service_charge ? 'checked' : ''}
-                       onchange="updatePrintReceiptService(this.checked)" style="width:18px;height:18px;accent-color:var(--accent);">
-                Incluir taxa de serviço (${d.service_charge_pct || 0}%)
-            </label>
-        </div>
         <div class="payment-summary">
-            <div class="summary-row"><span>Subtotal</span><span id="print-edit-total">${formatCurrency(d.total)}</span></div>
-            <div class="summary-row" id="print-edit-service-row" style="${d.service_charge_amount > 0 ? '' : 'display:none;'}">
-                <span>Taxa serviço</span><span id="print-edit-service">${formatCurrency(d.service_charge_amount)}</span>
-            </div>
-            ${d.partial_payment > 0 ? `<div class="summary-row"><span>Já pago</span><span>- ${formatCurrency(d.partial_payment)}</span></div>` : ''}
+            <div class="summary-row"><span>Total produtos</span><span id="print-edit-total">${formatCurrency(d.total)}</span></div>
+            <div class="summary-row"><span>Taxa opcional (${d.service_charge_pct}%)</span><span>${formatCurrency(d.optional_service)}</span></div>
             <div class="summary-row" style="font-weight:700;border-top:1px solid var(--border);padding-top:8px;margin-top:6px;">
-                <span>Total a imprimir</span><span id="print-edit-final" style="color:var(--accent);">${formatCurrency(d.final_total)}</span>
+                <span>A pagar sem taxa</span><span id="print-edit-without-service">${formatCurrency(d.total_without_service)}</span>
+            </div>
+            <div class="summary-row" style="font-weight:700;color:var(--accent);">
+                <span>A pagar com taxa</span><span id="print-edit-with-service">${formatCurrency(d.total_with_service)}</span>
             </div>
         </div>
     `;
@@ -2221,6 +2254,7 @@ function updatePrintReceiptItem(idx, field, value) {
     } else if (field === 'unit_price') {
         printReceiptDraft.items[idx].unit_price = parseFloat(value) || 0;
     }
+    printReceiptModified = true;
     recalculatePrintReceiptDraft();
     const row = document.querySelector(`.print-receipt-edit-row[data-idx="${idx}"]`);
     if (row) {
@@ -2228,18 +2262,17 @@ function updatePrintReceiptItem(idx, field, value) {
         if (sub) sub.textContent = formatCurrency(printReceiptDraft.items[idx].subtotal);
     }
     const totalEl = document.getElementById('print-edit-total');
-    const serviceEl = document.getElementById('print-edit-service');
-    const serviceRow = document.getElementById('print-edit-service-row');
-    const finalEl = document.getElementById('print-edit-final');
+    const withoutEl = document.getElementById('print-edit-without-service');
+    const withEl = document.getElementById('print-edit-with-service');
     if (totalEl) totalEl.textContent = formatCurrency(printReceiptDraft.total);
-    if (serviceEl) serviceEl.textContent = formatCurrency(printReceiptDraft.service_charge_amount);
-    if (serviceRow) serviceRow.style.display = printReceiptDraft.service_charge_amount > 0 ? '' : 'none';
-    if (finalEl) finalEl.textContent = formatCurrency(printReceiptDraft.final_total);
+    if (withoutEl) withoutEl.textContent = formatCurrency(printReceiptDraft.total_without_service);
+    if (withEl) withEl.textContent = formatCurrency(printReceiptDraft.total_with_service);
 }
 
 function removePrintReceiptItem(idx) {
     if (!printReceiptDraft) return;
     printReceiptDraft.items.splice(idx, 1);
+    printReceiptModified = true;
     recalculatePrintReceiptDraft();
     renderPrintReceiptEdit();
 }
@@ -2252,17 +2285,14 @@ function addPrintReceiptItem() {
         unit_price: 0,
         subtotal: 0,
     });
+    printReceiptModified = true;
     renderPrintReceiptEdit();
 }
 
-function updatePrintReceiptService(checked) {
+function updatePrintReceiptText(field, value) {
     if (!printReceiptDraft) return;
-    printReceiptDraft.apply_service_charge = !!checked;
-    if (checked && !(printReceiptDraft.service_charge_pct > 0)) {
-        printReceiptDraft.service_charge_pct = getSettingFloat('service_charge_pct', 10);
-    }
-    recalculatePrintReceiptDraft();
-    renderPrintReceiptEdit();
+    printReceiptDraft[field] = value;
+    printReceiptModified = true;
 }
 
 function togglePrintReceiptEdit(editing) {
@@ -2282,7 +2312,8 @@ function togglePrintReceiptEdit(editing) {
     setTimeout(updateScrollHelperVisibility, 50);
 }
 
-function showPrintReceiptModal() {
+async function showPrintReceiptModal() {
+    await loadTableDetail();
     const order = getCurrentOrder();
     if (!order) {
         alert('Nenhuma comanda selecionada');
@@ -2290,6 +2321,7 @@ function showPrintReceiptModal() {
     }
     printReceiptDraft = buildPrintReceiptDraftFromOrder(order);
     printReceiptEditing = false;
+    printReceiptModified = false;
     document.getElementById('print-receipt-error').style.display = 'none';
     togglePrintReceiptEdit(false);
     document.getElementById('print-receipt-modal').style.display = 'flex';
@@ -2300,10 +2332,11 @@ function closePrintReceiptModal() {
     document.getElementById('print-receipt-modal').style.display = 'none';
     printReceiptDraft = null;
     printReceiptEditing = false;
+    printReceiptModified = false;
 }
 
 async function printOrderReceipt() {
-    showPrintReceiptModal();
+    await showPrintReceiptModal();
 }
 
 async function confirmPrintReceipt() {
@@ -2321,27 +2354,23 @@ async function confirmPrintReceipt() {
             product_name: (i.product_name || '').trim(),
             quantity: parseFloat(i.quantity) || 0,
             unit_price: parseFloat(i.unit_price) || 0,
-            subtotal: parseFloat(i.subtotal) || 0,
         }));
 
-    if (items.length === 0) {
+    if (printReceiptModified && items.length === 0) {
         errorEl.textContent = 'A nota precisa ter ao menos 1 item válido';
         errorEl.style.display = 'block';
         return;
     }
 
     recalculatePrintReceiptDraft();
-    const payload = {
-        items,
-        customer_name: printReceiptDraft.customer_name || '',
-        table_label: printReceiptDraft.table_label || '',
-        total: printReceiptDraft.total,
-        service_charge_pct: printReceiptDraft.apply_service_charge ? printReceiptDraft.service_charge_pct : 0,
-        service_charge_amount: printReceiptDraft.apply_service_charge ? printReceiptDraft.service_charge_amount : 0,
-        partial_payment: printReceiptDraft.partial_payment || 0,
-        final_total: printReceiptDraft.final_total,
-        payment_method: printReceiptDraft.payment_method || null,
-    };
+    const payload = printReceiptModified
+        ? {
+            is_modified: true,
+            items,
+            customer_name: printReceiptDraft.customer_name || '',
+            table_label: printReceiptDraft.table_label || '',
+        }
+        : { is_modified: false };
 
     try {
         const res = await apiFetch(API_BASE + '/comanda/' + printReceiptDraft.order_id + '/imprimir-nota', {
@@ -2423,7 +2452,8 @@ async function confirmClose() {
                 payment_method: paymentMethod,
                 card_machine: cardMachine,
                 amount: paymentMethod === 'dinheiro' ? tendered : null,
-                waiter_id: selectedCloseWaiterId || null
+                waiter_id: selectedCloseWaiterId || null,
+                idempotency_key: closeOrderRequestKey,
             })
         });
         const data = await res.json();
@@ -2439,6 +2469,7 @@ async function confirmClose() {
         alertMsg += '\nFinal: ' + formatCurrency(data.final_total);
         alertMsg += '\nForma: ' + (data.payment_method || 'N/A');
         alert(alertMsg);
+        closeOrderRequestKey = null;
         closeCloseModal();
         loadTableDetail();
     } catch (err) {
@@ -3295,8 +3326,20 @@ async function estornarVenda() {
             ? 'Estornar esta venda? A consignação (fiado) vinculada será cancelada junto e o estoque devolvido.'
             : 'Estornar esta venda? O estoque será devolvido e a venda sairá dos relatórios.'
     )) return;
+    const reason = prompt('Informe o motivo do estorno:');
+    if (reason === null) return;
+    if (reason.trim().length < 3) {
+        alert('Informe um motivo com pelo menos 3 caracteres.');
+        return;
+    }
     try {
-        const res = await apiFetch(API_BASE + '/financeiro/vendas/' + s.order_id, { method: 'DELETE' });
+        const res = await apiFetch(API_BASE + '/financeiro/vendas/' + s.order_id, {
+            method: 'DELETE',
+            body: JSON.stringify({
+                reason: reason.trim(),
+                idempotency_key: createRequestKey('sale-refund'),
+            }),
+        });
         const data = await res.json();
         if (data.error || data.detail) {
             alert(data.error || data.detail);
@@ -4071,7 +4114,7 @@ async function loadPromotions() {
         container.innerHTML = promotions.map(p => {
             const period = formatPromotionPeriod(p.start_at, p.end_at);
             const discountedPrices = p.products.map(prod => {
-                const promoPrice = prod.price * (1 - p.discount_pct / 100);
+                const promoPrice = round(prod.price * (1 - p.discount_pct / 100), 2);
                 return `<span class="promo-product">${prod.name}: ${formatCurrency(prod.price)} → <strong>${formatCurrency(promoPrice)}</strong></span>`;
             }).join('');
 
@@ -4269,9 +4312,18 @@ async function loadAppSettings() {
         appSettings = {};
         settings.forEach(s => appSettings[s.key] = s.value);
         syncThemeFromSettings();
+        syncServiceChargeLabels();
     } catch (err) {
         appSettings = {};
+        syncServiceChargeLabels();
     }
+}
+
+function syncServiceChargeLabels() {
+    const percentage = getSettingFloat('service_charge_pct', 10);
+    document.querySelectorAll('[data-service-charge-pct]').forEach(element => {
+        element.textContent = percentage;
+    });
 }
 
 function getSetting(key, defaultValue) {
@@ -5613,6 +5665,7 @@ async function loadConsignments() {
 
         container.innerHTML = data.map(c => {
             const statusClass = c.status === 'pendente' ? 'status-pendente' : (c.status === 'pago' ? 'status-pago' : 'status-cancelado');
+            const netAmountPaid = c.net_amount_paid ?? c.amount_paid;
             const badge = c.pending_days > 0 && c.status === 'pendente'
                 ? `<span class="consignment-days">${c.pending_days} dia${c.pending_days > 1 ? 's' : ''}</span>`
                 : '';
@@ -5629,7 +5682,8 @@ async function loadConsignments() {
                     </div>
                     <div class="consignment-values">
                         <span>Total: <strong>${formatCurrency(c.total)}</strong></span>
-                        <span>Pago: <strong>${formatCurrency(c.amount_paid)}</strong></span>
+                        <span>Pago líquido: <strong>${formatCurrency(netAmountPaid)}</strong></span>
+                        ${Number(c.refunded_amount) > 0 ? `<span>Estornado: <strong>${formatCurrency(c.refunded_amount)}</strong></span>` : ''}
                         <span>Saldo: <strong>${formatCurrency(c.balance)}</strong></span>
                         ${badge}
                     </div>
@@ -5640,7 +5694,7 @@ async function loadConsignments() {
                 </div>
                 <div class="consignment-actions">
                     ${c.status !== 'cancelado' ? `<button onclick="editConsignment(${c.id})" class="btn-small btn-edit">Editar</button>` : ''}
-                    ${c.status !== 'cancelado' && c.amount_paid === 0 ? `<button onclick="cancelConsignment(${c.id})" class="btn-small btn-danger">Cancelar</button>` : ''}
+                    ${c.status !== 'cancelado' ? `<button onclick="cancelConsignment(${c.id})" class="btn-small btn-danger">${c.amount_paid > 0 ? 'Estornar' : 'Cancelar'}</button>` : ''}
                 </div>
             </div>
         `}).join('');
@@ -5663,7 +5717,7 @@ async function openConsignmentDetail(consignmentId) {
         document.getElementById('consignment-detail-type').textContent = CONSIGNMENT_TYPE_LABELS[data.order_type] || data.order_type;
         document.getElementById('consignment-detail-status').textContent = CONSIGNMENT_STATUS_LABELS[data.status] || data.status;
         document.getElementById('consignment-detail-total').textContent = formatCurrency(data.total);
-        document.getElementById('consignment-detail-paid').textContent = formatCurrency(data.amount_paid);
+        document.getElementById('consignment-detail-paid').textContent = formatCurrency(data.net_amount_paid ?? data.amount_paid);
         document.getElementById('consignment-detail-balance').textContent = formatCurrency(data.balance);
         document.getElementById('consignment-detail-days').textContent = data.pending_days + ' dia' + (data.pending_days > 1 ? 's' : '');
         document.getElementById('consignment-detail-due').textContent = data.due_date ? new Date(data.due_date).toLocaleDateString('pt-BR') : '-';
@@ -5680,19 +5734,27 @@ async function openConsignmentDetail(consignmentId) {
         `).join('');
 
         const paymentsEl = document.getElementById('consignment-detail-payments');
-        if (data.payments && data.payments.length > 0) {
+        if ((data.payments && data.payments.length > 0) || (data.refunds && data.refunds.length > 0)) {
             const paymentsSum = (data.payments || []).reduce((s, p) => s + (Number(p.amount) || 0), 0);
             const tipDiff = round(paymentsSum - (Number(data.amount_paid) || 0), 2);
             const noteHtml = tipDiff > 0.005 ? `
                 <div style="margin-top:8px;padding:8px 10px;border-radius:8px;background:var(--bg);border:1px solid var(--border);font-size:12px;color:var(--text-muted);">
                     ${formatCurrency(tipDiff)} dos pagamentos referem-se a gorjeta.
                 </div>` : '';
-            paymentsEl.innerHTML = data.payments.map(p => `
+            const paymentsHtml = (data.payments || []).map(p => `
                 <div class="detail-payment">
                     <span>${PAYMENT_METHOD_LABELS[p.payment_method] || p.payment_method} ${p.card_machine ? '(Máq. ' + p.card_machine + ')' : ''}</span>
                     <span><strong>${formatCurrency(p.amount)}</strong> em ${p.created_at ? new Date(p.created_at).toLocaleDateString('pt-BR') : '-'}</span>
                 </div>
-            `).join('') + noteHtml;
+            `).join('');
+            const refundsHtml = (data.refunds || []).map(refund => `
+                <div class="detail-payment">
+                    <span>Estorno — ${PAYMENT_METHOD_LABELS[refund.payment_method] || refund.payment_method}</span>
+                    <span><strong>-${formatCurrency(refund.amount)}</strong> em ${refund.created_at ? new Date(refund.created_at).toLocaleDateString('pt-BR') : '-'}</span>
+                    <small>${refund.reason || ''}</small>
+                </div>
+            `).join('');
+            paymentsEl.innerHTML = paymentsHtml + refundsHtml + noteHtml;
         } else {
             paymentsEl.innerHTML = '<p class="empty-msg">Nenhum pagamento registrado</p>';
         }
@@ -5711,6 +5773,8 @@ function closeConsignmentDetailModal() {
     consignmentDetailCache = null;
 }
 
+let consignmentPaymentRequestKey = null;
+
 async function openConsignmentPaymentModal(consignmentId) {
     if (!consignmentDetailCache || consignmentDetailCache.id !== consignmentId) {
         await openConsignmentDetail(consignmentId);
@@ -5723,6 +5787,7 @@ async function openConsignmentPaymentModal(consignmentId) {
     document.getElementById('consignment-payment-card-machine').value = '1';
     document.getElementById('consignment-payment-error').style.display = 'none';
     document.getElementById('consignment-payment-card-section').style.display = 'none';
+    consignmentPaymentRequestKey = createRequestKey('consignment');
     document.getElementById('consignment-payment-modal').style.display = 'flex';
 }
 
@@ -5744,8 +5809,11 @@ async function submitConsignmentPayment() {
     const payload = {
         amount: parseFloat(document.getElementById('consignment-payment-amount').value) || 0,
         payment_method: document.getElementById('consignment-payment-method').value,
-        card_machine: document.getElementById('consignment-payment-card-machine').value,
+        card_machine: document.getElementById('consignment-payment-method').value.startsWith('cartao')
+            ? document.getElementById('consignment-payment-card-machine').value
+            : null,
         notes: document.getElementById('consignment-payment-notes').value.trim() || null,
+        idempotency_key: consignmentPaymentRequestKey,
     };
 
     if (!payload.amount || payload.amount <= 0) {
@@ -5765,6 +5833,7 @@ async function submitConsignmentPayment() {
             errorEl.style.display = 'block';
             return;
         }
+        consignmentPaymentRequestKey = null;
         closeConsignmentPaymentModal();
         closeConsignmentDetailModal();
         loadConsignments();
@@ -5775,9 +5844,22 @@ async function submitConsignmentPayment() {
 }
 
 async function cancelConsignment(consignmentId) {
-    if (!confirm('Deseja realmente cancelar este consignado? O estoque será devolvido.')) return;
+    if (!confirm('Deseja realmente cancelar este consignado? O estoque será devolvido e os pagamentos serão estornados pelos mesmos meios originais.')) return;
+    const reason = prompt('Informe o motivo do cancelamento/estorno:');
+    if (reason === null) return;
+    if (reason.trim().length < 3) {
+        alert('Informe um motivo com pelo menos 3 caracteres.');
+        return;
+    }
+    const idempotencyKey = createRequestKey('consignment-refund');
     try {
-        const res = await apiFetch(API_BASE + '/consignados/' + consignmentId + '/cancelar', { method: 'POST' });
+        const res = await apiFetch(API_BASE + '/consignados/' + consignmentId + '/cancelar', {
+            method: 'POST',
+            body: JSON.stringify({
+                reason: reason.trim(),
+                idempotency_key: idempotencyKey,
+            }),
+        });
         const data = await res.json();
         if (data.error) {
             alert(data.error);
@@ -6259,15 +6341,17 @@ async function submitNewConsignment() {
 // ====== TABLE TO CONSIGNMENT (FIADO) ======
 let fiadoOrderId = null;
 let fiadoCustomerId = null;
+let fiadoWaiterId = null;
 let fiadoCustomerSearchDebounce = null;
 
-function showFiadoModal(orderId, currentCustomerId, currentCustomerName) {
+function showFiadoModal(orderId, currentCustomerId, currentCustomerName, waiterId = null, waiterName = '') {
     if (!canInitiateConsignment()) {
         alert('Acesso restrito');
         return;
     }
     fiadoOrderId = orderId;
     fiadoCustomerId = currentCustomerId || null;
+    fiadoWaiterId = waiterId || null;
     document.getElementById('fiado-order-id').value = orderId;
     document.getElementById('fiado-customer-id').value = currentCustomerId || '';
     document.getElementById('fiado-customer-name').value = currentCustomerName || '';
@@ -6276,6 +6360,10 @@ function showFiadoModal(orderId, currentCustomerId, currentCustomerName) {
     if (applyEl) applyEl.checked = false;
     const customEl = document.getElementById('fiado-service-custom');
     if (customEl) customEl.value = '';
+    const waiterCreditEl = document.getElementById('fiado-waiter-credit');
+    if (waiterCreditEl) {
+        waiterCreditEl.textContent = waiterName || 'Garçom original da comanda';
+    }
     toggleFiadoServiceSection();
     document.getElementById('fiado-modal').style.display = 'flex';
 }
@@ -6292,6 +6380,7 @@ function closeFiadoModal() {
     document.getElementById('fiado-modal').style.display = 'none';
     fiadoOrderId = null;
     fiadoCustomerId = null;
+    fiadoWaiterId = null;
 }
 
 function renderFiadoCustomerSuggestions(customers) {
@@ -6390,6 +6479,7 @@ async function submitFiado() {
                 customer_id: customerId,
                 apply_service_charge: applyServiceCharge,
                 service_charge_custom: serviceCustom,
+                waiter_id: fiadoWaiterId,
             }),
         });
         const data = await res.json();
@@ -6420,6 +6510,8 @@ let balcaoCurrentCategory = 'TODOS';
 let balcaoCurrentSearch = '';
 let balcaoSearchDebounce = null;
 let balcaoShowOnlyInStock = true;
+let balcaoReopenAfterSale = true;
+let balcaoCloseRequestKey = null;
 
 function toggleBalcaoFichaMode() {
     balcaoFichaMode = !balcaoFichaMode;
@@ -6451,16 +6543,24 @@ async function loadBalcaoDetail() {
             return;
         }
         document.getElementById('balcao-title').textContent = 'BALCÃO';
-        document.getElementById('balcao-status').textContent = data.status === 'vazia' ? 'Pronto para atender' : 'Comanda aberta';
         if (!data.order_id) {
-            await openBalcaoOrder();
+            balcaoCurrentOrder = null;
+            balcaoCurrentCustomerId = null;
+            balcaoCurrentCustomerName = null;
+            document.getElementById('balcao-status').textContent = 'Balcão fechado';
+            renderBalcaoCustomerDisplay();
+            renderBalcaoCart(null);
+            updateBalcaoOperationButtons();
+            await loadBalcaoProducts();
             return;
         }
+        document.getElementById('balcao-status').textContent = 'Comanda aberta';
         balcaoCurrentOrder = data;
         balcaoCurrentCustomerId = data.customer_id || null;
         balcaoCurrentCustomerName = data.customer_name || null;
         renderBalcaoCustomerDisplay();
         renderBalcaoCart(data);
+        updateBalcaoOperationButtons();
         loadBalcaoProducts();
     } catch (err) {
         console.error('Erro ao carregar balcão', err);
@@ -6485,6 +6585,43 @@ async function openBalcaoOrder() {
         await loadBalcaoDetail();
     } catch (err) {
         alert('Erro ao abrir comanda do balcão');
+    }
+}
+
+function updateBalcaoOperationButtons() {
+    const hasOpenOrder = Boolean(balcaoCurrentOrder && balcaoCurrentOrder.order_id);
+    const closeSaleButton = document.getElementById('btn-balcao-close');
+    const operationButton = document.getElementById('btn-balcao-operation');
+    if (closeSaleButton) closeSaleButton.disabled = !hasOpenOrder;
+    if (operationButton) operationButton.textContent = hasOpenOrder ? 'Fechar Balcão' : 'Abrir Balcão';
+}
+
+async function closeBalcaoOperation() {
+    if (!balcaoCurrentOrder || !balcaoCurrentOrder.order_id) {
+        await openBalcaoOrder();
+        return;
+    }
+    if ((Number(balcaoCurrentOrder.total) || 0) > 0) {
+        showBalcaoCloseModal(false);
+        return;
+    }
+    if (!confirm('Fechar o balcão? A comanda vazia atual será encerrada e nenhuma nova será aberta.')) return;
+    try {
+        const res = await apiFetch(API_BASE + '/comanda/' + balcaoCurrentOrder.order_id + '/cancelar', {
+            method: 'POST',
+            body: JSON.stringify({
+                reason: 'Fechamento operacional do balcão vazio',
+                idempotency_key: createRequestKey('counter-close'),
+            }),
+        });
+        const data = await res.json();
+        if (data.error) {
+            alert(data.error);
+            return;
+        }
+        await loadBalcaoDetail();
+    } catch (err) {
+        alert('Erro ao fechar o balcão');
     }
 }
 
@@ -6718,11 +6855,15 @@ function renderBalcaoCustomerDisplay() {
     }
 }
 
-function showBalcaoCloseModal() {
+function showBalcaoCloseModal(reopenAfterSale = true) {
     if (!balcaoCurrentOrder || !balcaoCurrentOrder.order_id || !balcaoCurrentOrder.total) {
         alert('Comanda vazia');
         return;
     }
+    balcaoReopenAfterSale = reopenAfterSale;
+    balcaoCloseRequestKey = createRequestKey('counter-sale');
+    const modalTitle = document.querySelector('#balcao-close-modal h3');
+    if (modalTitle) modalTitle.textContent = reopenAfterSale ? 'Finalizar Venda' : 'Finalizar Venda e Fechar Balcão';
     document.getElementById('balcao-close-total').textContent = formatCurrency(balcaoCurrentOrder.total);
     const applyEl = document.getElementById('balcao-apply-service-charge');
     if (applyEl) applyEl.checked = false;
@@ -6758,12 +6899,12 @@ function updateBalcaoCloseMethod() {
 function updateBalcaoChange() {
     const total = balcaoCurrentOrder ? (Number(balcaoCurrentOrder.total) || 0) : 0;
     const paid = balcaoCurrentOrder ? (Number(balcaoCurrentOrder.partial_payment) || 0) : 0;
-    const remainingProduct = Math.max(0, total - paid);
+    const remainingProduct = Math.max(0, roundMoney(total - paid));
     const applyEl = document.getElementById('balcao-apply-service-charge');
     const apply = applyEl ? applyEl.checked : false;
     const serviceChargePct = getSettingFloat('service_charge_pct', 10);
-    const service = apply ? remainingProduct * (serviceChargePct / 100) : 0;
-    const finalVal = remainingProduct + service;
+    const service = apply ? percentageMoney(remainingProduct, serviceChargePct) : 0;
+    const finalVal = roundMoney(remainingProduct + service);
 
     const serviceRow = document.getElementById('balcao-service-row');
     const serviceEl = document.getElementById('balcao-close-service');
@@ -6777,7 +6918,7 @@ function updateBalcaoChange() {
         tenderedInput.value = finalVal.toFixed(2);
     }
     const tendered = parseFloat(tenderedInput ? tenderedInput.value : 0) || 0;
-    const change = Math.max(0, tendered - finalVal);
+    const change = Math.max(0, roundMoney(tendered - finalVal));
     document.getElementById('balcao-close-change').textContent = formatCurrency(change);
 }
 
@@ -6794,12 +6935,12 @@ async function confirmBalcaoClose() {
 
     const total = balcaoCurrentOrder ? (Number(balcaoCurrentOrder.total) || 0) : 0;
     const paid = balcaoCurrentOrder ? (Number(balcaoCurrentOrder.partial_payment) || 0) : 0;
-    const remainingProduct = Math.max(0, total - paid);
+    const remainingProduct = Math.max(0, roundMoney(total - paid));
     const serviceChargePct = getSettingFloat('service_charge_pct', 10);
-    const balcaoService = applyServiceCharge ? remainingProduct * (serviceChargePct / 100) : 0;
-    const balcaoFinal = remainingProduct + balcaoService;
+    const balcaoService = applyServiceCharge ? percentageMoney(remainingProduct, serviceChargePct) : 0;
+    const balcaoFinal = roundMoney(remainingProduct + balcaoService);
 
-    if (method === 'dinheiro' && tendered < balcaoFinal) {
+    if (method === 'dinheiro' && moneyCents(tendered) < moneyCents(balcaoFinal)) {
         errorEl.textContent = 'Valor recebido menor que o total a pagar';
         errorEl.style.display = 'block';
         return;
@@ -6817,6 +6958,7 @@ async function confirmBalcaoClose() {
                 card_machine: (method === 'cartao_credito' || method === 'cartao_debito') ? cardMachine : null,
                 amount: method === 'dinheiro' ? tendered : null,
                 ficha_mode: balcaoFichaMode,
+                idempotency_key: balcaoCloseRequestKey,
             }),
         });
         const data = await res.json();
@@ -6832,7 +6974,12 @@ async function confirmBalcaoClose() {
         if (receiptMsg) {
             alert(receiptMsg);
         }
-        await openBalcaoOrder();
+        balcaoCloseRequestKey = null;
+        if (balcaoReopenAfterSale) {
+            await openBalcaoOrder();
+        } else {
+            await loadBalcaoDetail();
+        }
     } catch (err) {
         errorEl.textContent = 'Erro ao finalizar venda';
         errorEl.style.display = 'block';
@@ -7261,7 +7408,11 @@ function renderDashboardGeral(data) {
     destroyDashboardCharts();
     const cards = [
         createDashboardCard('Faturamento', formatCurrency(data.sales?.total || 0), `${data.sales?.orders_count || 0} comandas`),
-        createDashboardCard('Taxa de Serviço', formatCurrency(data.sales?.service_charge || 0), '10% incluído'),
+        createDashboardCard(
+            'Taxa de Serviço',
+            formatCurrency(data.sales?.service_charge || 0),
+            `${getSettingFloat('service_charge_pct', 10)}% incluído`
+        ),
         createDashboardCard('Comandas Abertas', data.open_orders?.count || 0, formatCurrency(data.open_orders?.total || 0)),
         createDashboardCard('Consignados Pendentes', data.consignments?.pending_count || 0, formatCurrency(data.consignments?.pending_total || 0)),
         createDashboardCard('Consignados no Período', data.consignments?.period_count || 0, formatCurrency(data.consignments?.period_total || 0)),
@@ -8134,19 +8285,8 @@ async function exportBackup() {
         status.className = 'setting-status saving';
     }
     try {
-        const entitiesRes = await apiFetch(API_BASE + '/backup/entidades');
-        const entities = await entitiesRes.json();
-        if (entities.error) {
-            if (status) {
-                status.textContent = entities.error;
-                status.className = 'setting-status error';
-            }
-            return;
-        }
-        const keys = entities.map(e => e.key);
-        const res = await apiFetch(API_BASE + '/backup/exportar', {
-            method: 'POST',
-            body: JSON.stringify({ entities: keys })
+        const res = await apiFetch(API_BASE + '/backup/exportar-completo', {
+            method: 'POST'
         });
         const data = await res.json();
         if (data.error || data.detail) {
@@ -8161,11 +8301,11 @@ async function exportBackup() {
         for (let i = 0; i < byteString.length; i++) {
             bytes[i] = byteString.charCodeAt(i);
         }
-        const blob = new Blob([bytes], { type: 'application/zip' });
+        const blob = new Blob([bytes], { type: 'application/octet-stream' });
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
         link.href = url;
-        link.download = data.filename || 'backup.zip';
+        link.download = data.filename || 'backup_ladsbeer.dump';
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
@@ -8199,4 +8339,3 @@ function showSettingsSuccess(message) {
         setTimeout(() => { el.style.display = 'none'; }, 4000);
     }
 }
-

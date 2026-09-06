@@ -1,4 +1,5 @@
 from datetime import datetime
+import logging
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import selectinload
@@ -26,6 +27,13 @@ from app.models.customer import Customer
 from app.models.notification import Notification
 from app.models.consignment import ConsignmentOrder, ConsignmentOrderItem, ConsignmentPayment
 from app.models.cash_position_movement import CashPositionMovement
+from app.models.payment import OrderPayment, OrderPaymentAllocation, PaymentRefund, PaymentRefundItem
+from app.core.migrations import run_migrations
+from app.services.financial_migration_service import run_financial_backfills
+from app.services.money_service import cost, money
+
+
+logger = logging.getLogger(__name__)
 
 
 SEED_TABLES = [
@@ -424,6 +432,7 @@ async def seed_pack_products(session) -> None:
             name=pack_data["name"],
             category=pack_data["category"],
             price=pack_data["price"],
+            cost=pack_data["cost"],
             stock=pack_data["stock"],
             min_stock=pack_data["min_stock"],
             pack_size=pack_data["pack_size"],
@@ -448,8 +457,8 @@ async def _backfill_consignment_service_portion(session) -> None:
     )
     consignments = result.scalars().all()
 
-    def _amount(partial: dict) -> float:
-        return round(float(partial.get("amount", 0)), 2)
+    def _amount(partial: dict):
+        return money(partial.get("amount", 0))
 
     def _ts(partial: dict) -> float | None:
         created = partial.get("created_at")
@@ -471,13 +480,13 @@ async def _backfill_consignment_service_portion(session) -> None:
                 for idx, partial in enumerate(partials):
                     if idx in used_partial_idx:
                         continue
-                    if _amount(partial) == round(float(payment.amount), 2) and _ts(partial) is not None and payment.created_at is not None and round(payment.created_at.timestamp(), 3) == _ts(partial):
+                    if _amount(partial) == money(payment.amount) and _ts(partial) is not None and payment.created_at is not None and round(payment.created_at.timestamp(), 3) == _ts(partial):
                         used_partial_idx.add(idx)
                         break
         for payment in consignment.payments:
             if payment.service_portion or payment.created_at is None:
                 continue
-            amount = round(float(payment.amount), 2)
+            amount = money(payment.amount)
             ts = round(payment.created_at.timestamp(), 3)
             pick_idx = None
             for idx, partial in enumerate(partials):
@@ -497,7 +506,9 @@ async def _backfill_consignment_service_portion(session) -> None:
                     pick_idx = candidates[0]
             if pick_idx is not None:
                 used_partial_idx.add(pick_idx)
-                payment.service_portion = round(float(partials[pick_idx].get("service_portion", 0)), 2)
+                payment.service_portion = money(
+                    partials[pick_idx].get("service_portion", 0)
+                )
                 updated += 1
 
     if updated:
@@ -529,7 +540,7 @@ async def _backfill_consignment_unit_cost(session) -> None:
     updated = 0
     for _, citems in by_consignment.items():
         consignment = citems[0].consignment_order
-        source_map: dict[int, float | None] = {}
+        source_map: dict[int, object] = {}
         if consignment and consignment.source_order_id:
             src_result = await session.execute(
                 select(OrderItem).where(OrderItem.order_id == consignment.source_order_id)
@@ -538,8 +549,8 @@ async def _backfill_consignment_unit_cost(session) -> None:
         for item in citems:
             frozen = source_map.get(item.product_id)
             if frozen is None:
-                frozen = float(item.product.cost) if item.product else 0.0
-            item.unit_cost = round(float(frozen), 2)
+                frozen = item.product.cost if item.product else 0
+            item.unit_cost = cost(frozen)
             updated += 1
 
     if updated:
@@ -551,13 +562,35 @@ async def run_seed() -> None:
         await conn.run_sync(Base.metadata.create_all)
 
     await _ensure_columns()
+    await run_migrations()
 
     async with async_session() as session:
         await ensure_settings(session)
 
-        # Backfills idempotentes para dados de conversões anteriores.
-        await _backfill_consignment_service_portion(session)
+        invalid_pack_result = await session.execute(
+            select(Product.id).where(
+                (Product.pack_size <= 0)
+                | (
+                    Product.pack_unit_product_id.is_not(None)
+                    & (Product.pack_size < 2)
+                )
+                | (
+                    Product.pack_unit_product_id.is_(None)
+                    & (Product.pack_size != 1)
+                )
+            )
+        )
+        invalid_pack_ids = list(invalid_pack_result.scalars().all())
+        if invalid_pack_ids:
+            logger.warning(
+                "Invalid legacy pack configuration detected; no automatic repair "
+                "was applied. product_ids=%s",
+                invalid_pack_ids,
+            )
+
+        # Backfill data created by earlier application versions.
         await _backfill_consignment_unit_cost(session)
+        await run_financial_backfills(session)
 
         existing = await session.execute(select(User).limit(1))
         if existing.scalar_one_or_none() is not None:

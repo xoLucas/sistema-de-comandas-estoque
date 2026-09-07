@@ -30,6 +30,43 @@ PAYMENT_METHODS = {
     "nao_informado",
 }
 
+PENDING_CREDIT_LABEL = "Pendente/Aguardando"
+
+
+def resolve_credited_waiter_name(
+    executor: User | None,
+    *,
+    order_open: bool,
+    closer_role: str | None,
+    chosen_waiter_name: str | None,
+    opener_name: str | None,
+) -> str | None:
+    """Resolve the waiter credited for a single payment.
+
+    Business rule:
+    - A non-manager executor (garcom/caixa/estoquista) is credited themselves.
+    - A manager-executed payment on an open order stays unresolved (None).
+    - A manager-executed payment on an order closed by a non-manager is credited
+      to the manager executor.
+    - A manager-executed payment on an order closed by a manager follows the
+      close rule: chosen waiter wins, otherwise the waiter who opened the order.
+    """
+    if executor is None:
+        return None
+    if executor.role != "gerente":
+        return executor.name
+    if order_open:
+        return None
+    if closer_role in ("garcom", "caixa"):
+        return executor.name
+    if chosen_waiter_name:
+        return chosen_waiter_name
+    return opener_name or "N/A"
+
+
+def display_credit_name(credited_waiter_name: str | None) -> str:
+    return credited_waiter_name or PENDING_CREDIT_LABEL
+
 
 async def card_fee_snapshot(
     db: AsyncSession,
@@ -57,6 +94,7 @@ async def create_order_payment(
     payment_method: str,
     card_machine: str | None,
     idempotency_key: str | None,
+    credited_waiter_name: str | None = None,
 ) -> tuple[OrderPayment, bool]:
     normalized_key = idempotency_key.strip() if idempotency_key else None
     if normalized_key:
@@ -90,6 +128,7 @@ async def create_order_payment(
         card_machine=card_machine,
         card_fee_rate=fee_rate,
         card_fee_amount=fee_amount,
+        credited_waiter_name=credited_waiter_name,
         idempotency_key=normalized_key or str(uuid4()),
     )
     db.add(payment)

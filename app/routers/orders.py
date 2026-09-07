@@ -41,6 +41,7 @@ from app.services.payment_service import (
     distribute_service_amount,
     item_net_paid_quantity,
     order_net_paid,
+    resolve_credited_waiter_name,
 )
 from app.services.refund_service import refund_full_order, refund_paid_items
 
@@ -1044,6 +1045,13 @@ async def partial_payment(
             payment_method=method,
             card_machine=req.card_machine,
             idempotency_key=req.idempotency_key,
+            credited_waiter_name=resolve_credited_waiter_name(
+                user,
+                order_open=True,
+                closer_role=None,
+                chosen_waiter_name=None,
+                opener_name=None,
+            ),
         )
     except ValueError as exc:
         return {"error": str(exc)}
@@ -1191,6 +1199,9 @@ async def close_order(
         db, req.table_id, req.order_id, for_update=True, options=[
             selectinload(Order.table),
             selectinload(Order.items).selectinload(OrderItem.product),
+            selectinload(Order.waiter),
+            selectinload(Order.closed_by),
+            selectinload(Order.closed_waiter),
         ]
     )
 
@@ -1283,12 +1294,33 @@ async def close_order(
     order.partial_service_charge = paid_service
     order.service_charge_amount = money(paid_service + remaining_service)
 
+    chosen_employee = None
     if req.waiter_id is not None and user.role == "gerente":
         employee_result = await db.execute(select(Employee).where(Employee.id == req.waiter_id))
-        employee = employee_result.scalars().first()
-        if not employee:
+        chosen_employee = employee_result.scalars().first()
+        if not chosen_employee:
             return {"error": "Funcionário não encontrado"}
-        order.closed_waiter_id = employee.id
+        order.closed_waiter_id = chosen_employee.id
+
+    # Resolve deferred credits (manager-executed partials and the final payment)
+    # now that the order is finalized and the closer/choice is known.
+    closer_role = user.role
+    chosen_waiter_name = chosen_employee.name if chosen_employee else None
+    opener_name = order.waiter.name if order.waiter else None
+    payments_result = await db.execute(
+        select(OrderPayment)
+        .where(OrderPayment.order_id == order.id)
+        .options(selectinload(OrderPayment.user))
+    )
+    for payment in payments_result.scalars().all():
+        if payment.credited_waiter_name is None:
+            payment.credited_waiter_name = resolve_credited_waiter_name(
+                payment.user,
+                order_open=False,
+                closer_role=closer_role,
+                chosen_waiter_name=chosen_waiter_name,
+                opener_name=opener_name,
+            )
 
     await db.flush()
     if not await _has_open_orders(db, req.table_id):

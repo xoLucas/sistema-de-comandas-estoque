@@ -107,6 +107,7 @@ async def _create_refund(
     service_already_repassed: bool | None = None,
     payment_id: int | None = None,
     consignment_payment_id: int | None = None,
+    credited_waiter_name: str | None = None,
 ) -> PaymentRefund:
     if payment_id is not None:
         source = "order"
@@ -139,6 +140,7 @@ async def _create_refund(
             if service_already_repassed is not None
             else await _service_was_repassed(db, source_session_id)
         ),
+        credited_waiter_name=credited_waiter_name,
         reason=reason,
         idempotency_key=_source_idempotency_key(group_key, source, source_id),
     )
@@ -404,6 +406,7 @@ async def refund_full_consignment(
                 service_was_recognized=service_was_recognized,
                 service_already_repassed=service_already_repassed,
                 consignment_payment_id=payment.id,
+                credited_waiter_name=consignment.credited_waiter_name,
             )
         )
     if not refunds:
@@ -422,6 +425,7 @@ async def refund_full_consignment(
                 payment_method="fiado",
                 source_session_id=None,
                 service_was_recognized=False,
+                credited_waiter_name=consignment.credited_waiter_name,
             )
         )
 
@@ -554,6 +558,7 @@ async def refund_full_order(
                     sale_was_recognized=True,
                     service_already_repassed=service_already_repassed,
                     consignment_payment_id=payment.id,
+                    credited_waiter_name=linked_consignment.credited_waiter_name,
                 )
             )
         if not refunds:
@@ -573,6 +578,7 @@ async def refund_full_order(
                     source_session_id=None,
                     service_was_recognized=False,
                     sale_was_recognized=True,
+                    credited_waiter_name=linked_consignment.credited_waiter_name,
                 )
             )
         linked_consignment.status = "cancelado"
@@ -608,6 +614,7 @@ async def refund_full_order(
                     source_session_id=payment.cash_session_id,
                     sale_was_recognized=sale_was_recognized,
                     payment_id=payment.id,
+                    credited_waiter_name=payment.credited_waiter_name,
                 )
             )
 
@@ -805,6 +812,7 @@ async def refund_paid_items(
             source_session_id=payment.cash_session_id,
             sale_was_recognized=order.status == "finalizada",
             payment_id=payment.id,
+            credited_waiter_name=payment.credited_waiter_name,
         )
         refunds.append(refund)
         for item, quantity, line_product, line_service in lines:

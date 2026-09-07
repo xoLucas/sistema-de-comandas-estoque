@@ -169,6 +169,21 @@ async def _product_pack_validation_schema(conn: AsyncConnection) -> None:
     )
 
 
+async def _payment_credited_waiter_schema(conn: AsyncConnection) -> None:
+    await conn.execute(
+        text(
+            "ALTER TABLE order_payments "
+            "ADD COLUMN IF NOT EXISTS credited_waiter_name VARCHAR(100)"
+        )
+    )
+    await conn.execute(
+        text(
+            "ALTER TABLE payment_refunds "
+            "ADD COLUMN IF NOT EXISTS credited_waiter_name VARCHAR(100)"
+        )
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     ("20260905_01_financial_integrity_schema", _financial_integrity_schema),
     ("20260906_03_refund_service_recognition", _refund_service_recognition_schema),
@@ -176,6 +191,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     ("20260906_05_consignment_credited_waiter", _consignment_credited_waiter_schema),
     ("20260906_06_payment_refund_compatibility", _payment_refund_compatibility_schema),
     ("20260906_07_product_pack_validation", _product_pack_validation_schema),
+    ("20260908_01_payment_credited_waiter", _payment_credited_waiter_schema),
 )
 
 

@@ -42,6 +42,7 @@ class OrderPayment(Base):
     card_machine: Mapped[str | None] = mapped_column(String(30), nullable=True)
     card_fee_rate: Mapped[Decimal] = mapped_column(Numeric(7, 4), nullable=False, default=0)
     card_fee_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    credited_waiter_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     is_legacy_inferred: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -134,6 +135,7 @@ class PaymentRefund(Base):
         Boolean, nullable=False, default=True
     )
     service_already_repassed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    credited_waiter_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(

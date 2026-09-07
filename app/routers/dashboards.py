@@ -36,6 +36,7 @@ from app.routers.auth_deps import get_current_user
 from app.routers.financial import (
     compute_period_profit,
     _consignment_tips_paid_in_period,
+    _direct_payment_waiter_totals,
     _direct_service_in_period,
     _resolve_waiter_name,
     serialize_order_sale,
@@ -49,6 +50,7 @@ from app.services.stock_service import (
 )
 from app.services.consignment_service import fetch_consignment_payments
 from app.services.money_service import ZERO, as_float, money
+from app.services.payment_service import display_credit_name
 
 router = APIRouter(prefix="/api/dashboards", tags=["dashboards"])
 
@@ -734,38 +736,10 @@ async def dashboard_vendas(
         for name, quantity, total in products_result.all()
     ]
 
-    # Por garçom
-    waiter_user = aliased(User)
-    closer_user = aliased(User)
-    waiter_name_expr = func.coalesce(
-        Employee.name,
-        case(
-            (closer_user.role != "gerente", closer_user.name),
-            else_=waiter_user.name,
-        ),
-    )
-    waiter_result = await db.execute(
-        select(
-            waiter_name_expr,
-            func.coalesce(func.sum(Order.total), 0.0),
-            func.count(Order.id),
-        )
-        .join(waiter_user, Order.waiter_id == waiter_user.id)
-        .join(closer_user, Order.closed_by_id == closer_user.id)
-        .outerjoin(Employee, Order.closed_waiter_id == Employee.id)
-        .where(
-            Order.status == "finalizada",
-            Order.closed_at >= start_dt,
-            Order.closed_at <= end_dt,
-            or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
-        )
-        .group_by(waiter_name_expr)
-        .order_by(func.coalesce(func.sum(Order.total), 0.0).desc())
-    )
-    by_waiter = [
-        {"name": name, "total": round(float(total), 2), "orders": count}
-        for name, total, count in waiter_result.all()
-    ]
+    # Por garçom: crédito por pagamento (quem executou a parcial/fechamento),
+    # somado aos consignados (crédito na criação) e descontado dos estornos
+    # (pelo credited_waiter_name do pagamento original).
+    direct_waiter_totals = await _direct_payment_waiter_totals(start_dt, end_dt, db)
 
     # Por mesa/balcão
     table_result = await db.execute(
@@ -893,35 +867,43 @@ async def dashboard_vendas(
     by_category = sorted(by_category_map.values(), key=lambda x: x["total"], reverse=True)
 
     # Waiter ranking recognizes consignments at creation and refunds when issued.
-    consignment_waiter_totals: dict[str, float] = {}
+    refund_waiter_totals: dict[str, float] = {}
     for consignment in consignment_sales:
         waiter_name = consignment.credited_waiter_name or "N/A"
-        consignment_waiter_totals[waiter_name] = (
-            consignment_waiter_totals.get(waiter_name, 0.0)
+        refund_waiter_totals[waiter_name] = (
+            refund_waiter_totals.get(waiter_name, 0.0)
             + as_float(consignment.product_total)
         )
     for refund in refunds:
         if not refund.sale_was_recognized:
             continue
-        if refund.order:
-            waiter_name = _resolve_waiter_name(refund.order)
-        elif refund.consignment_order:
-            waiter_name = refund.consignment_order.credited_waiter_name or "N/A"
-        else:
-            continue
+        waiter_name = display_credit_name(refund.credited_waiter_name)
         reversed_sale_product = as_float(
             money(sum((item.product_amount for item in refund.items), ZERO))
         )
-        consignment_waiter_totals[waiter_name] = (
-            consignment_waiter_totals.get(waiter_name, 0.0)
+        refund_waiter_totals[waiter_name] = (
+            refund_waiter_totals.get(waiter_name, 0.0)
             - reversed_sale_product
         )
-    by_waiter_map = {w["name"]: w for w in by_waiter}
-    for waiter_name, amount in consignment_waiter_totals.items():
+    by_waiter_map = {
+        name: {
+            "name": name,
+            "total": round(v["sales"], 2),
+            "orders": v["orders"],
+            "service_charge": v["service_charge"],
+        }
+        for name, v in direct_waiter_totals.items()
+    }
+    for waiter_name, amount in refund_waiter_totals.items():
         if waiter_name in by_waiter_map:
             by_waiter_map[waiter_name]["total"] = round(by_waiter_map[waiter_name]["total"] + amount, 2)
         else:
-            by_waiter_map[waiter_name] = {"name": waiter_name, "total": round(amount, 2), "orders": 0}
+            by_waiter_map[waiter_name] = {
+                "name": waiter_name,
+                "total": round(amount, 2),
+                "orders": 0,
+                "service_charge": 0.0,
+            }
     by_waiter = sorted(by_waiter_map.values(), key=lambda x: x["total"], reverse=True)
 
     # Revenue summary.
@@ -1282,51 +1264,21 @@ async def dashboard_funcionarios(
     )
     refunds = refunds_result.scalars().all()
 
-    # Vendas por garçom
-    waiter_user = aliased(User)
-    closer_user = aliased(User)
-    waiter_id_expr = func.coalesce(
-        Employee.id,
-        case(
-            (closer_user.role != "gerente", closer_user.id),
-            else_=waiter_user.id,
-        ),
-    )
-    waiter_name_expr = func.coalesce(
-        Employee.name,
-        case(
-            (closer_user.role != "gerente", closer_user.name),
-            else_=waiter_user.name,
-        ),
-    )
-    waiter_result = await db.execute(
-        select(
-            waiter_id_expr,
-            waiter_name_expr,
-            func.coalesce(func.sum(Order.total), 0.0),
-            func.count(Order.id),
-        )
-        .join(waiter_user, Order.waiter_id == waiter_user.id)
-        .join(closer_user, Order.closed_by_id == closer_user.id)
-        .outerjoin(Employee, Order.closed_waiter_id == Employee.id)
-        .where(
-            Order.status == "finalizada",
-            Order.closed_at >= start_dt,
-            Order.closed_at <= end_dt,
-            or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
-        )
-        .group_by(waiter_id_expr, waiter_name_expr)
-        .order_by(func.coalesce(func.sum(Order.total), 0.0).desc())
-    )
-    by_waiter = []
-    for uid, name, total, count in waiter_result.all():
-        by_waiter.append({
-            "id": uid,
+    # Vendas por garçom: crédito por pagamento (quem executou a parcial/fechamento)
+    # + consignados (crédito na criação) - estornos (por refund.credited_waiter_name).
+    direct_waiter_totals = await _direct_payment_waiter_totals(start_dt, end_dt, db)
+
+    by_waiter = [
+        {
+            "id": None,
             "name": name,
-            "total": round(float(total), 2),
-            "orders": count,
-            "ticket_medio": round(float(total) / count, 2) if count else 0.0,
-        })
+            "total": round(v["sales"], 2),
+            "orders": v["orders"],
+            "service_charge": v["service_charge"],
+            "ticket_medio": 0.0,
+        }
+        for name, v in direct_waiter_totals.items()
+    ]
 
     # Rankings use the sale or consignment creation date and reverse on refund.
     consignment_waiter_totals: dict[str, dict] = {}
@@ -1340,12 +1292,7 @@ async def dashboard_funcionarios(
     for refund in refunds:
         if not refund.sale_was_recognized:
             continue
-        if refund.order:
-            waiter_name = _resolve_waiter_name(refund.order)
-        elif refund.consignment_order:
-            waiter_name = refund.consignment_order.credited_waiter_name or "N/A"
-        else:
-            continue
+        waiter_name = display_credit_name(refund.credited_waiter_name)
         entry = consignment_waiter_totals.setdefault(
             waiter_name, {"total": 0.0, "orders": 0}
         )
@@ -1366,6 +1313,7 @@ async def dashboard_funcionarios(
                 "name": waiter_name,
                 "total": round(adjustment["total"], 2),
                 "orders": adjustment["orders"],
+                "service_charge": 0.0,
                 "ticket_medio": 0.0,
             }
     for entry in by_waiter_map.values():

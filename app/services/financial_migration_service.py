@@ -13,15 +13,17 @@ from sqlalchemy.orm import selectinload
 from app.models.cash_register_session import CashRegisterSession
 from app.models.consignment import ConsignmentOrder, ConsignmentPayment
 from app.models.order import Order
-from app.models.payment import OrderPayment
+from app.models.payment import OrderPayment, PaymentRefund
 from app.models.product import Product
 from app.models.stock_history import StockHistory
 from app.services.money_service import ZERO, cost, money, percentage_amount, rate
+from app.services.payment_service import resolve_credited_waiter_name
 from app.services.settings_service import get_card_fee_for_machine
 
 
 BACKFILL_VERSION = "20260905_02_financial_integrity_backfill"
 REPAIR_VERSION = "20260906_08_legacy_consignment_preconversion"
+CREDITED_WAITER_VERSION = "20260908_03_payment_credited_waiter"
 logger = logging.getLogger(__name__)
 
 
@@ -483,6 +485,94 @@ async def _add_financial_constraints(db: AsyncSession) -> None:
         )
 
 
+def _legacy_waiter_name(order: Order) -> str:
+    """Legacy whole-order attribution used as a fallback for unresolvable rows."""
+    if order is None:
+        return "N/A"
+    if order.closed_waiter:
+        return order.closed_waiter.name
+    if order.closed_by and order.closed_by.role != "gerente":
+        return order.closed_by.name
+    if order.waiter:
+        return order.waiter.name
+    if order.closed_by:
+        return order.closed_by.name
+    return "N/A"
+
+
+async def _backfill_payment_credited_waiter(db: AsyncSession) -> None:
+    """Apply the per-payment waiter attribution rule to existing records.
+
+    Order payments are resolved per executor (garcom/caixa credited to
+    themselves; manager-executed payments follow the close rule). Refunds mirror
+    the credited waiter of their source payment or consignment.
+    """
+    payments_result = await db.execute(
+        select(OrderPayment)
+        .options(
+            selectinload(OrderPayment.user),
+            selectinload(OrderPayment.order).selectinload(Order.waiter),
+            selectinload(OrderPayment.order).selectinload(Order.closed_by),
+            selectinload(OrderPayment.order).selectinload(Order.closed_waiter),
+        )
+        .order_by(OrderPayment.id)
+    )
+    for payment in payments_result.scalars().all():
+        if payment.credited_waiter_name is not None:
+            continue
+        order = payment.order
+        credited = resolve_credited_waiter_name(
+            payment.user,
+            order_open=order.status != "finalizada" if order else True,
+            closer_role=(
+                order.closed_by.role if order and order.closed_by else None
+            ),
+            chosen_waiter_name=(
+                order.closed_waiter.name
+                if order and order.closed_waiter
+                else None
+            ),
+            opener_name=order.waiter.name if order and order.waiter else None,
+        )
+        if credited is None:
+            credited = _legacy_waiter_name(order)
+        payment.credited_waiter_name = credited
+
+    refunds_result = await db.execute(
+        select(PaymentRefund)
+        .options(
+            selectinload(PaymentRefund.payment),
+            selectinload(PaymentRefund.consignment_payment).selectinload(
+                ConsignmentPayment.consignment_order
+            ),
+            selectinload(PaymentRefund.consignment_order),
+        )
+        .order_by(PaymentRefund.id)
+    )
+    for refund in refunds_result.scalars().all():
+        if refund.credited_waiter_name is not None:
+            continue
+        if refund.payment_id is not None:
+            refund.credited_waiter_name = (
+                refund.payment.credited_waiter_name
+                if refund.payment
+                else "N/A"
+            )
+        elif refund.consignment_order is not None:
+            refund.credited_waiter_name = (
+                refund.consignment_order.credited_waiter_name or "N/A"
+            )
+        elif refund.consignment_payment is not None:
+            refund.credited_waiter_name = (
+                refund.consignment_payment.consignment_order.credited_waiter_name
+                or "N/A"
+            )
+        else:
+            refund.credited_waiter_name = "N/A"
+
+    await db.flush()
+
+
 async def run_financial_backfills(db: AsyncSession) -> None:
     await _audit_suspect_modern_consignment_payments(db)
 
@@ -493,6 +583,10 @@ async def run_financial_backfills(db: AsyncSession) -> None:
     repair_applied = await db.scalar(
         text("SELECT 1 FROM schema_migrations WHERE version = :version"),
         {"version": REPAIR_VERSION},
+    )
+    credited_applied = await db.scalar(
+        text("SELECT 1 FROM schema_migrations WHERE version = :version"),
+        {"version": CREDITED_WAITER_VERSION},
     )
 
     if not backfill_applied:
@@ -516,6 +610,13 @@ async def run_financial_backfills(db: AsyncSession) -> None:
         await db.execute(
             text("INSERT INTO schema_migrations (version) VALUES (:version)"),
             {"version": REPAIR_VERSION},
+        )
+
+    if not credited_applied:
+        await _backfill_payment_credited_waiter(db)
+        await db.execute(
+            text("INSERT INTO schema_migrations (version) VALUES (:version)"),
+            {"version": CREDITED_WAITER_VERSION},
         )
 
     await db.commit()

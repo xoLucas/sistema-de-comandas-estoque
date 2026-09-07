@@ -37,7 +37,7 @@ from app.services.notification_service import broadcast_stock_notification
 from app.services.settings_service import get_setting_as_float
 from app.services.stock_service import is_pack, pack_stock_for_product, stock_status
 from app.services.money_service import ZERO, as_float, money, percentage_amount, rate
-from app.services.payment_service import PAYMENT_METHODS, card_fee_snapshot, order_net_paid
+from app.services.payment_service import PAYMENT_METHODS, card_fee_snapshot, order_net_paid, resolve_credited_waiter_name
 from app.services.refund_service import refund_full_consignment, refund_full_order
 
 
@@ -745,8 +745,10 @@ async def convert_order_to_consignment(
             selectinload(Order.items).selectinload(OrderItem.product),
             selectinload(Order.customer),
             selectinload(Order.table),
-            selectinload(Order.payments),
+            selectinload(Order.payments).selectinload(OrderPayment.user),
             selectinload(Order.waiter),
+            selectinload(Order.closed_by),
+            selectinload(Order.closed_waiter),
         )
         .with_for_update()
     )
@@ -903,6 +905,21 @@ async def convert_order_to_consignment(
     order.closed_waiter_id = (
         credited_employee.id if credited_employee else None
     )
+
+    # Resolve deferred credits (manager-executed partials and any pending final
+    # payment) now that the order is finalized and the closer/choice is known.
+    closer_role = user.role
+    chosen_waiter_name = credited_employee.name if credited_employee else None
+    opener_name = order.waiter.name if order.waiter else None
+    for payment in order.payments:
+        if payment.credited_waiter_name is None:
+            payment.credited_waiter_name = resolve_credited_waiter_name(
+                payment.user,
+                order_open=False,
+                closer_role=closer_role,
+                chosen_waiter_name=chosen_waiter_name,
+                opener_name=opener_name,
+            )
 
     if order.table:
         has_open = await db.execute(

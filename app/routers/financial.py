@@ -39,6 +39,7 @@ from app.services.cash_service import compute_session_cash_summary
 from app.services.stock_service import is_pack
 from app.services.consignment_service import fetch_consignment_payments
 from app.services.money_service import ZERO, as_float, money, rate
+from app.services.payment_service import display_credit_name
 from app.services.refund_service import refund_full_order
 
 router = APIRouter(prefix="/api/financeiro", tags=["financeiro"])
@@ -629,13 +630,62 @@ async def _add_direct_payments_to_report(
         bucket["fee"] = money(bucket["fee"] + fee)
         bucket["net"] = money(bucket["net"] + gross - fee)
         bucket["count"] += 1
-        waiter_name = _resolve_waiter_name(payment.order)
-        waiter_totals[waiter_name]["service_charge"] = money(
-            waiter_totals[waiter_name]["service_charge"] + money(payment.service_amount)
+        credited = display_credit_name(payment.credited_waiter_name)
+        order_total = money(payment.order.total) if payment.order else ZERO
+        waiter_totals[credited]["sales"] = money(
+            waiter_totals[credited]["sales"] + money(payment.product_amount)
         )
+        waiter_totals[credited]["service_charge"] = money(
+            waiter_totals[credited]["service_charge"] + money(payment.service_amount)
+        )
+        if order_total > ZERO:
+            waiter_totals[credited]["orders"] += (
+                money(payment.product_amount) / order_total
+            )
         if payment.created_at:
             hour_key = local_hour_label(payment.created_at)
             hour_totals[hour_key] = money(hour_totals[hour_key] + gross)
+
+
+async def _direct_payment_waiter_totals(
+    start: datetime,
+    end: datetime,
+    db: AsyncSession,
+) -> dict[str, dict]:
+    """Aggregate direct (non-fiado) payments by their credited waiter.
+
+    Used by the dashboards to mirror the per-payment attribution of the
+    financial reports. Sales and service are credited per payment, and the
+    order count is fractional (product_amount / order.total).
+    """
+    result = await db.execute(
+        select(OrderPayment)
+        .join(Order, Order.id == OrderPayment.order_id)
+        .where(
+            OrderPayment.created_at >= start,
+            OrderPayment.created_at <= end,
+            or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
+        )
+        .options(selectinload(OrderPayment.order))
+    )
+    totals: dict[str, dict] = defaultdict(
+        lambda: {"sales": ZERO, "service_charge": ZERO, "orders": ZERO}
+    )
+    for payment in result.scalars().all():
+        credited = display_credit_name(payment.credited_waiter_name)
+        entry = totals[credited]
+        entry["sales"] = money(entry["sales"] + money(payment.product_amount))
+        entry["service_charge"] = money(
+            entry["service_charge"] + money(payment.service_amount)
+        )
+        order_total = money(payment.order.total) if payment.order else ZERO
+        if order_total > ZERO:
+            entry["orders"] += money(payment.product_amount) / order_total
+    for entry in totals.values():
+        entry["sales"] = as_float(entry["sales"])
+        entry["service_charge"] = as_float(entry["service_charge"])
+        entry["orders"] = as_float(entry["orders"])
+    return totals
 
 
 async def _add_consignment_sale_rankings(
@@ -745,34 +795,24 @@ async def _apply_refunds_to_report(
                 hour_key = local_hour_label(refund.created_at)
                 hour_totals[hour_key] = money(hour_totals[hour_key] - gross)
 
-        order = refund.order
         reversed_sale_product = money(
             sum((item.product_amount for item in refund.items), ZERO)
         )
-        if order:
-            waiter_name = _resolve_waiter_name(order)
-            if refund.sale_was_recognized:
-                waiter_totals[waiter_name]["sales"] = money(
-                    waiter_totals[waiter_name]["sales"] - reversed_sale_product
-                )
-            if refund.service_was_recognized and not refund.service_already_repassed:
-                waiter_totals[waiter_name]["service_charge"] = money(
-                    waiter_totals[waiter_name]["service_charge"] - service_amount
-                )
-            if refund.sale_was_recognized and refund.payment_id is not None:
+        waiter_name = display_credit_name(refund.credited_waiter_name)
+        if refund.sale_was_recognized:
+            waiter_totals[waiter_name]["sales"] = money(
+                waiter_totals[waiter_name]["sales"] - reversed_sale_product
+            )
+        if refund.service_was_recognized and not refund.service_already_repassed:
+            waiter_totals[waiter_name]["service_charge"] = money(
+                waiter_totals[waiter_name]["service_charge"] - service_amount
+            )
+        if refund.sale_was_recognized and refund.payment_id is not None:
+            order = refund.order
+            if order:
                 table_label = order.table.label if order.table else "Balcão"
                 table_totals[table_label]["total"] = money(
                     table_totals[table_label]["total"] - reversed_sale_product
-                )
-        elif refund.consignment_order:
-            waiter_name = refund.consignment_order.credited_waiter_name or "N/A"
-            if refund.sale_was_recognized:
-                waiter_totals[waiter_name]["sales"] = money(
-                    waiter_totals[waiter_name]["sales"] - reversed_sale_product
-                )
-            if refund.service_was_recognized and not refund.service_already_repassed:
-                waiter_totals[waiter_name]["service_charge"] = money(
-                    waiter_totals[waiter_name]["service_charge"] - service_amount
                 )
 
         if refund.sale_was_recognized:
@@ -917,6 +957,7 @@ def _finalize_report_totals(
     for values in waiter_totals.values():
         values["service_charge"] = as_float(values["service_charge"])
         values["sales"] = as_float(values["sales"])
+        values["orders"] = as_float(values["orders"])
 
     for values in table_totals.values():
         values["total"] = as_float(values["total"])
@@ -1047,8 +1088,6 @@ async def _build_daily_report(
             )
         )
         waiter_name = _resolve_waiter_name(o)
-        waiter_totals[waiter_name]["orders"] += 1
-        waiter_totals[waiter_name]["sales"] = money(waiter_totals[waiter_name]["sales"] + money(o.total))
 
         table_label = o.table.label if o.table else "Balcão"
         table_totals[table_label]["total"] = money(table_totals[table_label]["total"] + money(o.total))
@@ -1283,8 +1322,6 @@ async def _build_session_report(
             )
         )
         waiter_name = _resolve_waiter_name(o)
-        waiter_totals[waiter_name]["orders"] += 1
-        waiter_totals[waiter_name]["sales"] = money(waiter_totals[waiter_name]["sales"] + money(o.total))
 
         table_label = o.table.label if o.table else "Balcão"
         table_totals[table_label]["total"] = money(table_totals[table_label]["total"] + money(o.total))

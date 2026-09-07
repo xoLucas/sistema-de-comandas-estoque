@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select, func, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.timezone import local_day_to_utc_range, today_local
 from app.models.notification import Notification
 from app.models.product import Product
 
@@ -123,12 +124,13 @@ async def create_cash_register_close_notification(
     db: AsyncSession,
     close_time: str,
 ) -> Notification | None:
-    today = datetime.now(TIMEZONE).date()
+    day_start, day_end = local_day_to_utc_range(today_local())
     existing = await db.execute(
         select(Notification)
         .where(
             Notification.type == "cash_register_close_time",
-            Notification.created_at >= today,
+            Notification.created_at >= day_start,
+            Notification.created_at <= day_end,
         )
         .order_by(Notification.created_at.desc())
         .limit(1)

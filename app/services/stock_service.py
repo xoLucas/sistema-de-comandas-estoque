@@ -1,4 +1,8 @@
+from collections.abc import Iterable
+from decimal import Decimal
+
 from app.models.product import Product
+from app.services.money_service import ZERO, money
 
 
 def is_pack(product: Product) -> bool:
@@ -22,6 +26,18 @@ def pack_stock_for_product(product: Product) -> int:
     if size <= 0:
         return 0
     return unit.stock // size
+
+
+def inventory_cost_for_product(product: Product) -> Decimal:
+    """Return the physical inventory value represented by one product record."""
+    if is_pack(product):
+        return ZERO
+    return money((product.cost or ZERO) * product.stock)
+
+
+def total_inventory_cost(products: Iterable[Product]) -> Decimal:
+    """Return the total physical inventory value without counting derived packs twice."""
+    return money(sum((inventory_cost_for_product(product) for product in products), ZERO))
 
 
 def stock_status(product: Product) -> str:

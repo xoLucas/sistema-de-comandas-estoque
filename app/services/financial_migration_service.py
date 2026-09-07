@@ -21,6 +21,7 @@ from app.services.settings_service import get_card_fee_for_machine
 
 
 BACKFILL_VERSION = "20260905_02_financial_integrity_backfill"
+REPAIR_VERSION = "20260906_08_legacy_consignment_preconversion"
 logger = logging.getLogger(__name__)
 
 
@@ -30,6 +31,7 @@ async def _audit_suspect_modern_consignment_payments(db: AsyncSession) -> None:
         .where(
             ConsignmentPayment.is_legacy_inferred == True,
             ConsignmentPayment.idempotency_key.is_not(None),
+            ConsignmentPayment.source_order_payment_id.is_(None),
         )
         .order_by(ConsignmentPayment.id)
         .limit(100)
@@ -181,6 +183,105 @@ async def _backfill_order_payments(db: AsyncSession) -> None:
     await db.flush()
 
 
+async def _repair_legacy_preconversion_payments(db: AsyncSession) -> None:
+    """Materialize legacy pre-conversion partial payments into their consignados.
+
+    Legacy conversions sometimes kept pre-conversion partials only on the source
+    order (orders.partial_payments_detail / order_payments), without copying them
+    into consignment_payments. This idempotent repair inserts the corresponding
+    ConsignmentPayment rows (linked to the canonical OrderPayment) and recomputes
+    amount_paid / balance / status.
+
+    Rows already linked — by source_order_payment_id or by identical
+    amount+created_at — are never duplicated, and consignados that hold refunds
+    are left untouched (their payments may already be net of refunds).
+    """
+    insert = await db.execute(
+        text(
+            """
+            INSERT INTO consignment_payments
+                (consignment_order_id, user_id, amount, product_portion,
+                 service_portion, payment_method, card_machine, card_fee_rate,
+                 card_fee_amount, cash_session_id, source_order_payment_id,
+                 idempotency_key, is_legacy_inferred, notes, created_at, updated_at)
+            SELECT
+                c.id,
+                op.user_id,
+                op.product_amount + op.service_amount,
+                op.product_amount,
+                op.service_amount,
+                op.payment_method,
+                op.card_machine,
+                op.card_fee_rate,
+                op.card_fee_amount,
+                op.cash_session_id,
+                op.id,
+                'source-order-payment:' || op.id,
+                TRUE,
+                'Pagamento parcial da comanda #' || c.source_order_id,
+                op.created_at,
+                op.created_at
+            FROM consignment_orders c
+            JOIN order_payments op
+              ON op.order_id = c.source_order_id
+             AND op.payment_type = 'partial'
+            WHERE c.source_order_id IS NOT NULL
+              AND c.status <> 'cancelado'
+              AND op.idempotency_key LIKE 'legacy-order-%'
+              AND NOT EXISTS (
+                  SELECT 1 FROM consignment_payments cp
+                  WHERE cp.consignment_order_id = c.id
+                    AND (
+                        cp.source_order_payment_id = op.id
+                     OR (cp.amount = op.product_amount + op.service_amount
+                         AND cp.created_at = op.created_at)
+                    )
+              )
+            """
+        )
+    )
+
+    update = await db.execute(
+        text(
+            """
+            UPDATE consignment_orders AS c
+            SET amount_paid = t.paid,
+                balance = GREATEST(0, c.total - t.paid),
+                status = CASE
+                    WHEN GREATEST(0, c.total - t.paid) = 0 THEN 'pago'
+                    ELSE 'pendente'
+                END,
+                closed_at = CASE
+                    WHEN GREATEST(0, c.total - t.paid) = 0
+                         AND c.closed_at IS NULL THEN t.last_paid
+                    ELSE c.closed_at
+                END
+            FROM (
+                SELECT cp.consignment_order_id,
+                       SUM(cp.amount)::NUMERIC(14,2) AS paid,
+                       MAX(cp.created_at) AS last_paid
+                FROM consignment_payments cp
+                GROUP BY cp.consignment_order_id
+            ) t
+            WHERE c.id = t.consignment_order_id
+              AND c.source_order_id IS NOT NULL
+              AND c.status <> 'cancelado'
+              AND NOT EXISTS (
+                  SELECT 1 FROM payment_refunds pr
+                  WHERE pr.consignment_order_id = c.id
+                     OR pr.order_id = c.source_order_id
+              )
+            """
+        )
+    )
+    logger.info(
+        "Legacy consignment preconversion repair: %s payment(s) inserted, "
+        "%s consignment(s) updated",
+        insert.rowcount,
+        update.rowcount,
+    )
+
+
 async def _match_source_order_payment(
     db: AsyncSession,
     consignment: ConsignmentOrder,
@@ -289,10 +390,7 @@ async def _backfill_consignments(db: AsyncSession) -> None:
 
         contains_modern_payment = any(
             payment.id not in legacy_candidate_ids
-            and not (
-                payment.is_legacy_inferred
-                and payment.idempotency_key is None
-            )
+            and not payment.is_legacy_inferred
             for payment in payments
         )
         if not contains_modern_payment:
@@ -387,19 +485,37 @@ async def _add_financial_constraints(db: AsyncSession) -> None:
 
 async def run_financial_backfills(db: AsyncSession) -> None:
     await _audit_suspect_modern_consignment_payments(db)
-    applied = await db.scalar(
+
+    backfill_applied = await db.scalar(
         text("SELECT 1 FROM schema_migrations WHERE version = :version"),
         {"version": BACKFILL_VERSION},
     )
-    if applied:
-        return
-
-    await _backfill_order_payments(db)
-    await _backfill_consignments(db)
-    await _backfill_loss_costs(db)
-    await _add_financial_constraints(db)
-    await db.execute(
-        text("INSERT INTO schema_migrations (version) VALUES (:version)"),
-        {"version": BACKFILL_VERSION},
+    repair_applied = await db.scalar(
+        text("SELECT 1 FROM schema_migrations WHERE version = :version"),
+        {"version": REPAIR_VERSION},
     )
+
+    if not backfill_applied:
+        await _backfill_order_payments(db)
+        # Transpose pre-conversion partials BEFORE the consignment backfill so that
+        # the totals computed there always include the full set of payments.
+        await _repair_legacy_preconversion_payments(db)
+        await _backfill_consignments(db)
+        await _backfill_loss_costs(db)
+        await _add_financial_constraints(db)
+        await db.execute(
+            text("INSERT INTO schema_migrations (version) VALUES (:version)"),
+            {"version": BACKFILL_VERSION},
+        )
+    elif not repair_applied:
+        # The main backfill already ran on a previous deployment; run only the
+        # repair so databases with an incomplete legacy conversion are fixed.
+        await _repair_legacy_preconversion_payments(db)
+
+    if not repair_applied:
+        await db.execute(
+            text("INSERT INTO schema_migrations (version) VALUES (:version)"),
+            {"version": REPAIR_VERSION},
+        )
+
     await db.commit()

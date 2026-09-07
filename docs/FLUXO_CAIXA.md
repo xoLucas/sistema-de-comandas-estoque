@@ -31,6 +31,11 @@ Durante o expediente, o caixa/gerente pode consultar o andamento das vendas sem 
 
 O relatório parcial é útil para conferências de meio de expediente e antecipação de valores.
 
+Quando o horário automático de fechamento é atingido e o caixa continua aberto, o
+relatório enviado por e-mail também usa o período completo da sessão, de `opened_at`
+até o momento da geração. Uma sessão que atravessa a meia-noite não é dividida em
+dois relatórios nesse envio automático.
+
 ### 3. Fechamento do Caixa
 
 Ao final do expediente, o responsável fecha o caixa.
@@ -58,6 +63,10 @@ O relatório final considera o período completo da sessão: `opened_at` até `c
   - diferença (sobra ou falta)
 
 O relatório final pode ser baixado em PDF.
+
+O relatório diário por data continua sendo um relatório de calendário
+(`00:00`–`23:59`). Para conferir um expediente que atravessa a meia-noite, deve-se
+usar o relatório parcial ou final da sessão.
 
 ---
 

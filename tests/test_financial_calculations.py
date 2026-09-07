@@ -8,7 +8,7 @@ from app.services.pricing_service import (
     calculate_selling_price,
 )
 from app.services.promotion_service import calculate_discounted_price
-from app.services.stock_service import validate_pack_configuration
+from app.services.stock_service import total_inventory_cost, validate_pack_configuration
 from app.models.product import Product
 from app.services.backup_service import EXPORTABLE_ENTITIES
 from app.routers.orders import _confirmed_receipt_items
@@ -79,6 +79,26 @@ class FinancialCalculationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "quantidade por engradado inválida"):
             validate_pack_configuration(product)
+
+    def test_inventory_cost_ignores_derived_packs(self) -> None:
+        unit = Product(
+            name="Unit",
+            category="Test",
+            cost=Decimal("2.5000"),
+            price=Decimal("5.00"),
+            stock=48,
+        )
+        pack = Product(
+            name="Pack",
+            category="Test",
+            cost=Decimal("60.0000"),
+            price=Decimal("80.00"),
+            stock=0,
+            pack_unit_product_id=1,
+            pack_size=24,
+        )
+
+        self.assertEqual(total_inventory_cost([unit, pack]), Decimal("120.00"))
 
     def test_csv_exports_include_normalized_financial_ledger(self) -> None:
         required = {

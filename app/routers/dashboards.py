@@ -38,9 +38,15 @@ from app.routers.financial import (
     _consignment_tips_paid_in_period,
     _direct_service_in_period,
     _resolve_waiter_name,
+    serialize_order_sale,
 )
 from app.services.cash_service import compute_payment_breakdown
-from app.services.stock_service import stock_status, is_pack, pack_stock_for_product
+from app.services.stock_service import (
+    stock_status,
+    is_pack,
+    pack_stock_for_product,
+    total_inventory_cost,
+)
 from app.services.consignment_service import fetch_consignment_payments
 from app.services.money_service import ZERO, as_float, money
 
@@ -54,6 +60,10 @@ def _require_manager(user: User) -> bool:
 def _default_ranges() -> tuple[date, date]:
     today = today_local()
     return today, today
+
+
+def _current_local_month() -> int:
+    return today_local().month
 
 
 def _parse_dates(
@@ -75,6 +85,73 @@ def _csv_response(filename: str, headers: list[str], rows: list[list[Any]]) -> S
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+def _serialize_dashboard_consignment(consignment: ConsignmentOrder) -> dict[str, Any]:
+    """Serialize a consignment for the dashboard's read-only sales log."""
+    return {
+        "entry_type": "consignado",
+        "consignment_id": consignment.id,
+        "source_order_id": consignment.source_order_id,
+        "customer_id": consignment.customer_id,
+        "customer_name": consignment.customer.name if consignment.customer else None,
+        "waiter_name": consignment.credited_waiter_name or "N/A",
+        "order_type": consignment.order_type,
+        "status": consignment.status,
+        "created_at": (
+            consignment.created_at.isoformat() if consignment.created_at else None
+        ),
+        "closed_at": (
+            consignment.closed_at.isoformat() if consignment.closed_at else None
+        ),
+        "due_date": consignment.due_date.isoformat() if consignment.due_date else None,
+        "product_total": as_float(consignment.product_total),
+        "service_total": as_float(consignment.service_total),
+        "total": as_float(consignment.total),
+        "amount_paid": as_float(consignment.amount_paid),
+        "balance": as_float(consignment.balance),
+        "notes": consignment.notes,
+        "items_count": sum(item.quantity for item in consignment.items),
+        "items": [
+            {
+                "product_name": item.product.name if item.product else "N/A",
+                "quantity": item.quantity,
+                "unit_price": float(item.unit_price),
+                "unit_cost": float(item.unit_cost) if item.unit_cost is not None else None,
+                "total": round(float(item.unit_price) * item.quantity, 2),
+            }
+            for item in consignment.items
+        ],
+        "payments": [
+            {
+                "payment_id": payment.id,
+                "amount": as_float(payment.amount),
+                "product_portion": as_float(payment.product_portion),
+                "service_portion": as_float(payment.service_portion),
+                "payment_method": payment.payment_method or "nao_informado",
+                "card_machine": payment.card_machine,
+                "created_at": (
+                    payment.created_at.isoformat() if payment.created_at else None
+                ),
+                "notes": payment.notes,
+            }
+            for payment in consignment.payments
+        ],
+        "refunds": [
+            {
+                "refund_id": refund.id,
+                "amount": as_float(refund.gross_amount),
+                "product_amount": as_float(refund.product_amount),
+                "service_amount": as_float(refund.service_amount),
+                "payment_method": refund.payment_method,
+                "reason": refund.reason,
+                "created_at": (
+                    refund.created_at.isoformat() if refund.created_at else None
+                ),
+            }
+            for refund in consignment.refunds
+        ],
+    }
 
 
 @router.get("/geral")
@@ -403,6 +480,8 @@ async def dashboard_vendas(
     start_date: str | None = Query(None),
     end_date: str | None = Query(None),
     format: str = Query("json"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -471,11 +550,96 @@ async def dashboard_vendas(
             selectinload(ConsignmentOrder.items).selectinload(
                 ConsignmentOrderItem.product
             ),
+            selectinload(ConsignmentOrder.customer),
             selectinload(ConsignmentOrder.waiter),
             selectinload(ConsignmentOrder.credited_waiter),
+            selectinload(ConsignmentOrder.payments),
+            selectinload(ConsignmentOrder.refunds),
         )
     )
     consignment_sales = consignment_sales_result.scalars().all()
+
+    # Read-only sales log entries. This projection does not change any existing
+    # financial aggregation; it only supplies the complete historical log.
+    direct_log_keys_result = await db.execute(
+        select(Order.id, Order.closed_at)
+        .where(
+            Order.status == "finalizada",
+            or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
+        )
+    )
+    consignment_log_keys_result = await db.execute(
+        select(ConsignmentOrder.id, ConsignmentOrder.closed_at, ConsignmentOrder.created_at)
+    )
+    sales_log_keys = [
+        ("comanda", order_id, closed_at)
+        for order_id, closed_at in direct_log_keys_result.all()
+    ] + [
+        ("consignado", consignment_id, closed_at or created_at)
+        for consignment_id, closed_at, created_at in consignment_log_keys_result.all()
+    ]
+    sales_log_keys.sort(
+        key=lambda entry: (
+            entry[2].timestamp() if entry[2] else float("-inf"),
+            entry[1],
+        ),
+        reverse=True,
+    )
+    sales_log_total = len(sales_log_keys)
+    sales_log_offset = (page - 1) * page_size
+    sales_log_page_keys = sales_log_keys[sales_log_offset : sales_log_offset + page_size]
+
+    page_order_ids = [entry_id for kind, entry_id, _ in sales_log_page_keys if kind == "comanda"]
+    page_consignment_ids = [entry_id for kind, entry_id, _ in sales_log_page_keys if kind == "consignado"]
+    page_orders_by_id = {}
+    if page_order_ids:
+        page_orders_result = await db.execute(
+            select(Order)
+            .where(Order.id.in_(page_order_ids))
+            .options(
+                selectinload(Order.table),
+                selectinload(Order.waiter),
+                selectinload(Order.closed_by),
+                selectinload(Order.closed_waiter),
+                selectinload(Order.customer),
+                selectinload(Order.items).selectinload(OrderItem.product),
+                selectinload(Order.payments),
+                selectinload(Order.refunds),
+            )
+        )
+        page_orders_by_id = {
+            order.id: {"entry_type": "comanda", **serialize_order_sale(order)}
+            for order in page_orders_result.scalars().all()
+        }
+    page_consignments_by_id = {}
+    if page_consignment_ids:
+        page_consignments_result = await db.execute(
+            select(ConsignmentOrder)
+            .where(ConsignmentOrder.id.in_(page_consignment_ids))
+            .options(
+                selectinload(ConsignmentOrder.items).selectinload(
+                    ConsignmentOrderItem.product
+                ),
+                selectinload(ConsignmentOrder.customer),
+                selectinload(ConsignmentOrder.waiter),
+                selectinload(ConsignmentOrder.credited_waiter),
+                selectinload(ConsignmentOrder.payments),
+                selectinload(ConsignmentOrder.refunds),
+            )
+        )
+        page_consignments_by_id = {
+            consignment.id: _serialize_dashboard_consignment(consignment)
+            for consignment in page_consignments_result.scalars().all()
+        }
+    sales_log_page = [
+        (
+            page_orders_by_id.get(entry_id)
+            if kind == "comanda"
+            else page_consignments_by_id.get(entry_id)
+        )
+        for kind, entry_id, _ in sales_log_page_keys
+    ]
+    sales_log_page = [entry for entry in sales_log_page if entry is not None]
 
     # Revenue by day uses each revenue or refund transaction date.
     daily_expr = cast(func.timezone("America/Sao_Paulo", Order.closed_at), Date)
@@ -798,6 +962,13 @@ async def dashboard_vendas(
         "by_waiter": by_waiter,
         "by_table": by_table,
         "by_payment": by_payment,
+        "sales_log": sales_log_page,
+        "sales_log_pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total": sales_log_total,
+            "total_pages": max(1, (sales_log_total + page_size - 1) // page_size),
+        },
     }
 
 
@@ -820,15 +991,13 @@ async def dashboard_estoque(
     status_counts = {"em_conformidade": 0, "em_risco": 0, "em_falta": 0}
     risk_items = []
     out_items = []
-    total_stock_cost = 0.0
+    total_stock_cost = total_inventory_cost(products)
 
     for p in products:
         status = stock_status(p)
         status_counts[status] = status_counts.get(status, 0) + 1
         current_stock = pack_stock_for_product(p) if is_pack(p) else p.stock
         cost = float(p.cost) if p.cost else 0.0
-        total_stock_cost += cost * current_stock
-
         item = {
             "id": p.id,
             "name": p.name,
@@ -891,7 +1060,7 @@ async def dashboard_estoque(
 
     return {
         "status_counts": status_counts,
-        "total_stock_cost": round(total_stock_cost, 2),
+        "total_stock_cost": as_float(total_stock_cost),
         "risk_items": sorted(risk_items, key=lambda x: x["stock"])[:20],
         "out_items": sorted(out_items, key=lambda x: x["stock"])[:20],
         "recent_movements": recent_movements,
@@ -1027,8 +1196,7 @@ async def dashboard_clientes(
     top_customers = sorted(top_customers_map.values(), key=lambda x: x["total"], reverse=True)[:10]
 
     # Aniversariantes do mês
-    today = date.today()
-    month = today.month
+    month = _current_local_month()
     birthday_result = await db.execute(
         select(Customer).where(
             Customer.birth_date.isnot(None),

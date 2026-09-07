@@ -1,9 +1,10 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import select, desc, text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import selectinload
 
 from app.core.database import async_session
 from app.models.cash_register_session import CashRegisterSession
@@ -19,7 +20,7 @@ from app.services.settings_service import (
     get_setting_as_bool,
 )
 from app.services.email_service import send_email_with_attachment
-from app.routers.financial import _build_daily_report, _build_pdf_bytes
+from app.routers.financial import _build_session_report, _build_pdf_bytes
 from app.services.money_service import money
 
 
@@ -104,7 +105,12 @@ async def auto_close_notification() -> None:
             return
 
         result = await db.execute(
-            select(CashRegisterSession).where(CashRegisterSession.status == "open")
+            select(CashRegisterSession)
+            .where(CashRegisterSession.status == "open")
+            .options(
+                selectinload(CashRegisterSession.opened_by),
+                selectinload(CashRegisterSession.closed_by),
+            )
         )
         session = result.scalar_one_or_none()
         if not session:
@@ -119,9 +125,16 @@ async def auto_close_notification() -> None:
         if not report_email:
             return
 
-        today = now.date()
+        report_end = datetime.now(timezone.utc)
         try:
-            report = await _build_daily_report(today, db, "Sistema")
+            report = await _build_session_report(
+                session=session,
+                start=session.opened_at,
+                end=report_end,
+                report_type="parcial",
+                db=db,
+                generated_by="Sistema",
+            )
         except Exception:
             return
 
@@ -129,14 +142,21 @@ async def auto_close_notification() -> None:
             return
 
         try:
-            pdf_bytes = _build_pdf_bytes(report, str(today))
+            pdf_buffer = _build_pdf_bytes(report, f"sessao_{session.id}_parcial")
+            pdf_bytes = pdf_buffer.getvalue()
         except Exception:
             return
+        if not pdf_bytes:
+            return
 
-        subject = f"Relatório de Fechamento - {today.strftime('%d/%m/%Y')}"
+        opened_at = session.opened_at.astimezone(TIMEZONE)
+        report_end_local = report_end.astimezone(TIMEZONE)
+        subject = f"Relatório Parcial de Caixa - Sessão #{session.id}"
         body = (
-            f"Horário de fechamento automático atingido ({today.strftime('%d/%m/%Y')}).\n\n"
-            "O caixa ainda está aberto. Segue em anexo o relatório parcial do dia.\n\n"
+            "Horário de fechamento automático atingido "
+            f"({report_end_local.strftime('%d/%m/%Y %H:%M')}).\n\n"
+            "O caixa ainda está aberto. Segue em anexo o relatório parcial da sessão "
+            f"iniciada em {opened_at.strftime('%d/%m/%Y %H:%M')}.\n\n"
             "Acesse o sistema para fechar o caixa manualmente quando possível."
         )
 
@@ -145,7 +165,7 @@ async def auto_close_notification() -> None:
             subject=subject,
             body=body,
             attachment_bytes=pdf_bytes,
-            attachment_filename=f"fechamento_{today.strftime('%Y%m%d')}.pdf",
+            attachment_filename=f"fechamento_sessao_{session.id}_parcial.pdf",
         )
 
 

@@ -1,9 +1,14 @@
 from contextlib import redirect_stdout
 from io import StringIO
+import re
 import unittest
 
 from app.services.notification_service import create_printer_failure_notification
 from app.services.printer_service import build_order_receipt
+
+# Register the complete model graph before this isolated notification test
+# instantiates an ORM object.
+import app.core.seed  # noqa: F401
 
 
 class ReceiptRenderingTests(unittest.TestCase):
@@ -15,7 +20,12 @@ class ReceiptRenderingTests(unittest.TestCase):
                 {"name": "Lads Beer", "ticket_footer": "Volte sempre"},
                 48,
             )
-        return receipt.decode("cp850", errors="ignore"), terminal.getvalue()
+        printed_text = receipt.decode("cp850", errors="ignore")
+        printed_lines = re.sub(r"\x1b@|\x1ba.|\x1bE.|\x1dV\x00", "", printed_text)
+        printed_lines = [line.strip() for line in printed_lines.splitlines() if line.strip()]
+        terminal_lines = [line.strip() for line in terminal.getvalue().splitlines() if line.strip()]
+        self.assertEqual(printed_lines, terminal_lines)
+        return printed_text, terminal.getvalue()
 
     def test_table_quote_always_shows_both_service_options(self) -> None:
         receipt, terminal = self._render(

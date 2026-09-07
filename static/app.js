@@ -7215,6 +7215,8 @@ let dashboardEstoquePage = 1;
 const DASHBOARD_ESTOQUE_PAGE_SIZE = 20;
 let dashboardGestaoPage = 1;
 const DASHBOARD_GESTAO_PAGE_SIZE = 50;
+let dashboardVendasPage = 1;
+const DASHBOARD_VENDAS_PAGE_SIZE = 10;
 let dashboardCharts = {};
 
 const DASHBOARD_COLORS = {
@@ -7246,6 +7248,7 @@ function initDashboards() {
 function switchDashboardTab(tab) {
     dashboardCurrentTab = tab;
     dashboardGestaoPage = 1;
+    dashboardVendasPage = 1;
     document.querySelectorAll('.dashboards-nav-btn').forEach(btn => btn.classList.remove('active'));
     const activeBtn = document.querySelector(`.dashboards-nav-btn[data-tab="${tab}"]`);
     if (activeBtn) activeBtn.classList.add('active');
@@ -7306,6 +7309,7 @@ function setDashboardPeriod(period) {
     document.getElementById('dashboard-end-date').value = formatDashboardDate(end);
     setActivePeriodChip(period);
     dashboardGestaoPage = 1;
+    dashboardVendasPage = 1;
     loadDashboardData(dashboardCurrentTab);
 }
 
@@ -7316,6 +7320,7 @@ function setDashboardYear(year) {
     document.getElementById('dashboard-end-date').value = `${y}-12-31`;
     setActivePeriodChip(null);
     dashboardGestaoPage = 1;
+    dashboardVendasPage = 1;
     loadDashboardData(dashboardCurrentTab);
 }
 
@@ -7335,6 +7340,7 @@ function populateDashboardYearSelect() {
 function applyDashboardDateFilter() {
     setActivePeriodChip(null);
     dashboardGestaoPage = 1;
+    dashboardVendasPage = 1;
     loadDashboardData(dashboardCurrentTab);
 }
 
@@ -7356,6 +7362,10 @@ async function loadDashboardData(tab) {
     if (tab === 'gestao') {
         params.push('page=' + encodeURIComponent(dashboardGestaoPage));
         params.push('page_size=' + encodeURIComponent(DASHBOARD_GESTAO_PAGE_SIZE));
+    }
+    if (tab === 'vendas') {
+        params.push('page=' + encodeURIComponent(dashboardVendasPage));
+        params.push('page_size=' + encodeURIComponent(DASHBOARD_VENDAS_PAGE_SIZE));
     }
     const url = API_BASE + '/dashboards/' + tab + (params.length ? '?' + params.join('&') : '');
     try {
@@ -7539,7 +7549,11 @@ function renderDashboardVendas(data) {
                 <tbody>${(data.by_waiter || []).map(w => `<tr><td>${w.name}</td><td>${w.orders}</td><td>${formatCurrency(w.total)}</td></tr>`).join('')}</tbody>
             </table>
         </div>
+        <div class="dashboard-section-title">Log geral de vendas (todos os períodos)</div>
+        <div id="dashboard-sales-log"></div>
     `;
+
+    renderDashboardSalesLog(data);
 
     const ctxDay = document.getElementById('chart-sales-by-day');
     if (ctxDay) {
@@ -7614,6 +7628,133 @@ function renderDashboardVendas(data) {
             }
         });
     }
+}
+
+function renderDashboardSalesLog(data) {
+    const container = document.getElementById('dashboard-sales-log');
+    if (!container) return;
+
+    const entries = data.sales_log || [];
+    window._dashboardSalesLogData = entries;
+    if (!entries.length) {
+        container.innerHTML = '<div class="dashboard-table-card"><div class="empty-msg" style="padding:12px;text-align:center;">Nenhuma venda registrada</div></div>';
+        return;
+    }
+
+    const methodLabels = {
+        dinheiro: 'Dinheiro',
+        pix: 'Pix',
+        cartao_debito: 'Cartão Débito',
+        cartao_credito: 'Cartão Crédito',
+        nao_informado: 'Não Informado',
+    };
+    const statusLabels = {
+        pendente: 'Pendente',
+        pago: 'Pago',
+        cancelado: 'Cancelado',
+    };
+    const typeLabels = { pf: 'Pessoa Física', pj: 'Pessoa Jurídica' };
+
+    const cards = entries.map((entry, index) => {
+        const isConsignment = entry.entry_type === 'consignado';
+        const title = isConsignment
+            ? `Consignado #${entry.consignment_id}`
+            : `${entry.is_balcao ? 'Balcão' : (entry.table_label || 'Mesa ' + entry.table_number)} · Comanda #${entry.order_id}`;
+        const date = entry.closed_at || entry.created_at;
+        const total = isConsignment ? entry.total : round(entry.total + entry.service_charge_amount, 2);
+        const status = isConsignment ? (statusLabels[entry.status] || entry.status || '-') : 'Finalizada';
+        const payment = isConsignment
+            ? ((entry.payments || []).map(p => methodLabels[p.payment_method] || p.payment_method).filter(Boolean).join(', ') || 'Sem pagamento')
+            : (entry.payment_method_label || methodLabels[entry.payment_method] || entry.payment_method || 'Não informado');
+        return `
+            <div class="sale-card dashboard-sale-log-card" role="button" tabindex="0" onclick="openDashboardSaleDetail(${index})" onkeydown="if(event.key === 'Enter' || event.key === ' ') openDashboardSaleDetail(${index})">
+                <div class="sale-header">
+                    <span class="sale-table">${escapeHtml(title)}</span>
+                    <span class="sale-time">${date ? _fmtDateTime(date) : '-'}</span>
+                </div>
+                <div class="sale-details">
+                    <div class="sale-detail"><span>${isConsignment ? 'Consignado' : 'Comanda'} · ${escapeHtml(status)}</span><span>${entry.items_count || 0} itens</span></div>
+                    <div class="sale-detail"><span>Cliente: ${escapeHtml(entry.customer_name || 'Não informado')}</span><span>Garçom: ${escapeHtml(entry.waiter_name || 'N/A')}</span></div>
+                    <div class="sale-detail"><span>Pagamento: ${escapeHtml(payment)}</span>${isConsignment ? `<span>${escapeHtml(typeLabels[entry.order_type] || entry.order_type || '')}</span>` : ''}</div>
+                    ${isConsignment ? `<div class="sale-detail"><span>Pago: ${formatCurrency(entry.amount_paid || 0)}</span><span>Saldo: ${formatCurrency(entry.balance || 0)}</span></div>` : ''}
+                </div>
+                <div class="sale-total">${formatCurrency(total)}</div>
+            </div>
+        `;
+    }).join('');
+
+    container.innerHTML = `<div class="sales-list dashboard-sales-log-list">${cards}</div>${renderDashboardVendasPagination(data.sales_log_pagination)}`;
+}
+
+function renderDashboardVendasPagination(pagination) {
+    if (!pagination) return '';
+    const { page, page_size, total, total_pages } = pagination;
+    const start = total === 0 ? 0 : (page - 1) * page_size + 1;
+    const end = Math.min(page * page_size, total);
+    return `
+        <div class="dashboard-pagination" style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;flex-wrap:wrap;gap:8px;">
+            <span style="font-size:12px;color:var(--text-muted);">${start}-${end} de ${total}</span>
+            <div style="display:flex;gap:8px;">
+                <button type="button" class="btn-small" onclick="changeDashboardVendasPage(${page - 1})" ${page > 1 ? '' : 'disabled'}>Anterior</button>
+                <button type="button" class="btn-small" onclick="changeDashboardVendasPage(${page + 1})" ${page < total_pages ? '' : 'disabled'}>Próxima</button>
+            </div>
+        </div>
+    `;
+}
+
+function changeDashboardVendasPage(newPage) {
+    if (newPage < 1) return;
+    dashboardVendasPage = newPage;
+    loadDashboardData('vendas');
+}
+
+function openDashboardSaleDetail(index) {
+    const entry = (window._dashboardSalesLogData || [])[index];
+    const modal = document.getElementById('dashboard-sale-detail-modal');
+    const content = document.getElementById('dashboard-sale-detail-content');
+    const title = document.getElementById('dashboard-sale-detail-title');
+    if (!entry || !modal || !content || !title) return;
+
+    const isConsignment = entry.entry_type === 'consignado';
+    title.textContent = isConsignment ? `Detalhes do Consignado #${entry.consignment_id}` : `Detalhes da Comanda #${entry.order_id}`;
+    const methodLabels = { dinheiro: 'Dinheiro', pix: 'Pix', cartao_debito: 'Débito', cartao_credito: 'Crédito', nao_informado: 'Não informado' };
+    const items = (entry.items || []).map(item => `
+        <div class="summary-row" style="font-size:12px;"><span>${item.quantity}x ${escapeHtml(item.product_name || 'N/A')} <span style="color:var(--text-muted);">(${formatCurrency(item.unit_price || 0)} un.)</span></span><span>${formatCurrency(item.total || 0)}</span></div>
+    `).join('');
+    const payments = (isConsignment ? (entry.payments || []) : (entry.payment_details || [])).map(payment => `
+        <div class="summary-row" style="font-size:12px;"><span>${escapeHtml(methodLabels[payment.payment_method || payment.method] || payment.method_label || payment.payment_method || payment.method || 'Não informado')}</span><span>${formatCurrency(payment.amount || 0)}</span></div>
+    `).join('');
+    const refunds = (entry.refunds || []).map(refund => `
+        <div class="summary-row" style="font-size:12px;color:var(--red);"><span>Estorno${refund.reason ? ': ' + escapeHtml(refund.reason) : ''}</span><span>- ${formatCurrency(refund.amount || 0)}</span></div>
+    `).join('');
+    const total = isConsignment ? entry.total : round(entry.total + entry.service_charge_amount, 2);
+
+    content.innerHTML = `
+        <div class="report-summary">
+            <div class="summary-row"><span>Cliente</span><span>${escapeHtml(entry.customer_name || 'Não informado')}</span></div>
+            <div class="summary-row"><span>Garçom</span><span>${escapeHtml(entry.waiter_name || 'N/A')}</span></div>
+            <div class="summary-row"><span>${isConsignment ? 'Status' : 'Mesa'}</span><span>${escapeHtml(isConsignment ? (entry.status || '-') : (entry.is_balcao ? 'Balcão' : (entry.table_label || 'Mesa ' + entry.table_number)))}</span></div>
+            <div class="summary-row"><span>Data/Hora</span><span>${entry.closed_at || entry.created_at ? _fmtDateTime(entry.closed_at || entry.created_at) : '-'}</span></div>
+            ${isConsignment ? `<div class="summary-row"><span>Vencimento</span><span>${entry.due_date ? new Date(entry.due_date + 'T00:00:00').toLocaleDateString('pt-BR') : '-'}</span></div>` : ''}
+            <div class="summary-row"><span>Total de produtos</span><span>${formatCurrency(isConsignment ? entry.product_total : entry.total)}</span></div>
+            ${isConsignment && entry.service_total > 0 ? `<div class="summary-row"><span>Taxa de serviço</span><span>${formatCurrency(entry.service_total)}</span></div>` : ''}
+            ${(!isConsignment && entry.service_charge_amount > 0) ? `<div class="summary-row"><span>Taxa de serviço</span><span>${formatCurrency(entry.service_charge_amount)}</span></div>` : ''}
+            <div class="summary-row" style="font-weight:700;"><span>Total</span><span>${formatCurrency(total)}</span></div>
+            ${isConsignment ? `<div class="summary-row"><span>Pago</span><span>${formatCurrency(entry.amount_paid || 0)}</span></div><div class="summary-row"><span>Saldo</span><span>${formatCurrency(entry.balance || 0)}</span></div>` : ''}
+            ${entry.notes ? `<div class="summary-row"><span>Observações</span><span>${escapeHtml(entry.notes)}</span></div>` : ''}
+        </div>
+        <h4 style="margin:16px 0 8px;font-size:14px;">Pagamentos</h4>
+        <div class="report-summary">${payments || '<p class="empty-msg">Nenhum pagamento registrado</p>'}</div>
+        ${refunds ? `<h4 style="margin:16px 0 8px;font-size:14px;">Estornos</h4><div class="report-summary">${refunds}</div>` : ''}
+        <h4 style="margin:16px 0 8px;font-size:14px;">Itens</h4>
+        <div class="report-summary">${items || '<p class="empty-msg">Nenhum item registrado</p>'}</div>
+    `;
+    modal.style.display = 'flex';
+}
+
+function closeDashboardSaleDetail() {
+    const modal = document.getElementById('dashboard-sale-detail-modal');
+    if (modal) modal.style.display = 'none';
 }
 
 function renderDashboardEstoque(data) {

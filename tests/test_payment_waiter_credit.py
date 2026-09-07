@@ -620,6 +620,12 @@ class PaymentWaiterCreditIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 consignment.credited_waiter_name, world["garcom_a"].name
             )
 
+            # Detach the opener and the consignment from the identity map so the
+            # refund path must resolve the consignment waiter through a real
+            # load (regression guard for MissingGreenlet on lazy IO).
+            db.expunge(world["garcom_a"])
+            db.expunge(consignment)
+
             refund = await refund_full_order(
                 db,
                 order_id=order.id,

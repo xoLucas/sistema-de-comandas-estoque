@@ -542,10 +542,18 @@ async def _backfill_payment_credited_waiter(db: AsyncSession) -> None:
         select(PaymentRefund)
         .options(
             selectinload(PaymentRefund.payment),
-            selectinload(PaymentRefund.consignment_payment).selectinload(
-                ConsignmentPayment.consignment_order
+            selectinload(PaymentRefund.consignment_payment)
+            .selectinload(ConsignmentPayment.consignment_order)
+            .selectinload(ConsignmentOrder.waiter),
+            selectinload(PaymentRefund.consignment_payment)
+            .selectinload(ConsignmentPayment.consignment_order)
+            .selectinload(ConsignmentOrder.credited_waiter),
+            selectinload(PaymentRefund.consignment_order).selectinload(
+                ConsignmentOrder.waiter
             ),
-            selectinload(PaymentRefund.consignment_order),
+            selectinload(PaymentRefund.consignment_order).selectinload(
+                ConsignmentOrder.credited_waiter
+            ),
         )
         .order_by(PaymentRefund.id)
     )

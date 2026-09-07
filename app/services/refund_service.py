@@ -357,7 +357,11 @@ async def refund_full_consignment(
     consignment = await db.scalar(
         select(ConsignmentOrder)
         .where(ConsignmentOrder.id == consignment_id)
-        .options(selectinload(ConsignmentOrder.items))
+        .options(
+            selectinload(ConsignmentOrder.items),
+            selectinload(ConsignmentOrder.waiter),
+            selectinload(ConsignmentOrder.credited_waiter),
+        )
         .with_for_update()
     )
     if not consignment:
@@ -518,6 +522,10 @@ async def refund_full_order(
     linked_consignment = await db.scalar(
         select(ConsignmentOrder)
         .where(ConsignmentOrder.source_order_id == order.id)
+        .options(
+            selectinload(ConsignmentOrder.waiter),
+            selectinload(ConsignmentOrder.credited_waiter),
+        )
         .with_for_update()
     )
 

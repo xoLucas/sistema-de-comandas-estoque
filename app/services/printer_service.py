@@ -423,11 +423,14 @@ def build_order_receipt(
             write_total("PAGO ANTES (PRODUTOS)", paid_product)
         if paid_service > 0:
             write_total("GORJETA JA PAGA", paid_service)
-        write_total("RESTANTE PRODUTOS", remaining_product)
+        #write_total("RESTANTE PRODUTOS", remaining_product)
+        write_total("SUBTOTAL", remaining_product, bold=True) # É o novo "Restante produtos", e significa o valor que o cliente vai pagar sem a taxa
         write_total(f"TAXA OPCIONAL ({_format_rate(service_pct)}%)", optional_service)
         separator("=")
-        write_total("A PAGAR SEM TAXA", remaining_product, bold=True)
-        write_total("A PAGAR COM TAXA", amount_with_service, bold=True)
+        #write_total("A PAGAR SEM TAXA", remaining_product, bold=True)
+        #write_total("A PAGAR COM TAXA", amount_with_service, bold=True)
+        write_total("TOTAL", amount_with_service, bold=True) # É o novo "A pagar com taxa"
+
     else:
         remaining_service = money(max(Decimal("0.00"), service_total - paid_service))
         paid_now = money(

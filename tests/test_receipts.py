@@ -53,8 +53,9 @@ class ReceiptRenderingTests(unittest.TestCase):
         )
 
         for output in (receipt, terminal):
-            self.assertIn("A PAGAR SEM TAXA", output)
-            self.assertIn("A PAGAR COM TAXA", output)
+            self.assertIn("SUBTOTAL", output)
+            self.assertIn("TAXA OPCIONAL (10%)", output)
+            self.assertIn("TOTAL", output)
             self.assertIn("R$ 15,00", output)
             self.assertIn("R$ 16,50", output)
         self.assertNotIn("IMPRESSORA TERMINAL", terminal)

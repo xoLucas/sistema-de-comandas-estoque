@@ -235,8 +235,8 @@ SEED_SETTINGS = [
     {"key": "ticket_footer", "value": "Obrigado pela preferência!", "label": "Rodapé do Ticket", "description": "Texto do rodapé impresso nas comandas", "type": "string"},
     {"key": "auto_open_enabled", "value": "false", "label": "Abrir Caixa Automaticamente", "description": "Ativa abertura automática do caixa no horário configurado", "type": "boolean"},
     {"key": "auto_open_time", "value": "18:00", "label": "Horário de Abertura Automática", "description": "Horário para abrir o caixa automaticamente (HH:MM)", "type": "string"},
-    {"key": "auto_close_enabled", "value": "false", "label": "Notificar Fechamento Automaticamente", "description": "Ativa notificação/relatório automático no horário de fechamento", "type": "boolean"},
-    {"key": "auto_close_time", "value": "00:00", "label": "Horário de Fechamento Automático", "description": "Horário para enviar relatório de fechamento (HH:MM)", "type": "string"},
+    {"key": "auto_close_enabled", "value": "false", "label": "Fechar Caixa Automaticamente", "description": "Fecha o caixa automaticamente no horário configurado. Se houver comandas abertas, apenas notifica e envia relatório parcial", "type": "boolean"},
+    {"key": "auto_close_time", "value": "00:00", "label": "Horário de Fechamento Automático", "description": "Horário para fechar o caixa automaticamente (HH:MM). Com comandas abertas, não fecha e só notifica", "type": "string"},
     {"key": "auto_report_email", "value": "", "label": "Email para Relatório Automático", "description": "Email que recebe o relatório ao fechar o caixa", "type": "string"},
     {"key": "smtp_host", "value": "", "label": "Servidor SMTP", "description": "Servidor SMTP para envio de emails (ex: smtp.gmail.com)", "type": "string"},
     {"key": "smtp_port", "value": "587", "label": "Porta SMTP", "description": "Porta do servidor SMTP", "type": "number"},
@@ -404,8 +404,20 @@ async def _ensure_categories() -> None:
 async def ensure_settings(session) -> None:
     for s in SEED_SETTINGS:
         existing = await session.execute(select(Setting).where(Setting.key == s["key"]))
-        if existing.scalar_one_or_none() is None:
+        row = existing.scalar_one_or_none()
+        if row is None:
             session.add(Setting(**s))
+        else:
+            # Keep the operator's value, but refresh metadata (label/description/type)
+            # so existing installs pick up renamed/improved settings.
+            if (
+                row.label != s["label"]
+                or row.description != s["description"]
+                or row.type != s["type"]
+            ):
+                row.label = s["label"]
+                row.description = s["description"]
+                row.type = s["type"]
 
 
 async def seed_pack_products(session) -> None:

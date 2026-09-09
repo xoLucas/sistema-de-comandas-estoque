@@ -31,12 +31,39 @@ Durante o expediente, o caixa/gerente pode consultar o andamento das vendas sem 
 
 O relatório parcial é útil para conferências de meio de expediente e antecipação de valores.
 
-Quando o horário automático de fechamento é atingido e o caixa continua aberto, o
-relatório enviado por e-mail também usa o período completo da sessão, de `opened_at`
-até o momento da geração. Uma sessão que atravessa a meia-noite não é dividida em
-dois relatórios nesse envio automático.
+Quando o horário automático de fechamento é atingido e o caixa continua aberto
+**com comandas abertas**, o caixa NÃO é fechado: o sistema cria uma notificação
+informando a quantidade de comandas abertas e envia por e-mail o relatório parcial
+usando o período completo da sessão, de `opened_at` até o momento da geração. Uma
+sessão que atravessa a meia-noite não é dividida em dois relatórios nesse envio
+automático.
 
-### 3. Fechamento do Caixa
+### 3. Fechamento Automático
+
+Com a configuração "Fechar Caixa Automaticamente" ativa (`auto_close_enabled`), no
+horário configurado (`auto_close_time`) o sistema tenta fechar o caixa
+**uma única vez por dia**:
+
+- **Sem comandas abertas** (`Order.status != "aberta"`, incluindo o balcão): o caixa é
+  fechado de verdade. Como ninguém conta o dinheiro fisicamente, o sistema usa
+  `final_cash = expected_cash` (dinheiro esperado), registrando discrepância zero e
+  assumindo que o caixa está conferido. O fechamento gera os mesmos movimentos
+  automáticos do fechamento manual ("Fechamento de caixa" e "Taxa de cartão"),
+  envia o relatório final por e-mail para `auto_report_email` e cria a notificação
+  "Caixa fechado automaticamente".
+- **Com comandas abertas** (mesas de clientes ou balcão): o caixa NÃO é fechado. O
+  sistema cria uma notificação informando a quantidade de comandas abertas e envia o
+  relatório parcial por e-mail. O fechamento fica para o operador fazer manualmente —
+  não há nova tentativa automática depois do horário.
+
+> **Atenção:** após o fechamento automático o caixa fica `closed` e novas vendas/comandas
+> ficam bloqueadas até que outro caixa seja aberto (manualmente ou pela abertura
+> automática do dia seguinte, que herda `final_cash` como `initial_cash`). Configure o
+> horário como o fim real do expediente.
+> **Nota:** como `final_cash = expected_cash`, uma divergência física real (falta/sobra)
+> não é detectada pelo fechamento automático.
+
+### 4. Fechamento do Caixa (manual)
 
 Ao final do expediente, o responsável fecha o caixa.
 
@@ -49,7 +76,7 @@ Ao confirmar o fechamento:
 1. A sessão é atualizada com `status=closed`, `closed_at` e `closed_by`.
 2. O sistema gera automaticamente o **relatório final** do período.
 
-### 4. Relatório Final
+### 5. Relatório Final
 
 O relatório final considera o período completo da sessão: `opened_at` até `closed_at`.
 

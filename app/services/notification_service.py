@@ -123,6 +123,7 @@ async def create_stock_notification(
 async def create_cash_register_close_notification(
     db: AsyncSession,
     close_time: str,
+    open_orders_count: int = 0,
 ) -> Notification | None:
     day_start, day_end = local_day_to_utc_range(today_local())
     existing = await db.execute(
@@ -138,10 +139,57 @@ async def create_cash_register_close_notification(
     if existing.scalars().first():
         return None
 
+    if open_orders_count > 0:
+        message = (
+            f"O horário programado de fechamento ({close_time}) foi atingido, "
+            f"mas existem {open_orders_count} comanda(s) aberta(s). "
+            "O caixa NÃO foi fechado automaticamente. Encerre as comandas e "
+            "feche o caixa manualmente."
+        )
+    else:
+        message = (
+            f"O horário programado de fechamento ({close_time}) foi atingido. "
+            "O caixa ainda está aberto."
+        )
+
     notification = Notification(
         type="cash_register_close_time",
         title="Hora de fechar o caixa",
-        message=f"O horário programado de fechamento ({close_time}) foi atingido. O caixa ainda está aberto.",
+        message=message,
+        details={"close_time": close_time, "open_orders_count": open_orders_count},
+        status="unread",
+    )
+    db.add(notification)
+    await db.commit()
+    await db.refresh(notification)
+    return notification
+
+
+async def create_cash_register_auto_closed_notification(
+    db: AsyncSession,
+    close_time: str,
+) -> Notification | None:
+    day_start, day_end = local_day_to_utc_range(today_local())
+    existing = await db.execute(
+        select(Notification)
+        .where(
+            Notification.type == "cash_register_auto_closed",
+            Notification.created_at >= day_start,
+            Notification.created_at <= day_end,
+        )
+        .order_by(Notification.created_at.desc())
+        .limit(1)
+    )
+    if existing.scalars().first():
+        return None
+
+    notification = Notification(
+        type="cash_register_auto_closed",
+        title="Caixa fechado automaticamente",
+        message=(
+            f"O caixa foi fechado automaticamente às {close_time}, pois não havia "
+            "comandas abertas no horário programado. Confira o relatório de fechamento."
+        ),
         details={"close_time": close_time},
         status="unread",
     )

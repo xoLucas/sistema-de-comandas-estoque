@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from fpdf import FPDF
 import io
+import logging
 
 from app.core.database import get_db
 from app.core.timezone import (
@@ -36,11 +37,15 @@ from app.models.payment import OrderPayment, PaymentRefund, PaymentRefundItem
 from app.routers.auth_deps import get_current_user, can_view_financial
 from app.routers.ws import broadcast_stock_update
 from app.services.cash_service import compute_session_cash_summary
+from app.services.settings_service import get_setting
+from app.services.email_service import send_email_with_attachment
 from app.services.stock_service import is_pack
 from app.services.consignment_service import fetch_consignment_payments
 from app.services.money_service import ZERO, as_float, money, rate
 from app.services.payment_service import display_credit_name
 from app.services.refund_service import refund_full_order
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/financeiro", tags=["financeiro"])
 
@@ -256,6 +261,101 @@ async def compute_session_close_metrics(session, db: AsyncSession) -> dict:
         "card_fees": as_float(card_fees),
         "service_charge": as_float(money(direct_service + money(paid_consignment_service))),
     }
+
+
+async def finalize_cash_session(
+    session: CashRegisterSession,
+    *,
+    db: AsyncSession,
+    closed_by_id: int,
+    final_cash: Decimal,
+    observations: str | None = None,
+) -> dict:
+    """Close an open cash register session and record its automatic movements.
+
+    This is the single source of truth for the financial closure of a cash
+    register session, shared by the manual close endpoint and the automatic
+    scheduler. It mirrors the values persisted by ``compute_session_close_metrics``
+    so manual and automatic closures never diverge.
+    """
+    session.status = "closed"
+    session.closed_at = datetime.now(timezone.utc)
+    session.closed_by_id = closed_by_id
+    session.final_cash = money(final_cash)
+    if observations is not None:
+        session.observations = observations
+
+    metrics = await compute_session_close_metrics(session, db)
+
+    if metrics["gross_total"] > 0:
+        db.add(CashPositionMovement(
+            type="entrada",
+            source="automatico",
+            title="Fechamento de caixa",
+            amount=metrics["gross_total"],
+            session_id=session.id,
+            created_by_id=closed_by_id,
+        ))
+    if metrics["card_fees"] > 0:
+        db.add(CashPositionMovement(
+            type="saida",
+            source="automatico",
+            title="Taxa de cartão",
+            amount=metrics["card_fees"],
+            session_id=session.id,
+            created_by_id=closed_by_id,
+        ))
+
+    return metrics
+
+
+async def send_session_close_report_email(
+    db: AsyncSession,
+    session: CashRegisterSession,
+) -> None:
+    """Send the final cash register close report e-mail for a closed session."""
+    report_email = await get_setting(db, "auto_report_email", "")
+    if not report_email:
+        return
+
+    try:
+        report = await _build_session_report(
+            session=session,
+            start=session.opened_at,
+            end=session.closed_at or datetime.now(timezone.utc),
+            report_type="final",
+            db=db,
+            generated_by=session.closed_by.name if session.closed_by else "Sistema",
+        )
+        if "error" in report:
+            return
+
+        buffer = _build_pdf_bytes(report, f"sessao_{session.id}")
+        pdf_bytes = buffer.getvalue()
+        if not pdf_bytes:
+            return
+
+        close_date = as_local(session.closed_at or datetime.now(timezone.utc)).date()
+        close_dt = as_local(session.closed_at or datetime.now(timezone.utc))
+        subject = f"Fechamento de Caixa - {close_date.strftime('%d/%m/%Y')}"
+        body = (
+            f"Caixa fechado em {close_dt.strftime('%d/%m/%Y %H:%M')}.\n\n"
+            f"Aberto por: {session.opened_by.name if session.opened_by else 'N/A'}\n"
+            f"Fechado por: {session.closed_by.name if session.closed_by else 'N/A'}\n"
+            f"Dinheiro inicial: R$ {float(session.initial_cash):.2f}\n"
+            f"Dinheiro final: R$ {float(session.final_cash or 0):.2f}\n\n"
+            "Segue o relatório completo em anexo."
+        )
+
+        await send_email_with_attachment(
+            to_addr=report_email,
+            subject=subject,
+            body=body,
+            attachment_bytes=pdf_bytes,
+            attachment_filename=f"fechamento_caixa_{close_date.strftime('%Y%m%d')}.pdf",
+        )
+    except Exception:
+        logger.exception("Failed to send cash register close report email")
 
 
 async def compute_period_profit(start: datetime, end: datetime, db: AsyncSession) -> dict:

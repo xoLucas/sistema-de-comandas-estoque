@@ -203,7 +203,10 @@ async def close_cash_register(
     result = await db.execute(
         select(CashRegisterSession)
         .where(CashRegisterSession.status == "open")
-        .options(selectinload(CashRegisterSession.opened_by))
+        .options(
+            selectinload(CashRegisterSession.opened_by),
+            selectinload(CashRegisterSession.closed_by),
+        )
         .with_for_update()
     )
     session = result.scalar_one_or_none()

@@ -38,6 +38,7 @@ from app.routers.financial import (
     _consignment_tips_paid_in_period,
     _direct_payment_waiter_totals,
     _direct_service_in_period,
+    _net_service_in_period,
     _resolve_waiter_name,
     serialize_order_sale,
 )
@@ -242,6 +243,7 @@ async def dashboard_geral(
         + money(consignment_service_total)
         - money(refundable_service)
     )
+    billing_total = as_float(money(net_sales_total) + money(service_charge))
 
     # Orders currently open.
     open_orders_result = await db.execute(
@@ -432,7 +434,7 @@ async def dashboard_geral(
             "Indicador", "Valor", "Periodo Inicio", "Periodo Fim"
         ]
         rows = [
-            ["Faturamento", net_sales_total, start_local.isoformat(), end_local.isoformat()],
+            ["Faturamento", billing_total, start_local.isoformat(), end_local.isoformat()],
             ["Pagamentos de Consignados", round(float(consignment_paid_total), 2), start_local.isoformat(), end_local.isoformat()],
             ["Taxa de Servico", round(float(service_charge), 2), start_local.isoformat(), end_local.isoformat()],
             ["Comandas Finalizadas", sales_count, start_local.isoformat(), end_local.isoformat()],
@@ -452,6 +454,7 @@ async def dashboard_geral(
         "sales": {
             "total": net_sales_total,
             "service_charge": round(float(service_charge), 2),
+            "billing_total": billing_total,
             "orders_count": sales_count,
             "consignment_paid": round(float(consignment_paid_total), 2),
         },
@@ -920,6 +923,12 @@ async def dashboard_vendas(
     )
     total_sales, orders_count = summary_result.one()
     ticket_medio = round(float(total_sales) / orders_count, 2) if orders_count else 0.0
+    product_net = money(
+        money(total_sales)
+        + money(consignment_product_total)
+        - money(refunded_product_total)
+    )
+    net_service = await _net_service_in_period(start_dt, end_dt, db)
 
     if format.lower() == "csv":
         headers = ["Nome", "Quantidade", "Total"]
@@ -929,11 +938,9 @@ async def dashboard_vendas(
     return {
         "period": {"start": start_local.isoformat(), "end": end_local.isoformat()},
         "summary": {
-            "total_sales": as_float(
-                money(total_sales)
-                + money(consignment_product_total)
-                - money(refunded_product_total)
-            ),
+            "total_sales": as_float(product_net),
+            "service_charge": as_float(net_service),
+            "billing_total": as_float(money(product_net + net_service)),
             "orders_count": orders_count,
             "ticket_medio": ticket_medio,
             "consignment_paid": round(float(consignment_paid_total), 2),
@@ -1360,6 +1367,7 @@ async def dashboard_gestao(
 
     start_dt, end_dt, start_local, end_local = _parse_dates(start_date, end_date, default_days=7)
     profit = await compute_period_profit(start_dt, end_dt, db)
+    net_service = await _net_service_in_period(start_dt, end_dt, db)
 
     totals_result = await db.execute(
         select(CashPositionMovement.type, func.sum(CashPositionMovement.amount))
@@ -1411,6 +1419,8 @@ async def dashboard_gestao(
         "net_profit": profit["net_profit"],
         "gross_profit": profit["gross_profit"],
         "total_sales": profit["total_sales"],
+        "service_charge": as_float(net_service),
+        "billing_total": as_float(money(profit["total_sales"]) + money(net_service)),
         "total_cogs": profit["total_cogs"],
         "total_card_fees": profit["total_card_fees"],
         "total_expenses": profit["total_expenses"],

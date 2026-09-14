@@ -795,12 +795,22 @@ class FinancialWorkflowIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 money(general_dashboard["sales"]["service_charge"]),
                 Decimal("10.00"),
             )
+            self.assertEqual(
+                money(general_dashboard["sales"]["billing_total"]),
+                money(general_dashboard["sales"]["total"])
+                + money(general_dashboard["sales"]["service_charge"]),
+            )
 
             sales_page = await list_sales(report_date, db, manager)
             self.assertEqual(money(sales_page["summary"]["total_sales"]), ZERO)
             self.assertEqual(
                 money(sales_page["summary"]["total_service_charge"]),
                 Decimal("10.00"),
+            )
+            self.assertEqual(
+                money(sales_page["summary"]["billing_total"]),
+                money(sales_page["summary"]["total_sales"])
+                + money(sales_page["summary"]["total_service_charge"]),
             )
             consignment_payment_page = await list_consignment_payments(
                 report_date, db, manager

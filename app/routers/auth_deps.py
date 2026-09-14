@@ -88,6 +88,11 @@ def can_view_customers(user: User) -> bool:
     return user.role in ("gerente", "caixa", "garcom")
 
 
+def can_manage_notifications(user: User) -> bool:
+    """Roles allowed to reprint failed printer tickets and resolve notifications."""
+    return user.role in ("gerente", "caixa", "garcom")
+
+
 async def get_current_user_optional(
     request: Request = None,
     credentials: HTTPAuthorizationCredentials = Depends(security_scheme),

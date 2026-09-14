@@ -374,6 +374,8 @@ function closeTablesWebSocket() {
 let notificationSocket = null;
 let notifications = [];
 let notificationIsManager = false;
+let notificationCanManage = false;
+let notificationPrinters = [];
 let notificationPanelOpen = false;
 let notificationFilter = 'active'; // active, resolved
 
@@ -546,6 +548,8 @@ async function loadNotifications() {
         const data = await res.json();
         notifications = data.notifications || [];
         notificationIsManager = data.is_manager || false;
+        notificationCanManage = data.can_manage || notificationIsManager;
+        notificationPrinters = data.printers || [];
         updateNotificationBadge();
         if (notificationPanelOpen) {
             renderNotificationList();
@@ -640,7 +644,7 @@ function renderNotificationCard(n) {
     let actions = '';
     if (n.status === 'resolved') {
         actions = `<div class="notification-status-text">Resolvido por ${n.resolution === 'reprint' ? 'reimpressão' : 'anotação manual'}</div>`;
-    } else if (n.type === 'printer_failure' && notificationIsManager) {
+    } else if (n.type === 'printer_failure' && notificationCanManage) {
         actions = `
             <div class="notification-card-actions">
                 <button class="btn btn-primary" onclick="showReprintModal(${n.id}, event)">Reimprimir</button>
@@ -648,15 +652,15 @@ function renderNotificationCard(n) {
             </div>
         `;
     } else if (n.type === 'printer_failure') {
-        actions = `<div class="notification-status-text">Apenas gerente pode reimprimir</div>`;
-    } else if (notificationIsManager) {
+        actions = `<div class="notification-status-text">Sem permissão para reimprimir</div>`;
+    } else if (notificationCanManage) {
         actions = `
             <div class="notification-card-actions">
                 <button class="btn btn-secondary" onclick="resolveNotification(${n.id}, 'manual_note', event)">Marcar como lida</button>
             </div>
         `;
     } else {
-        actions = `<div class="notification-status-text">Apenas gerente pode marcar como lida</div>`;
+        actions = `<div class="notification-status-text">Sem permissão para resolver</div>`;
     }
 
     const detailRows = [];
@@ -715,8 +719,8 @@ async function markNotificationRead(id, event) {
 
 async function resolveNotification(id, resolution, event) {
     if (event) event.stopPropagation();
-    if (!notificationIsManager) {
-        alert('Apenas gerente pode resolver notificações');
+    if (!notificationCanManage) {
+        alert('Sem permissão para resolver notificações');
         return;
     }
     try {
@@ -740,8 +744,8 @@ async function resolveNotification(id, resolution, event) {
 
 function showReprintModal(notificationId, event) {
     if (event) event.stopPropagation();
-    if (!notificationIsManager) {
-        alert('Apenas gerente pode reimprimir');
+    if (!notificationCanManage) {
+        alert('Sem permissão para reimprimir');
         return;
     }
     const notification = notifications.find(n => n.id === notificationId);
@@ -751,14 +755,16 @@ function showReprintModal(notificationId, event) {
     const failedPrinterId = details.failed_printer_id || '';
     const functionLabel = details.function === 'cozinha' ? 'Cozinha' : (details.function === 'bar' ? 'Bar' : 'Nota');
 
-    const printers = [];
-    [1, 2].forEach(id => {
-        const name = getSetting('printer_' + id + '_name', 'Impressora ' + id);
-        const ip = getSetting('printer_' + id + '_ip', '');
-        if (ip && String(id) !== String(failedPrinterId)) {
-            printers.push({ id: String(id), name });
-        }
-    });
+    const sourcePrinters = (notificationPrinters && notificationPrinters.length > 0)
+        ? notificationPrinters
+        : [1, 2]
+            .map(id => {
+                const ip = getSetting('printer_' + id + '_ip', '');
+                if (!ip) return null;
+                return { id: String(id), name: getSetting('printer_' + id + '_name', 'Impressora ' + id) };
+            })
+            .filter(Boolean);
+    const printers = sourcePrinters.filter(p => String(p.id) !== String(failedPrinterId));
 
     if (printers.length === 0) {
         alert('Nenhuma outra impressora configurada disponível.');
@@ -3102,13 +3108,13 @@ async function loadDashboard() {
         const res = await apiFetch(API_BASE + '/financeiro/dashboard');
         const data = await res.json();
         if (data.error) return;
-        document.getElementById('dash-today-total').textContent = formatCurrency(data.today.total);
+        document.getElementById('dash-today-total').textContent = formatCurrency(data.today.billing_total);
         document.getElementById('dash-today-count').textContent = data.today.orders + ' comandas';
         document.getElementById('dash-today-consignments').textContent = (data.today.consignments || 0) + ' consignados (' + formatCurrency(data.today.consignments_total || 0) + ')';
-        document.getElementById('dash-week-total').textContent = formatCurrency(data.week.total);
+        document.getElementById('dash-week-total').textContent = formatCurrency(data.week.billing_total);
         document.getElementById('dash-week-count').textContent = data.week.orders + ' comandas';
         document.getElementById('dash-week-consignments').textContent = (data.week.consignments || 0) + ' consignados (' + formatCurrency(data.week.consignments_total || 0) + ')';
-        document.getElementById('dash-month-total').textContent = formatCurrency(data.month.total);
+        document.getElementById('dash-month-total').textContent = formatCurrency(data.month.billing_total);
         document.getElementById('dash-month-count').textContent = data.month.orders + ' comandas';
         document.getElementById('dash-month-consignments').textContent = (data.month.consignments || 0) + ' consignados (' + formatCurrency(data.month.consignments_total || 0) + ')';
     } catch (err) {}
@@ -3147,7 +3153,7 @@ async function loadSales() {
         container.innerHTML = `
             <div style="background:var(--color-secondary);border-radius:var(--radius);padding:12px;margin-bottom:12px;text-align:center;">
                 <span style="font-size:13px;color:#888;">Total do dia: </span>
-                <span style="font-size:18px;font-weight:700;color:var(--color-accent);">${formatCurrency(salesData.summary?.total_sales || 0)}</span>
+                <span style="font-size:18px;font-weight:700;color:var(--color-accent);">${formatCurrency(salesData.summary?.billing_total || 0)}</span>
                 <span style="font-size:12px;color:#888;margin-left:8px;">(${salesData.summary?.orders_count || 0} comandas)</span>
                 ${totalConsignado > 0 ? `<div style="margin-top:4px;font-size:12px;color:var(--green);">Pagamentos de consignados: ${formatCurrency(totalConsignado)}</div>` : ''}
             </div>
@@ -7417,7 +7423,7 @@ function renderDashboardGeral(data) {
     const content = document.getElementById('dashboards-content');
     destroyDashboardCharts();
     const cards = [
-        createDashboardCard('Faturamento', formatCurrency(data.sales?.total || 0), `${data.sales?.orders_count || 0} comandas`),
+        createDashboardCard('Faturamento', formatCurrency(data.sales?.billing_total || 0), `${data.sales?.orders_count || 0} comandas`),
         createDashboardCard(
             'Taxa de Serviço',
             formatCurrency(data.sales?.service_charge || 0),
@@ -7512,7 +7518,7 @@ function renderDashboardVendas(data) {
     const content = document.getElementById('dashboards-content');
     destroyDashboardCharts();
     const cards = [
-        createDashboardCard('Faturamento', formatCurrency(data.summary?.total_sales || 0), `${data.summary?.orders_count || 0} comandas`),
+        createDashboardCard('Faturamento', formatCurrency(data.summary?.billing_total || 0), `${data.summary?.orders_count || 0} comandas`),
         createDashboardCard('Ticket Médio', formatCurrency(data.summary?.ticket_medio || 0), 'por comanda'),
     ];
 
@@ -8059,7 +8065,7 @@ function renderDashboardGestao(data) {
             <div class="dashboards-card">
                 <div class="dashboards-label">Faturamento líquido do período</div>
                 <div class="dashboards-value">${formatCurrency(data.net_profit || 0)}</div>
-                <div class="dashboards-sub">Faturamento: ${formatCurrency(data.total_sales || 0)}</div>
+                <div class="dashboards-sub">Faturamento: ${formatCurrency(data.billing_total || 0)}</div>
             </div>
         </div>
         <div class="gestao-cash-position ${posClass}">

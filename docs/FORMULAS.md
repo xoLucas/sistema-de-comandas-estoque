@@ -125,7 +125,9 @@ com 4 casas. O arredondamento canônico é `ROUND_HALF_UP`, centralizado em
 | `product_total = order.total`; `service_total = partial_service_charge + remaining_service`; `total = product_total + service_total` | idem |
 | `amount_paid = partial_payment + partial_service_charge` | idem |
 | `balance = max(0, total − amount_paid)` | idem |
-| Pagamento do consignado usa **principal primeiro**: `product_portion = min(amount, product_total − Σ product_portion pago)`; `service_portion = amount − product_portion` | `app/routers/consignments.py` → `add_payment()` |
+| Pagamento do consignado usa **principal primeiro**: `product_portion = min(amount, product_total − Σ product_portion pago)`; `service_portion = amount − product_portion` | `app/routers/consignments.py` → `add_payment()` / `split_consignment_payment()` |
+| Produto total efetivo (auto-cura de legado): se `product_total = 0`, usa `source_order.total`; fallback `Σ (unit_price × quantity)` dos itens; depois `total − service_total`; persiste a correção antes de dividir o pagamento | `app/routers/consignments.py` → `_resolve_consignment_product_total()` |
+| Retroativo: legados com `product_total = 0` e `total > 0` têm `product_total`/`service_total` preenchidos (precedência `source_order.total` → itens → `total − service_total`) e os `ConsignmentPayment` re-divididos (produto primeiro), sem mexer em `amount_paid`/`balance`/`status`; pula cancelados e estornados (inclusive estorno ligado só por `order_id` da comanda de origem) | `app/services/financial_migration_service.py` → `_repair_legacy_consignment_product_totals()`; script `scripts/repair_legacy_consignments.py` |
 | Após o pagamento: `amount_paid += amount`; `balance = max(0, total − amount_paid)`; `status = "pago"` quando `balance = 0` | idem |
 | `_recalculate_totals`: criação direta → `total = Σ (unit_price × quantity)`; conversão → preserva `total`; sempre `balance = max(0, total − amount_paid)` | `app/routers/consignments.py` → `_recalculate_totals()` |
 
@@ -168,6 +170,7 @@ com 4 casas. O arredondamento canônico é `ROUND_HALF_UP`, centralizado em
 | Fórmula | Código |
 |---------|--------|
 | `total_sales = Σ order.total` (pedidos não-fiado fechados no período) + `Σ ConsignmentPayment.product_portion` recebido no período − `Σ PaymentRefund.product_amount` estornado no período | `app/routers/financial.py` → `_build_daily_report()` / `_build_session_report()` |
+| `billing_total` (faturamento exibido, **com** taxa de serviço) = `total_sales` líquido + `total_service_charge` líquido, onde `total_service_charge` = serviço direto pago (`OrderPayment.service_amount`) + gorjeta de consignado quitado (só na quitação) − serviço estornado | `app/routers/financial.py` → `_net_service_in_period()` / `_period_totals()` / `list_sales()`; `app/routers/dashboards.py` → `dashboard_geral`, `dashboard_vendas`, `dashboard_gestao` |
 | `total_cogs = Σ (unit_cost × quantity)` (itens de pedido) | idem |
 | `gross_profit = total_sales − total_cogs` | idem |
 | `total_card_fees = Σ card_fee_amount` congelado no pagamento; o estorno não devolve esse custo | idem + `app/services/payment_service.py` |
@@ -205,6 +208,14 @@ com 4 casas. O arredondamento canônico é `ROUND_HALF_UP`, centralizado em
 > desconta taxas/despesas; `net_total` é sobre **`gross_total` (tudo que entrou)** e
 > desconta serviço + taxas + despesas. São definições diferentes — não confundir.
 
+> **Faturamento exibido (`billing_total`) vs lucro:** a taxa de serviço é **repasse ao
+> garçom**, não receita de produto. Por isso `billing_total` (usado nos cards
+> "Faturamento" dos dashboards e em "Hoje/Semana/Mês"/"Total do dia" do Financeiro)
+> **soma** a taxa paga ao total de produto, mas `net_profit`/`gross_profit`/`total_cogs`
+> **continuam calculados apenas sobre o produto** (`compute_period_profit` não é
+> alterado). O campo `total_sales` (produto) e `total_service_charge` (repasse)
+> permanecem disponíveis separados.
+
 **Incidências de pagamentos em relatórios (janela de período):**
 `compute_session_close_metrics`, `compute_period_profit`, `_build_daily_report`,
 `_build_session_report` e `compute_payment_breakdown`. Todos usam os registros
@@ -218,13 +229,16 @@ canônicos `OrderPayment`, `ConsignmentPayment` e `PaymentRefund`, filtrados por
 | Fórmula | Código |
 |---------|--------|
 | `total_sales` = vendas diretas fechadas + parcelas de **produto** dos consignados − produto estornado, pela data de cada evento | `app/routers/financial.py` → `list_sales()` / `_period_totals()` |
+| `billing_total` = `total_sales` + `total_service_charge` (taxa paga: direta + gorjeta de consignado quitado − serviço estornado) | `app/routers/financial.py` → `list_sales()` / `_period_totals()` |
 | `consignment_paid` = Σ `ConsignmentPayment.product_portion` recebida no período; o bruto pago permanece disponível separadamente nos detalhes | idem |
 | Por forma de pagamento / hora = pagamentos canônicos no método/hora da transação − estornos no mesmo método/hora em que ocorreram | `app/services/cash_service.py` → `compute_payment_breakdown()` |
 
-> **Card "Hoje/Semana/Mês" (Financeiro):** `total = Σ order.total (não-fiado) + Σ
-> (ConsignmentPayment.amount − service_portion)` — a gorjeta de consignado convertido é
-> **repasse** (`total_service_charge`), nunca faturamento de produto. Implementado em
-> `app/routers/financial.py` → `_period_totals` (endpoint `/api/financeiro/dashboard`).
+> **Card "Hoje/Semana/Mês" e "Total do dia" (Financeiro):** o valor exibido é o
+> `billing_total` (`total_sales` + `total_service_charge`). A gorjeta de consignado
+> convertido é **repasse**, reconhecida no faturamento apenas na quitação; `total_sales`
+> (produto) e `service_charge` continuam retornados separados. Implementado em
+> `app/routers/financial.py` → `_period_totals` (endpoint `/api/financeiro/dashboard`)
+> e `list_sales` (endpoint `/api/financeiro/vendas`).
 
 ---
 

@@ -222,6 +222,85 @@ async def _recalculate_totals(db: AsyncSession, consignment_id: int) -> None:
     consignment.balance = money(max(ZERO, consignment.total - consignment.amount_paid))
 
 
+def split_consignment_payment(
+    amount: Decimal,
+    product_total: Decimal,
+    already_paid_product: Decimal,
+) -> tuple[Decimal, Decimal]:
+    """Split a consignment payment into (product_portion, service_portion).
+
+    Product is settled first; anything beyond the outstanding product total is
+    treated as service. Keeps the invariant
+    ``amount = product_portion + service_portion``.
+    """
+    amount = money(amount)
+    outstanding_product = money(
+        max(ZERO, money(product_total) - money(already_paid_product))
+    )
+    product_portion = money(min(amount, outstanding_product))
+    service_portion = money(amount - product_portion)
+    return product_portion, service_portion
+
+
+async def _resolve_consignment_product_total(
+    db: AsyncSession,
+    consignment: ConsignmentOrder,
+) -> Decimal:
+    """Return a usable product total, healing legacy zero-valued rows.
+
+    Legacy consignments may carry ``product_total = 0`` while ``total > 0``
+    (they predate the column or were skipped by the backfill). Without a product
+    total every payment is classified as service and never counted as billed
+    product, so we recover it — preferring the source order total (same rule as
+    ``_backfill_consignments``), then the summed items, then
+    ``total - service_total`` — and persist the correction.
+    """
+    stored = money(consignment.product_total)
+    if stored > ZERO:
+        return stored
+
+    source_order_total = ZERO
+    if consignment.source_order_id is not None:
+        source_order_total = money(
+            await db.scalar(
+                select(func.coalesce(Order.total, 0)).where(
+                    Order.id == consignment.source_order_id
+                )
+            )
+        )
+
+    items_total = money(
+        await db.scalar(
+            select(
+                func.coalesce(
+                    func.sum(
+                        ConsignmentOrderItem.unit_price
+                        * ConsignmentOrderItem.quantity
+                    ),
+                    0,
+                )
+            ).where(
+                ConsignmentOrderItem.consignment_order_id == consignment.id
+            )
+        )
+    )
+    if source_order_total > ZERO:
+        resolved = source_order_total
+    elif items_total > ZERO:
+        resolved = items_total
+    else:
+        resolved = money(
+            max(ZERO, money(consignment.total) - money(consignment.service_total))
+        )
+
+    if resolved > ZERO:
+        consignment.product_total = resolved
+        consignment.service_total = money(
+            max(ZERO, money(consignment.total) - resolved)
+        )
+    return resolved
+
+
 @router.get("/consignados")
 async def list_consignments(
     status: str | None = "todos",
@@ -584,16 +663,15 @@ async def add_payment(
     if payment_amount <= ZERO:
         return {"error": "Valor deve ser maior que zero"}
 
+    product_total = await _resolve_consignment_product_total(db, consignment)
     paid_product = await db.scalar(
         select(func.coalesce(func.sum(ConsignmentPayment.product_portion), 0)).where(
             ConsignmentPayment.consignment_order_id == consignment.id
         )
     )
-    outstanding_product = money(
-        max(ZERO, money(consignment.product_total) - money(paid_product))
+    product_portion, service_portion = split_consignment_payment(
+        payment_amount, product_total, money(paid_product)
     )
-    product_portion = money(min(payment_amount, outstanding_product))
-    service_portion = money(payment_amount - product_portion)
     fee_rate, fee_amount = await card_fee_snapshot(
         db, payment_amount, req.payment_method, req.card_machine
     )

@@ -12,14 +12,20 @@ from sqlalchemy.engine import make_url
 from app.core.database import async_session, engine
 from app.core.seed import run_seed
 from app.models.cash_register_session import CashRegisterSession
-from app.models.consignment import ConsignmentOrder, ConsignmentPayment
+from app.models.consignment import (
+    ConsignmentOrder,
+    ConsignmentOrderItem,
+    ConsignmentPayment,
+)
 from app.models.customer import Customer
 from app.models.order import Order
 from app.models.payment import OrderPayment, PaymentRefund
+from app.models.product import Product
 from app.models.table import Table
 from app.models.user import User
 from app.services.financial_migration_service import (
     _repair_legacy_preconversion_payments,
+    _repair_legacy_consignment_product_totals,
 )
 
 
@@ -311,6 +317,354 @@ class LegacyConsignmentPreconversionRepairTests(unittest.IsolatedAsyncioTestCase
                 self.assertEqual(consignment.status, "pendente")
         finally:
             await self._cleanup(ids)
+
+
+    async def _seed_zero_product_total_case(self) -> dict:
+        """Create a legacy consignment with product_total = 0 but total > 0.
+
+        Its single payment was wrongly classified as service (product_portion
+        = 0), mimicking the rows skipped by the original consignment backfill.
+        """
+        async with async_session() as db:
+            manager = await db.scalar(
+                select(User).where(User.role == "gerente").order_by(User.id)
+            )
+            customer = Customer(
+                name="LEGACY ZERO",
+                customer_type="pf",
+                active=True,
+                created_at=DAY_ONE,
+                updated_at=DAY_ONE,
+            )
+            db.add(customer)
+            await db.flush()
+            product = await db.scalar(select(Product).order_by(Product.id))
+
+            consignment = ConsignmentOrder(
+                customer_id=customer.id,
+                waiter_id=manager.id,
+                order_type="pf",
+                status="pago",
+                product_total=Decimal("0.00"),
+                service_total=Decimal("0.00"),
+                total=Decimal("30.00"),
+                amount_paid=Decimal("30.00"),
+                balance=Decimal("0.00"),
+                created_at=DAY_ONE,
+                closed_at=DAY_FOUR,
+            )
+            db.add(consignment)
+            await db.flush()
+            db.add(
+                ConsignmentOrderItem(
+                    consignment_order_id=consignment.id,
+                    product_id=product.id,
+                    quantity=3,
+                    unit_price=Decimal("10.00"),
+                    unit_cost=Decimal("1.0000"),
+                )
+            )
+            payment = ConsignmentPayment(
+                consignment_order_id=consignment.id,
+                user_id=manager.id,
+                amount=Decimal("30.00"),
+                product_portion=Decimal("0.00"),
+                service_portion=Decimal("30.00"),
+                payment_method="pix",
+                idempotency_key=f"legacy-zero-{uuid4()}",
+                created_at=DAY_FOUR,
+            )
+            db.add(payment)
+            await db.commit()
+            return {
+                "customer_id": customer.id,
+                "consignment_id": consignment.id,
+                "payment_id": payment.id,
+            }
+
+    async def _cleanup_zero_case(self, ids: dict) -> None:
+        async with async_session() as db:
+            payment = await db.get(ConsignmentPayment, ids["payment_id"])
+            if payment:
+                await db.delete(payment)
+            items = (
+                await db.execute(
+                    select(ConsignmentOrderItem).where(
+                        ConsignmentOrderItem.consignment_order_id
+                        == ids["consignment_id"]
+                    )
+                )
+            ).scalars().all()
+            for item in items:
+                await db.delete(item)
+            consignment = await db.get(ConsignmentOrder, ids["consignment_id"])
+            if consignment:
+                await db.delete(consignment)
+            customer = await db.get(Customer, ids["customer_id"])
+            if customer:
+                await db.delete(customer)
+            await db.commit()
+
+    async def test_repair_fills_product_total_and_reclassifies_payment(self) -> None:
+        ids = await self._seed_zero_product_total_case()
+        try:
+            async with async_session() as db:
+                repaired = await _repair_legacy_consignment_product_totals(db)
+                await db.commit()
+            self.assertGreaterEqual(repaired, 1)
+
+            async with async_session() as db:
+                consignment = await db.get(
+                    ConsignmentOrder, ids["consignment_id"]
+                )
+                self.assertEqual(consignment.product_total, Decimal("30.00"))
+                self.assertEqual(consignment.service_total, Decimal("0.00"))
+                self.assertEqual(consignment.amount_paid, Decimal("30.00"))
+                self.assertEqual(consignment.balance, Decimal("0.00"))
+                self.assertEqual(consignment.status, "pago")
+
+                payment = await db.get(ConsignmentPayment, ids["payment_id"])
+                self.assertEqual(payment.product_portion, Decimal("30.00"))
+                self.assertEqual(payment.service_portion, Decimal("0.00"))
+
+            # Idempotency: a second run changes nothing.
+            async with async_session() as db:
+                await _repair_legacy_consignment_product_totals(db)
+                await db.commit()
+            async with async_session() as db:
+                payment = await db.get(ConsignmentPayment, ids["payment_id"])
+                self.assertEqual(payment.product_portion, Decimal("30.00"))
+                self.assertEqual(payment.service_portion, Decimal("0.00"))
+        finally:
+            await self._cleanup_zero_case(ids)
+
+    async def _seed_legacy_conversion_case(
+        self,
+        *,
+        source_order_total: Decimal,
+        item_unit_price: Decimal,
+        refund_via_order_id: bool = False,
+    ) -> dict:
+        """Seed a legacy converted consignment carrying ``product_total = 0``.
+
+        ``source_order_total`` and ``item_unit_price`` can diverge to exercise the
+        source-order precedence. When ``refund_via_order_id`` is set, a refund is
+        linked only by ``order_id`` (no ``consignment_order_id``), mimicking the
+        legacy data that must block the repair.
+        """
+        async with async_session() as db:
+            manager = await db.scalar(
+                select(User).where(User.role == "gerente").order_by(User.id)
+            )
+            table = await db.scalar(select(Table).order_by(Table.id))
+            customer = Customer(
+                name="LEGACY CONV",
+                customer_type="pf",
+                active=True,
+                created_at=DAY_ONE,
+                updated_at=DAY_ONE,
+            )
+            db.add(customer)
+            await db.flush()
+            product = await db.scalar(select(Product).order_by(Product.id))
+
+            cash_session = CashRegisterSession(
+                opened_by_id=manager.id,
+                initial_cash=Decimal("0.00"),
+                status="open",
+            )
+            db.add(cash_session)
+            await db.flush()
+
+            order = Order(
+                table_id=table.id,
+                waiter_id=manager.id,
+                customer_id=customer.id,
+                status="finalizada",
+                total=source_order_total,
+                payment_method="fiado",
+                closed_at=DAY_FOUR,
+                created_at=DAY_ONE,
+            )
+            db.add(order)
+            await db.flush()
+
+            order_payment = OrderPayment(
+                order_id=order.id,
+                user_id=manager.id,
+                cash_session_id=cash_session.id,
+                payment_type="final",
+                gross_amount=source_order_total,
+                product_amount=source_order_total,
+                service_amount=Decimal("0.00"),
+                payment_method="pix",
+                card_fee_rate=Decimal("0.0000"),
+                card_fee_amount=Decimal("0.00"),
+                idempotency_key=f"legacy-conv-{uuid4()}",
+                is_legacy_inferred=True,
+                created_at=DAY_ONE,
+            )
+            db.add(order_payment)
+            await db.flush()
+
+            consignment = ConsignmentOrder(
+                customer_id=customer.id,
+                source_order_id=order.id,
+                waiter_id=manager.id,
+                order_type="pf",
+                status="pago",
+                product_total=Decimal("0.00"),
+                service_total=Decimal("0.00"),
+                total=source_order_total,
+                amount_paid=source_order_total,
+                balance=Decimal("0.00"),
+                created_at=DAY_ONE,
+                closed_at=DAY_FOUR,
+            )
+            db.add(consignment)
+            await db.flush()
+            db.add(
+                ConsignmentOrderItem(
+                    consignment_order_id=consignment.id,
+                    product_id=product.id,
+                    quantity=1,
+                    unit_price=item_unit_price,
+                    unit_cost=Decimal("1.0000"),
+                )
+            )
+            payment = ConsignmentPayment(
+                consignment_order_id=consignment.id,
+                user_id=manager.id,
+                amount=source_order_total,
+                product_portion=Decimal("0.00"),
+                service_portion=source_order_total,
+                payment_method="pix",
+                idempotency_key=f"legacy-conv-cp-{uuid4()}",
+                created_at=DAY_FOUR,
+            )
+            db.add(payment)
+            await db.flush()
+
+            refund_id = None
+            if refund_via_order_id:
+                refund = PaymentRefund(
+                    refund_group_key=str(uuid4()),
+                    payment_id=order_payment.id,
+                    order_id=order.id,
+                    consignment_order_id=None,
+                    user_id=manager.id,
+                    cash_session_id=cash_session.id,
+                    gross_amount=source_order_total,
+                    product_amount=source_order_total,
+                    service_amount=Decimal("0.00"),
+                    payment_method="pix",
+                    service_was_recognized=True,
+                    sale_was_recognized=True,
+                    service_already_repassed=False,
+                    reason="teste legacy order refund",
+                    idempotency_key=f"legacy-conv-refund-{uuid4()}",
+                    created_at=DAY_FOUR,
+                )
+                db.add(refund)
+                await db.flush()
+                refund_id = refund.id
+
+            await db.commit()
+            return {
+                "customer_id": customer.id,
+                "order_id": order.id,
+                "order_payment_id": order_payment.id,
+                "consignment_id": consignment.id,
+                "payment_id": payment.id,
+                "session_id": cash_session.id,
+                "refund_id": refund_id,
+            }
+
+    async def _cleanup_legacy_conversion_case(self, ids: dict) -> None:
+        async with async_session() as db:
+            if ids.get("refund_id") is not None:
+                refund = await db.get(PaymentRefund, ids["refund_id"])
+                if refund:
+                    await db.delete(refund)
+            payments = (
+                await db.execute(
+                    select(ConsignmentPayment).where(
+                        ConsignmentPayment.consignment_order_id
+                        == ids["consignment_id"]
+                    )
+                )
+            ).scalars().all()
+            for payment in payments:
+                await db.delete(payment)
+            items = (
+                await db.execute(
+                    select(ConsignmentOrderItem).where(
+                        ConsignmentOrderItem.consignment_order_id
+                        == ids["consignment_id"]
+                    )
+                )
+            ).scalars().all()
+            for item in items:
+                await db.delete(item)
+            consignment = await db.get(ConsignmentOrder, ids["consignment_id"])
+            if consignment:
+                await db.delete(consignment)
+            order_payment = await db.get(OrderPayment, ids["order_payment_id"])
+            if order_payment:
+                await db.delete(order_payment)
+            order = await db.get(Order, ids["order_id"])
+            if order:
+                await db.delete(order)
+            session = await db.get(CashRegisterSession, ids["session_id"])
+            if session:
+                await db.delete(session)
+            customer = await db.get(Customer, ids["customer_id"])
+            if customer:
+                await db.delete(customer)
+            await db.commit()
+
+    async def test_repair_prefers_source_order_total_over_items(self) -> None:
+        ids = await self._seed_legacy_conversion_case(
+            source_order_total=Decimal("100.00"),
+            item_unit_price=Decimal("80.00"),
+        )
+        try:
+            async with async_session() as db:
+                await _repair_legacy_consignment_product_totals(db)
+                await db.commit()
+            async with async_session() as db:
+                consignment = await db.get(
+                    ConsignmentOrder, ids["consignment_id"]
+                )
+                self.assertEqual(consignment.product_total, Decimal("100.00"))
+                self.assertEqual(consignment.service_total, Decimal("0.00"))
+                payment = await db.get(ConsignmentPayment, ids["payment_id"])
+                self.assertEqual(payment.product_portion, Decimal("100.00"))
+                self.assertEqual(payment.service_portion, Decimal("0.00"))
+        finally:
+            await self._cleanup_legacy_conversion_case(ids)
+
+    async def test_repair_skips_refund_linked_only_by_order_id(self) -> None:
+        ids = await self._seed_legacy_conversion_case(
+            source_order_total=Decimal("50.00"),
+            item_unit_price=Decimal("50.00"),
+            refund_via_order_id=True,
+        )
+        try:
+            async with async_session() as db:
+                await _repair_legacy_consignment_product_totals(db)
+                await db.commit()
+            async with async_session() as db:
+                consignment = await db.get(
+                    ConsignmentOrder, ids["consignment_id"]
+                )
+                self.assertEqual(consignment.product_total, Decimal("0.00"))
+                self.assertEqual(consignment.service_total, Decimal("0.00"))
+                payment = await db.get(ConsignmentPayment, ids["payment_id"])
+                self.assertEqual(payment.product_portion, Decimal("0.00"))
+                self.assertEqual(payment.service_portion, Decimal("50.00"))
+        finally:
+            await self._cleanup_legacy_conversion_case(ids)
 
 
 if __name__ == "__main__":

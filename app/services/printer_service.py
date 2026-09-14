@@ -6,12 +6,14 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from app.core.database import async_session
+from app.models.setting import Setting
 from app.services.notification_service import (
     create_printer_failure_notification,
     notification_to_dict,
 )
 from app.services.settings_service import get_setting, get_setting_as_int
 from app.services.money_service import money, rate
+from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +220,33 @@ async def get_printer_for_function(function: str) -> dict | None:
             "port": await get_setting_as_int(db, f"printer_{printer_id}_port", 9100),
             "width": await get_setting_as_int(db, f"printer_{printer_id}_width", 48),
         }
+
+
+async def list_configured_printers() -> list[dict]:
+    """Return configured network printers as ``[{id, name}]`` (no IP exposed)."""
+    async with async_session() as db:
+        result = await db.execute(
+            select(Setting.key).where(Setting.key.like("printer%ip"))
+        )
+        printer_ids = set()
+        for key in result.scalars().all():
+            printer_id = key[len("printer_"): -len("_ip")]
+            if printer_id:
+                printer_ids.add(printer_id)
+
+        def _sort_key(value: str):
+            return (0, int(value), "") if value.isdigit() else (1, 0, value)
+
+        printers = []
+        for printer_id in sorted(printer_ids, key=_sort_key):
+            ip = await get_setting(db, f"printer_{printer_id}_ip", "")
+            if not ip:
+                continue
+            name = await get_setting(
+                db, f"printer_{printer_id}_name", f"Impressora {printer_id}"
+            )
+            printers.append({"id": printer_id, "name": name})
+        return printers
 
 
 def _send_data_to_socket(ip: str, port: int, data: bytes) -> None:

@@ -1,10 +1,10 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.models.user import User
-from app.routers.auth_deps import get_current_user, require_role
+from app.routers.auth_deps import get_current_user, can_manage_notifications
 from app.routers.ws import broadcast_notification
 from app.services.notification_service import (
     get_notifications,
@@ -20,11 +20,21 @@ from app.services.printer_service import (
     build_order_receipt,
     build_ficha_ticket,
     get_printer_for_function,
+    list_configured_printers,
     send_to_printer,
 )
 from app.services.settings_service import get_setting
 
 router = APIRouter(prefix="/api/notifications", tags=["notifications"])
+
+
+def require_notification_manager(
+    user: User = Depends(get_current_user),
+) -> User:
+    """Allow garçom, caixa and gerente to reprint/resolve notifications."""
+    if not can_manage_notifications(user):
+        raise HTTPException(status_code=403, detail="Acesso restrito")
+    return user
 
 
 class ReprintRequest(BaseModel):
@@ -42,9 +52,12 @@ async def list_notifications(
     user: User = Depends(get_current_user),
 ):
     notifications = await get_notifications(db, status=status, limit=100)
+    can_manage = can_manage_notifications(user)
     return {
         "notifications": [notification_to_dict(n) for n in notifications],
         "is_manager": user.role == "gerente",
+        "can_manage": can_manage,
+        "printers": await list_configured_printers() if can_manage else [],
     }
 
 
@@ -75,7 +88,7 @@ async def resolve_notification(
     notification_id: int,
     req: ResolveRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_role("gerente")),
+    user: User = Depends(require_notification_manager),
 ):
     notification = await get_notification_by_id(db, notification_id)
     if not notification:
@@ -94,7 +107,7 @@ async def reprint_notification(
     notification_id: int,
     req: ReprintRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_role("gerente")),
+    user: User = Depends(require_notification_manager),
 ):
     notification = await get_notification_by_id(db, notification_id)
     if not notification:

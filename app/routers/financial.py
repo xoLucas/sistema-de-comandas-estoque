@@ -214,6 +214,53 @@ async def _direct_service_in_period(
     return money(await db.scalar(query))
 
 
+async def _refundable_service_in_period(
+    start: datetime | None,
+    end: datetime | None,
+    db: AsyncSession,
+) -> Decimal:
+    query = select(
+        func.coalesce(
+            func.sum(
+                case(
+                    (
+                        and_(
+                            PaymentRefund.service_was_recognized == True,
+                            PaymentRefund.service_already_repassed == False,
+                        ),
+                        PaymentRefund.service_amount,
+                    ),
+                    else_=0,
+                )
+            ),
+            0,
+        )
+    )
+    if start is not None:
+        query = query.where(PaymentRefund.created_at >= start)
+    if end is not None:
+        query = query.where(PaymentRefund.created_at <= end)
+    return money((await db.execute(query)).scalar_one())
+
+
+async def _net_service_in_period(
+    start: datetime,
+    end: datetime,
+    db: AsyncSession,
+) -> Decimal:
+    """Service charge effectively paid in the period.
+
+    Direct payments (partial + final) + consignment tips recognized only when
+    the consignment becomes fully paid − refunded service.
+    """
+    direct = await _direct_service_in_period(start, end, db)
+    tips = await _consignment_tips_paid_in_period(start, end, db)
+    refundable = await _refundable_service_in_period(start, end, db)
+    return money(
+        money(direct) + money(sum(tips.values(), ZERO)) - money(refundable)
+    )
+
+
 async def compute_session_close_metrics(session, db: AsyncSession) -> dict:
     """Compute the faturamento/card-fees/service-charge for a closed session.
 
@@ -1626,6 +1673,7 @@ async def list_sales(
         "summary": {
             "total_sales": as_float(total_day),
             "total_service_charge": as_float(total_service),
+            "billing_total": as_float(money(total_day + total_service)),
             "orders_count": counted_orders,
             "consignment_paid": round(consignment_paid_total, 2),
         },
@@ -1911,15 +1959,18 @@ async def dashboard(
         )
         pending_count, pending_total = pending_result.one()
 
+        product_total = money(
+            money(sales_total) + money(payments_total) - money(refunded_product)
+        )
+        net_service = money(
+            money(service_charge)
+            + money(sum(consignment_tips.values()))
+            - money(refunded_service)
+        )
         return {
-            "total": as_float(
-                money(sales_total) + money(payments_total) - money(refunded_product)
-            ),
-            "service_charge": as_float(
-                money(service_charge)
-                + money(sum(consignment_tips.values()))
-                - money(refunded_service)
-            ),
+            "total": as_float(product_total),
+            "service_charge": as_float(net_service),
+            "billing_total": as_float(money(product_total + net_service)),
             "orders": sales_count,
             "consignments": pending_count,
             "consignments_total": round(float(pending_total), 2),

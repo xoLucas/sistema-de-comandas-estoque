@@ -7,6 +7,7 @@ from decimal import Decimal
 import logging
 
 from sqlalchemy import select, text
+from sqlalchemy import or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -24,6 +25,7 @@ from app.services.settings_service import get_card_fee_for_machine
 BACKFILL_VERSION = "20260905_02_financial_integrity_backfill"
 REPAIR_VERSION = "20260906_08_legacy_consignment_preconversion"
 CREDITED_WAITER_VERSION = "20260908_03_payment_credited_waiter"
+PRODUCT_TOTAL_REPAIR_VERSION = "20260914_01_legacy_consignment_product_total"
 logger = logging.getLogger(__name__)
 
 
@@ -409,6 +411,121 @@ async def _backfill_consignments(db: AsyncSession) -> None:
                     consignment.closed_at = payments[-1].created_at
 
 
+async def _repair_legacy_consignment_product_totals(db: AsyncSession) -> int:
+    """Materialize product totals for legacy consignments skipped by the backfill.
+
+    Legacy rows created before ``product_total`` existed (or that had no payments
+    when ``_backfill_consignments`` ran) kept ``product_total = 0`` while
+    ``total > 0``. Because payments derive their product/service split from
+    ``product_total``, every payment on those rows was classified as service and
+    never counted as billed product.
+
+    This repair fills ``product_total``/``service_total`` and re-splits the
+    existing payments (product first), preserving the invariants
+    ``amount = product_portion + service_portion`` and ``amount_paid + balance =
+    total``. ``amount_paid``, ``balance`` and ``status`` are left untouched.
+
+    Cancelled or refunded consignments are skipped so net-of-refund splits are
+    never rewritten. Refunds linked only by ``order_id`` (legacy conversions) are
+    detected through their source order, mirroring
+    ``_repair_legacy_preconversion_payments``.
+    """
+    result = await db.execute(
+        select(ConsignmentOrder)
+        .where(
+            or_(
+                ConsignmentOrder.product_total == 0,
+                ConsignmentOrder.product_total.is_(None),
+            ),
+            ConsignmentOrder.total > 0,
+        )
+        .options(
+            selectinload(ConsignmentOrder.items),
+            selectinload(ConsignmentOrder.payments),
+            selectinload(ConsignmentOrder.refunds),
+            selectinload(ConsignmentOrder.source_order),
+        )
+        .order_by(ConsignmentOrder.id)
+    )
+
+    refunded_order_ids = set(
+        (
+            await db.execute(
+                select(PaymentRefund.order_id).where(
+                    PaymentRefund.order_id.is_not(None)
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    repaired = 0
+    for consignment in result.scalars().all():
+        if (
+            consignment.status == "cancelado"
+            or consignment.refunds
+            or consignment.source_order_id in refunded_order_ids
+        ):
+            continue
+
+        item_total = money(
+            sum(
+                (
+                    money(item.unit_price) * item.quantity
+                    for item in consignment.items
+                ),
+                ZERO,
+            )
+        )
+        # Same precedence as _backfill_consignments: the source order total wins,
+        # items are the fallback, then total minus the already recorded service.
+        product_total = (
+            money(consignment.source_order.total)
+            if consignment.source_order is not None
+            else ZERO
+        )
+        if product_total <= ZERO:
+            product_total = item_total
+        if product_total <= ZERO:
+            product_total = money(
+                max(
+                    ZERO,
+                    money(consignment.total) - money(consignment.service_total),
+                )
+            )
+        if product_total <= ZERO:
+            continue
+
+        consignment.product_total = product_total
+        consignment.service_total = money(
+            max(ZERO, money(consignment.total) - product_total)
+        )
+
+        paid_product = ZERO
+        for payment in sorted(
+            consignment.payments,
+            key=lambda entry: (
+                entry.created_at or consignment.created_at,
+                entry.id,
+            ),
+        ):
+            outstanding_product = money(max(ZERO, product_total - paid_product))
+            product_portion = money(min(money(payment.amount), outstanding_product))
+            payment.product_portion = product_portion
+            payment.service_portion = money(money(payment.amount) - product_portion)
+            paid_product = money(paid_product + product_portion)
+
+        repaired += 1
+
+    await db.flush()
+    logger.info(
+        "Legacy consignment product_total repair: %s consignment(s) repaired",
+        repaired,
+    )
+    return repaired
+
+
 async def _backfill_loss_costs(db: AsyncSession) -> None:
     result = await db.execute(
         select(StockHistory, Product)
@@ -596,6 +713,10 @@ async def run_financial_backfills(db: AsyncSession) -> None:
         text("SELECT 1 FROM schema_migrations WHERE version = :version"),
         {"version": CREDITED_WAITER_VERSION},
     )
+    product_total_applied = await db.scalar(
+        text("SELECT 1 FROM schema_migrations WHERE version = :version"),
+        {"version": PRODUCT_TOTAL_REPAIR_VERSION},
+    )
 
     if not backfill_applied:
         await _backfill_order_payments(db)
@@ -625,6 +746,13 @@ async def run_financial_backfills(db: AsyncSession) -> None:
         await db.execute(
             text("INSERT INTO schema_migrations (version) VALUES (:version)"),
             {"version": CREDITED_WAITER_VERSION},
+        )
+
+    if not product_total_applied:
+        await _repair_legacy_consignment_product_totals(db)
+        await db.execute(
+            text("INSERT INTO schema_migrations (version) VALUES (:version)"),
+            {"version": PRODUCT_TOTAL_REPAIR_VERSION},
         )
 
     await db.commit()

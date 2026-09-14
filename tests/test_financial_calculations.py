@@ -12,6 +12,7 @@ from app.services.stock_service import total_inventory_cost, validate_pack_confi
 from app.models.product import Product
 from app.services.backup_service import EXPORTABLE_ENTITIES
 from app.routers.orders import _confirmed_receipt_items
+from app.routers.consignments import split_consignment_payment
 from types import SimpleNamespace
 
 
@@ -137,6 +138,34 @@ class FinancialCalculationTests(unittest.TestCase):
         items = _confirmed_receipt_items(order)
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["subtotal"], 10.0)
+
+    def test_consignment_payment_splits_product_first(self) -> None:
+        product_portion, service_portion = split_consignment_payment(
+            Decimal("50.00"), Decimal("80.00"), Decimal("0.00")
+        )
+        self.assertEqual(product_portion, Decimal("50.00"))
+        self.assertEqual(service_portion, Decimal("0.00"))
+
+    def test_consignment_payment_split_moves_remainder_to_service(self) -> None:
+        product_portion, service_portion = split_consignment_payment(
+            Decimal("50.00"), Decimal("30.00"), Decimal("0.00")
+        )
+        self.assertEqual(product_portion, Decimal("30.00"))
+        self.assertEqual(service_portion, Decimal("20.00"))
+
+    def test_consignment_payment_split_respects_paid_product(self) -> None:
+        product_portion, service_portion = split_consignment_payment(
+            Decimal("20.00"), Decimal("30.00"), Decimal("25.00")
+        )
+        self.assertEqual(product_portion, Decimal("5.00"))
+        self.assertEqual(service_portion, Decimal("15.00"))
+
+    def test_consignment_payment_split_with_zero_product_total(self) -> None:
+        product_portion, service_portion = split_consignment_payment(
+            Decimal("40.00"), Decimal("0.00"), Decimal("0.00")
+        )
+        self.assertEqual(product_portion, Decimal("0.00"))
+        self.assertEqual(service_portion, Decimal("40.00"))
 
 
 if __name__ == "__main__":

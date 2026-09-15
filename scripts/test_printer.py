@@ -44,13 +44,17 @@ def _line(char: str = "-", width: int = 32) -> str:
     return char * width
 
 
-def build_test_ticket(width: int = 48, cut_paper: bool = True) -> bytes:
+def build_test_ticket(
+    width: int = 48,
+    cut_paper: bool = True,
+    store_name: str = "Lads Beer",
+) -> bytes:
     """Build a simple ESC/POS test ticket."""
     data = bytearray()
     data.extend(_cmd(ESC, b"@"))  # Initialize
     data.extend(_cmd(ESC, b"a", b"\x01"))  # Align center
     data.extend(_cmd(ESC, b"E", b"\x01"))  # Bold on
-    data.extend(_text("LADS BEER"))
+    data.extend(_text(store_name))
     data.extend(_cmd(ESC, b"E", b"\x00"))  # Bold off
     data.extend(_text("\n"))
     data.extend(_text("Teste de Impressora"))
@@ -73,7 +77,7 @@ def build_test_ticket(width: int = 48, cut_paper: bool = True) -> bytes:
     data.extend(_text("\n"))
 
     data.extend(_cmd(ESC, b"a", b"\x01"))  # Align center
-    data.extend(_text("Sistema Lads Beer\n"))
+    data.extend(_text(f"Sistema {store_name}\n"))
     data.extend(_text("OK\n"))
 
     if cut_paper:
@@ -89,11 +93,11 @@ def send_to_printer(ip: str, port: int, data: bytes, timeout: int = 5) -> None:
         sock.sendall(data)
 
 
-def print_terminal_preview(width: int = 48) -> None:
+def print_terminal_preview(width: int = 48, store_name: str = "Lads Beer") -> None:
     """Print a human-readable preview of the test ticket."""
     now = datetime.now(ZoneInfo("America/Sao_Paulo"))
     print("=" * width)
-    print(_center("LADS BEER", width))
+    print(_center(store_name, width))
     print(_center("Teste de Impressora", width))
     print("=" * width)
     print("Esta e uma impressao de teste.")
@@ -104,7 +108,7 @@ def print_terminal_preview(width: int = 48) -> None:
     print(f"Data: {now.strftime('%d/%m/%Y %H:%M')}")
     print("Porta: 9100 (raw ESC/POS)")
     print(_line("-", width))
-    print(_center("Sistema Lads Beer", width))
+    print(_center(f"Sistema {store_name}", width))
     print(_center("OK", width))
     print("=" * width)
 
@@ -119,15 +123,24 @@ def main() -> int:
     parser.add_argument("--no-cut", action="store_true", help="Nao enviar comando de corte no final")
     parser.add_argument("--preview", action="store_true", help="Mostra preview no terminal e nao imprime")
     parser.add_argument("--timeout", type=int, default=5, help="Timeout de conexao em segundos")
+    parser.add_argument(
+        "--store-name",
+        default="Lads Beer",
+        help="Nome do estabelecimento exibido no ticket (padrao: Lads Beer)",
+    )
     args = parser.parse_args()
 
     if args.width <= 0:
         print("Erro: --width deve ser maior que zero.", file=sys.stderr)
         return 1
 
-    data = build_test_ticket(width=args.width, cut_paper=not args.no_cut)
+    data = build_test_ticket(
+        width=args.width,
+        cut_paper=not args.no_cut,
+        store_name=args.store_name,
+    )
 
-    print_terminal_preview(width=args.width)
+    print_terminal_preview(width=args.width, store_name=args.store_name)
 
     if args.preview:
         print("\n[Preview mode: nenhum dado foi enviado para a impressora]")

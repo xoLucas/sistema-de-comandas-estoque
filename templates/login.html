@@ -3,7 +3,7 @@
 <div class="login-container">
     <div class="login-card">
         <span class="logo-icon"><i class="bi bi-shop-window"></i></span>
-        <h1>LADS BEER</h1>
+        <h1>{{ store_name|default('Lads Beer') }}</h1>
         <p class="subtitle">Sistema de Comandas</p>
 
         <form id="login-form" onsubmit="doLogin(event)" autocomplete="on">

@@ -13,6 +13,7 @@ from app.services.printer_service import (
     _load_printer_config,
     _send_to_printer_backend,
 )
+from app.services.settings_service import get_store_name
 
 router = APIRouter(prefix="/api", tags=["settings"])
 
@@ -90,12 +91,12 @@ async def update_setting(
     }
 
 
-def _build_test_ticket(width: int = 48) -> bytes:
+def _build_test_ticket(width: int = 48, store_name: str = "Lads Beer") -> bytes:
     """Build a simple ESC/POS test ticket for a configured printer."""
     b = EscPosBuilder(width=width)
     b.align_center()
     b.bold_on()
-    b.line("LADS BEER")
+    b.line(store_name)
     b.bold_off()
     b.line("Teste de Impressora")
     b.separator()
@@ -116,7 +117,7 @@ def _build_test_ticket(width: int = 48) -> bytes:
     b.separator()
 
     b.align_center()
-    b.line("Sistema Lads Beer")
+    b.line(f"Sistema {store_name}")
     b.line("OK")
     b.cut()
     return b.build()
@@ -133,7 +134,8 @@ async def test_printer(
     if not config:
         return {"success": False, "error": f"Impressora {printer_id} nao configurada"}
 
-    data = _build_test_ticket(width=config.get("width", 48))
+    store_name = await get_store_name(db)
+    data = _build_test_ticket(width=config.get("width", 48), store_name=store_name)
     try:
         await _send_to_printer_backend(data, config)
         return {"success": True, "printer": printer_id}

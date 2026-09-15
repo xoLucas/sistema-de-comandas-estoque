@@ -132,6 +132,11 @@ class OvernightSessionConsistencyTests(unittest.IsolatedAsyncioTestCase):
             patch.object(scheduler, "_build_session_report", build_report),
             patch.object(
                 scheduler,
+                "get_store_name",
+                AsyncMock(return_value="Lads Beer"),
+            ),
+            patch.object(
+                scheduler,
                 "_build_pdf_bytes",
                 Mock(return_value=BytesIO(b"%PDF-session")),
             ),

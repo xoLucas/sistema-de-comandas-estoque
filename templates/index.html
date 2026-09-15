@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <header>
-    <h1>LADS BEER</h1>
+    <h1>{{ store_name|default('Lads Beer') }}</h1>
     <p class="subtitle" id="user-greeting"></p>
 </header>
 

@@ -12,6 +12,12 @@ async def get_setting(db: AsyncSession, key: str, default: str | None = None) ->
     return setting.value
 
 
+async def get_store_name(db: AsyncSession, default: str = "Lads Beer") -> str:
+    value = await get_setting(db, "store_name", default)
+    value = (value or "").strip()
+    return value or default
+
+
 async def get_setting_as_float(db: AsyncSession, key: str, default: float = 0.0) -> float:
     raw = await get_setting(db, key)
     if raw is None:

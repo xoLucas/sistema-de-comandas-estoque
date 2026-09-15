@@ -21,6 +21,7 @@ from app.routers.ws import broadcast_notification
 from app.services.settings_service import (
     get_setting,
     get_setting_as_bool,
+    get_store_name,
 )
 from app.services.email_service import send_email_with_attachment
 from app.services.cash_service import compute_session_cash_summary
@@ -153,7 +154,8 @@ async def _send_auto_partial_report(
         return
 
     try:
-        pdf_buffer = _build_pdf_bytes(report, f"sessao_{session.id}_parcial")
+        store_name = await get_store_name(db)
+        pdf_buffer = _build_pdf_bytes(report, f"sessao_{session.id}_parcial", store_name)
         pdf_bytes = pdf_buffer.getvalue()
     except Exception:
         return

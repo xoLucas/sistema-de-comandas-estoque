@@ -37,7 +37,7 @@ from app.models.payment import OrderPayment, PaymentRefund, PaymentRefundItem
 from app.routers.auth_deps import get_current_user, can_view_financial
 from app.routers.ws import broadcast_stock_update
 from app.services.cash_service import compute_session_cash_summary
-from app.services.settings_service import get_setting
+from app.services.settings_service import get_setting, get_store_name
 from app.services.email_service import send_email_with_attachment
 from app.services.stock_service import is_pack
 from app.services.consignment_service import fetch_consignment_payments
@@ -402,7 +402,8 @@ async def send_session_close_report_email(
         if "error" in report:
             return
 
-        buffer = _build_pdf_bytes(report, f"sessao_{session.id}")
+        store_name = await get_store_name(db)
+        buffer = _build_pdf_bytes(report, f"sessao_{session.id}", store_name)
         pdf_bytes = buffer.getvalue()
         if not pdf_bytes:
             return
@@ -2233,7 +2234,8 @@ async def report_pdf(
             detail=report.get("error") if report else "Erro ao gerar relatório",
         )
 
-    buffer = _build_pdf_bytes(report, filename_suffix)
+    store_name = await get_store_name(db)
+    buffer = _build_pdf_bytes(report, filename_suffix, store_name)
 
     filename = f"relatorio_ladsbeer_{filename_suffix}.pdf"
     return StreamingResponse(
@@ -2243,18 +2245,24 @@ async def report_pdf(
     )
 
 
-def _build_pdf_bytes(report: dict, filename_suffix: str) -> io.BytesIO:
+def _build_pdf_bytes(
+    report: dict,
+    filename_suffix: str,
+    store_name: str = "Lads Beer",
+) -> io.BytesIO:
+    store_name = (store_name or "Lads Beer").encode("latin-1", "replace").decode("latin-1")
+
     pdf = FPDF(orientation="P", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
     pdf.set_font("Arial", "B", 16)
 
     if report.get("report_type") == "parcial":
-        title = "LADS BEER - Relatório Parcial de Caixa"
+        title = f"{store_name} - Relatório Parcial de Caixa"
     elif report.get("report_type") == "final":
-        title = "LADS BEER - Relatório Final de Caixa"
+        title = f"{store_name} - Relatório Final de Caixa"
     else:
-        title = "LADS BEER - Relatório Financeiro Diário"
+        title = f"{store_name} - Relatório Financeiro Diário"
 
     pdf.cell(0, 10, title, ln=True, align="C")
     pdf.set_font("Arial", "", 11)

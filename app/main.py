@@ -32,6 +32,7 @@ from app.routers.notifications import router as notifications_router
 from app.routers.dashboards import router as dashboards_router
 from app.routers.backup import router as backup_router
 from app.routers.auth_deps import get_current_user_optional
+from app.services.settings_service import get_store_name
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -112,70 +113,77 @@ app.include_router(backup_router)
 app.include_router(ws_router)
 
 
+async def page_context(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    return {"request": request, "store_name": await get_store_name(db)}
+
+
 @app.get("/")
-async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+async def index(context: dict = Depends(page_context)):
+    return templates.TemplateResponse("index.html", context)
 
 
 @app.get("/login")
-async def login_page(request: Request):
-    return templates.TemplateResponse("login.html", {"request": request})
+async def login_page(context: dict = Depends(page_context)):
+    return templates.TemplateResponse("login.html", context)
 
 
 @app.get("/mesa/{table_id}")
-async def table_page(request: Request, table_id: int):
+async def table_page(table_id: int, context: dict = Depends(page_context)):
     return templates.TemplateResponse(
-        "mesa.html", {"request": request, "table_id": table_id}
+        "mesa.html", {**context, "table_id": table_id}
     )
 
 
 @app.get("/estoque")
-async def stock_page(request: Request):
-    return templates.TemplateResponse("estoque.html", {"request": request})
+async def stock_page(context: dict = Depends(page_context)):
+    return templates.TemplateResponse("estoque.html", context)
 
 
 @app.get("/financeiro")
-async def financial_page(request: Request):
-    return templates.TemplateResponse("financeiro.html", {"request": request})
+async def financial_page(context: dict = Depends(page_context)):
+    return templates.TemplateResponse("financeiro.html", context)
 
 
 @app.get("/fornecedores")
-async def suppliers_page(request: Request):
-    return templates.TemplateResponse("fornecedores.html", {"request": request})
+async def suppliers_page(context: dict = Depends(page_context)):
+    return templates.TemplateResponse("fornecedores.html", context)
 
 
 @app.get("/promocoes")
-async def promotions_page(request: Request):
-    return templates.TemplateResponse("promocoes.html", {"request": request})
+async def promotions_page(context: dict = Depends(page_context)):
+    return templates.TemplateResponse("promocoes.html", context)
 
 
 @app.get("/configuracoes")
-async def settings_page(request: Request):
-    return templates.TemplateResponse("configuracoes.html", {"request": request})
+async def settings_page(context: dict = Depends(page_context)):
+    return templates.TemplateResponse("configuracoes.html", context)
 
 
 @app.get("/funcionarios")
-async def employees_page(request: Request):
-    return templates.TemplateResponse("funcionarios.html", {"request": request})
+async def employees_page(context: dict = Depends(page_context)):
+    return templates.TemplateResponse("funcionarios.html", context)
 
 
 @app.get("/clientes")
-async def customers_page(request: Request):
-    return templates.TemplateResponse("clientes.html", {"request": request})
+async def customers_page(context: dict = Depends(page_context)):
+    return templates.TemplateResponse("clientes.html", context)
 
 
 @app.get("/consignados")
-async def consignments_page(request: Request):
-    return templates.TemplateResponse("consignados.html", {"request": request})
+async def consignments_page(context: dict = Depends(page_context)):
+    return templates.TemplateResponse("consignados.html", context)
 
 
 @app.get("/dashboards")
-async def dashboards_page(request: Request):
-    return templates.TemplateResponse("dashboards.html", {"request": request})
+async def dashboards_page(context: dict = Depends(page_context)):
+    return templates.TemplateResponse("dashboards.html", context)
 
 
 @app.get("/balcao/{table_id}")
-async def balcao_page(request: Request, table_id: int):
+async def balcao_page(table_id: int, context: dict = Depends(page_context)):
     return templates.TemplateResponse(
-        "balcao.html", {"request": request, "table_id": table_id}
+        "balcao.html", {**context, "table_id": table_id}
     )

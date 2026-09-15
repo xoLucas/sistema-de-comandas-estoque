@@ -445,7 +445,7 @@ async def seed_pack_products(session) -> None:
             category=pack_data["category"],
             price=pack_data["price"],
             cost=pack_data["cost"],
-            stock=pack_data["stock"],
+            stock=0,
             min_stock=pack_data["min_stock"],
             pack_size=pack_data["pack_size"],
             pack_unit_product_id=unit_product.id,

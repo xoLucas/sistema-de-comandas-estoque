@@ -43,6 +43,9 @@ com 4 casas. O arredondamento canônico é `ROUND_HALF_UP`, centralizado em
 | Consumo de estoque: `stock -= unit_quantity` (checa insuficiência antes) | `app/routers/orders.py` → `_check_and_consume_stock()`; `app/routers/consignments.py` → `_check_and_consume_stock_consignment()`; `app/routers/stock.py` → `_apply_pack_stock_change()` |
 | Status: pack `em_falta` se `pack_stock ≤ 0`; unitário `em_falta` se `stock ≤ 2`; ambos `em_risco` se `≤ min_stock` | `app/services/stock_service.py` → `stock_status()` |
 | Custo (COGS) de item = `unit_cost` congelado no momento da venda (fallback: custo atual do produto) | `app/routers/orders.py` (criação do `OrderItem`) e `app/routers/financial.py` |
+| Custo (COGS) de engradado = custo do **produto unitário vinculado** × `pack_size`, congelado na venda (fallback: `product.cost` do pack) | `app/services/stock_service.py` → `resolved_sale_unit_cost()`; consumido em `app/routers/orders.py` (`create_pedido`, `add_order_item`, `add_pending_order_item`) e `app/routers/consignments.py` (`_consume_stock_for_items`) |
+| Custo cadastrado do pack sincronizado com o unitário: `pack.cost = unit.cost × pack_size` (ao salvar o unitário com custo novo ou o pack sem custo explícito) | `app/routers/stock.py` → `update_product` / `create_product` |
+| Reparo único: packs com `cost = 0`, `stock` fantasma e itens históricos de pack com `unit_cost` 0/null recebem o custo derivado do unitário (best effort, custo atual) | `app/services/financial_migration_service.py` → `_backfill_pack_cost_integrity()` (versão `20260915_01_pack_cost_integrity`) |
 | Histórico de engradado grava `source_quantity` em engradados, `conversion_factor = pack_size`, `quantity` em unidades físicas e `unit_cost_snapshot` do produto físico | `app/routers/orders.py`, `app/routers/stock.py`, `app/services/refund_service.py` |
 
 ---
@@ -169,7 +172,7 @@ com 4 casas. O arredondamento canônico é `ROUND_HALF_UP`, centralizado em
 
 | Fórmula | Código |
 |---------|--------|
-| `total_sales = Σ order.total` (pedidos não-fiado fechados no período) + `Σ ConsignmentPayment.product_portion` recebido no período − `Σ PaymentRefund.product_amount` estornado no período | `app/routers/financial.py` → `_build_daily_report()` / `_build_session_report()` |
+| `total_sales = Σ order.total` (pedidos não-fiado fechados no período, **excluindo `is_estorno = True`**) + `Σ ConsignmentPayment.product_portion` recebido no período − `Σ PaymentRefund.product_amount` de **estornos parciais** (vendas não-estornadas) no período | `app/routers/financial.py` → `_build_daily_report()` / `_build_session_report()` / `compute_period_profit()` / `list_sales()` / `_period_totals()` |
 | `billing_total` (faturamento exibido, **com** taxa de serviço) = `total_sales` líquido + `total_service_charge` líquido, onde `total_service_charge` = serviço direto pago (`OrderPayment.service_amount`) + gorjeta de consignado quitado (só na quitação) − serviço estornado | `app/routers/financial.py` → `_net_service_in_period()` / `_period_totals()` / `list_sales()`; `app/routers/dashboards.py` → `dashboard_geral`, `dashboard_vendas`, `dashboard_gestao` |
 | `total_cogs = Σ (unit_cost × quantity)` (itens de pedido) | idem |
 | `gross_profit = total_sales − total_cogs` | idem |
@@ -204,6 +207,17 @@ com 4 casas. O arredondamento canônico é `ROUND_HALF_UP`, centralizado em
 >   reconhecidos. Estorno de pagamento em comanda ainda aberta movimenta o caixa,
 >   mas não subtrai receita ou custo que ainda não haviam entrado nos relatórios.
 
+> **Vendas estornadas (P1.4):** vendas com `Order.is_estorno = True` (estorno integral via
+> Financeiro → Estornar Venda) são **excluídas de todos os períodos** nos agregadores de
+> produto/COGS/rankings (`total_sales`, `total_cogs`, `by_table`, rankings, `dashboard_geral`,
+> `dashboard_vendas`, `dashboard_gestao`). Os `PaymentRefund` dessas vendas **não** são
+> subtraídos de novo (evita dupla exclusão); estornos **parciais** (venda continua
+> `is_estorno = False`) seguem sendo subtraídos na data do estorno. Serviço/gorjeta e
+> caixa mantêm o modelo por transação: o pagamento entra e o estorno sai na data do
+> estorno (`gross_total`, `cash_inflows`, posição de caixa); gorjeta já repassada vira
+> `retained_service_loss` e taxa de cartão não é devolvida.
+
+
 > **Atenção (`net_profit` vs `net_total`):** `net_profit` é sobre **vendas (produto)** e
 > desconta taxas/despesas; `net_total` é sobre **`gross_total` (tudo que entrou)** e
 > desconta serviço + taxas + despesas. São definições diferentes — não confundir.
@@ -228,9 +242,9 @@ canônicos `OrderPayment`, `ConsignmentPayment` e `PaymentRefund`, filtrados por
 
 | Fórmula | Código |
 |---------|--------|
-| `total_sales` = vendas diretas fechadas + parcelas de **produto** dos consignados − produto estornado, pela data de cada evento | `app/routers/financial.py` → `list_sales()` / `_period_totals()` |
+| `total_sales` = vendas diretas fechadas (**excluindo `is_estorno = True`**) + parcelas de **produto** dos consignados − produto de **estornos parciais**, pela data de cada evento | `app/routers/financial.py` → `list_sales()` / `_period_totals()` |
 | `billing_total` = `total_sales` + `total_service_charge` (taxa paga: direta + gorjeta de consignado quitado − serviço estornado) | `app/routers/financial.py` → `list_sales()` / `_period_totals()` |
-| `consignment_paid` = Σ `ConsignmentPayment.product_portion` recebida no período; o bruto pago permanece disponível separadamente nos detalhes | idem |
+| `consignment_paid` = Σ `ConsignmentPayment.amount` (bruto, inclui gorjeta) recebido no período − Σ estornos brutos de consignado (`PaymentRefund.gross_amount` com `consignment_payment_id`) no período; a parcela de produto continua separada para compor `total_sales` | `app/routers/financial.py` → `list_sales()`; `app/routers/dashboards.py` → `dashboard_geral` / `dashboard_vendas` |
 | Por forma de pagamento / hora = pagamentos canônicos no método/hora da transação − estornos no mesmo método/hora em que ocorreram | `app/services/cash_service.py` → `compute_payment_breakdown()` |
 
 > **Card "Hoje/Semana/Mês" e "Total do dia" (Financeiro):** o valor exibido é o

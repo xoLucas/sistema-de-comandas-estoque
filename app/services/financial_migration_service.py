@@ -12,8 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.cash_register_session import CashRegisterSession
-from app.models.consignment import ConsignmentOrder, ConsignmentPayment
+from app.models.consignment import (
+    ConsignmentOrder,
+    ConsignmentOrderItem,
+    ConsignmentPayment,
+)
 from app.models.order import Order
+from app.models.order_item import OrderItem
 from app.models.payment import OrderPayment, PaymentRefund
 from app.models.product import Product
 from app.models.stock_history import StockHistory
@@ -26,6 +31,7 @@ BACKFILL_VERSION = "20260905_02_financial_integrity_backfill"
 REPAIR_VERSION = "20260906_08_legacy_consignment_preconversion"
 CREDITED_WAITER_VERSION = "20260908_03_payment_credited_waiter"
 PRODUCT_TOTAL_REPAIR_VERSION = "20260914_01_legacy_consignment_product_total"
+PACK_COST_VERSION = "20260915_01_pack_cost_integrity"
 logger = logging.getLogger(__name__)
 
 
@@ -698,6 +704,49 @@ async def _backfill_payment_credited_waiter(db: AsyncSession) -> None:
     await db.flush()
 
 
+async def _backfill_pack_cost_integrity(db: AsyncSession) -> None:
+    """Repair pack costs, phantom pack stock and historical item cost snapshots.
+
+    Packs created by early seeds kept cost 0 and a phantom stock value, so sales
+    recorded unit_cost 0 and understated COGS. This backfill derives the pack
+    cost from the linked unit product, clears the phantom pack stock and repairs
+    historical item snapshots using the current unit cost (best effort).
+    """
+    packs_result = await db.execute(
+        select(Product)
+        .where(Product.pack_unit_product_id.is_not(None))
+        .options(selectinload(Product.pack_unit_product))
+    )
+    for pack in packs_result.scalars().all():
+        if pack.stock != 0:
+            pack.stock = 0
+        unit = pack.pack_unit_product
+        if unit is None or unit.cost is None or unit.cost <= ZERO:
+            continue
+        if cost(pack.cost or ZERO) <= ZERO:
+            pack.cost = cost(unit.cost * (pack.pack_size or 1))
+
+    for model in (OrderItem, ConsignmentOrderItem):
+        items_result = await db.execute(
+            select(model)
+            .join(Product, Product.id == model.product_id)
+            .where(Product.pack_unit_product_id.is_not(None))
+            .options(
+                selectinload(model.product).selectinload(Product.pack_unit_product)
+            )
+        )
+        for item in items_result.scalars().all():
+            if item.unit_cost is not None and cost(item.unit_cost) > ZERO:
+                continue
+            product = item.product
+            unit = product.pack_unit_product if product else None
+            if unit is None or unit.cost is None or unit.cost <= ZERO:
+                continue
+            item.unit_cost = cost(unit.cost * (product.pack_size or 1))
+
+    await db.flush()
+
+
 async def run_financial_backfills(db: AsyncSession) -> None:
     await _audit_suspect_modern_consignment_payments(db)
 
@@ -716,6 +765,10 @@ async def run_financial_backfills(db: AsyncSession) -> None:
     product_total_applied = await db.scalar(
         text("SELECT 1 FROM schema_migrations WHERE version = :version"),
         {"version": PRODUCT_TOTAL_REPAIR_VERSION},
+    )
+    pack_cost_applied = await db.scalar(
+        text("SELECT 1 FROM schema_migrations WHERE version = :version"),
+        {"version": PACK_COST_VERSION},
     )
 
     if not backfill_applied:
@@ -753,6 +806,13 @@ async def run_financial_backfills(db: AsyncSession) -> None:
         await db.execute(
             text("INSERT INTO schema_migrations (version) VALUES (:version)"),
             {"version": PRODUCT_TOTAL_REPAIR_VERSION},
+        )
+
+    if not pack_cost_applied:
+        await _backfill_pack_cost_integrity(db)
+        await db.execute(
+            text("INSERT INTO schema_migrations (version) VALUES (:version)"),
+            {"version": PACK_COST_VERSION},
         )
 
     await db.commit()

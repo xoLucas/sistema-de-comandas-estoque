@@ -3128,7 +3128,7 @@ async function submitProduct() {
         cost: parseFloat(document.getElementById('product-cost').value) || 0,
         margin_pct: parseFloat(document.getElementById('product-margin').value) || 0,
         price: parseFloat(document.getElementById('product-price').value) || 0,
-        stock: isPack ? 0 : (parseInt(document.getElementById('product-stock').value) || 0),
+        stock: isPack ? null : (parseInt(document.getElementById('product-stock').value) || 0),
         min_stock: parseInt(document.getElementById('product-min-stock').value) || 0,
         active: document.getElementById('product-active').checked,
         supplier_ids: Array.from(document.querySelectorAll('.product-supplier-check:checked')).map(cb => parseInt(cb.value)),
@@ -3272,7 +3272,9 @@ async function loadSales() {
         window._lastSalesMode = 'vendas';
 
         const methodLabels = { dinheiro: 'Dinheiro', pix: 'Pix', cartao_debito: 'Cartão Débito', cartao_credito: 'Cartão Crédito', nao_informado: 'Não Informado' };
-        const totalConsignado = consigs.reduce((s, c) => s + c.amount, 0);
+        const totalConsignado = (consigData.summary && consigData.summary.total_net !== undefined)
+            ? consigData.summary.total_net
+            : consigs.reduce((s, c) => s + c.amount, 0);
 
         container.innerHTML = `
             <div style="background:var(--color-secondary);border-radius:var(--radius);padding:12px;margin-bottom:12px;text-align:center;">
@@ -3595,7 +3597,7 @@ function renderDailyReport(data) {
             <div class="summary-row" style="border-top:1px solid var(--border-color);padding-top:8px;margin-top:8px;font-weight:700;color:var(--green);"><span>Lucro Bruto</span><span>${formatCurrency(data.summary.gross_profit)}</span></div>
             <div style="height:8px;"></div>
             <div class="summary-row" style="color:var(--red);"><span>Taxas de Cartão</span><span>- ${formatCurrency(data.summary.total_card_fees)}</span></div>
-            <div class="summary-row" style="color:var(--red);"><span>Despesas / Diárias</span><span>- ${formatCurrency(data.summary.total_expenses)}</span></div>
+            <div class="summary-row" style="color:var(--red);"><span>Despesas / Diárias</span><span>- ${formatCurrency(data.summary.cash_expenses ?? data.summary.total_expenses)}</span></div>
             ${data.summary.perdas_total ? `<div class="summary-row" style="color:var(--red);font-size:12px;padding-left:12px;"><span>Perdas (saídas manuais)</span><span>- ${formatCurrency(data.summary.perdas_total)}</span></div>` : ''}
             <div class="summary-row" style="font-weight:700;color:var(--accent);"><span>Lucro Líquido</span><span>${formatCurrency(data.summary.net_profit)}</span></div>
             <div style="color:var(--text-muted);font-size:11px;margin-top:12px;">
@@ -3982,7 +3984,7 @@ function renderSessionReport(data) {
             <div style="height:8px;"></div>
             <div class="summary-row"><span>Taxa de Serviço</span><span>${formatCurrency(data.summary.total_service_charge)}</span></div>
             <div class="summary-row" style="color:var(--red);"><span>Taxas de Cartão</span><span>- ${formatCurrency(data.summary.total_card_fees)}</span></div>
-            <div class="summary-row" style="color:var(--red);"><span>Despesas / Diárias</span><span>- ${formatCurrency(data.summary.total_expenses)}</span></div>
+            <div class="summary-row" style="color:var(--red);"><span>Despesas / Diárias</span><span>- ${formatCurrency(data.summary.cash_expenses ?? data.summary.total_expenses)}</span></div>
             ${data.summary.perdas_total ? `<div class="summary-row" style="color:var(--red);font-size:12px;padding-left:12px;"><span>Perdas (saídas manuais)</span><span>- ${formatCurrency(data.summary.perdas_total)}</span></div>` : ''}
             <div class="summary-row" style="font-weight:700;color:var(--accent);"><span>Lucro Líquido</span><span>${formatCurrency(data.summary.net_profit)}</span></div>
             <div style="color:var(--text-muted);font-size:11px;margin-top:12px;">
@@ -4548,6 +4550,9 @@ function _getSettingInputHtml(s) {
                 <option value="1" ${val1}>${escapeHtml(printer1Name)}</option>
                 <option value="2" ${val2}>${escapeHtml(printer2Name)}</option>
             </select>`;
+    }
+    if (['auto_open_time', 'auto_close_time'].includes(s.key)) {
+        return `<input type="time" id="setting-${s.key}" class="input-field" value="${s.value || ''}" onchange="submitSetting('${s.key}')">`;
     }
     const inputType = s.type === 'number' ? 'number' : 'text';
     const step = s.type === 'number' ? 'step="0.01"' : '';

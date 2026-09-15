@@ -39,6 +39,7 @@ from app.routers.financial import (
     _direct_payment_waiter_totals,
     _direct_service_in_period,
     _net_service_in_period,
+    _refund_from_estornada_order,
     _resolve_waiter_name,
     serialize_order_sale,
 )
@@ -177,6 +178,7 @@ async def dashboard_geral(
             func.count(Order.id),
         ).where(
             Order.status == "finalizada",
+            Order.is_estorno == False,
             Order.closed_at >= start_dt,
             Order.closed_at <= end_dt,
             or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
@@ -187,9 +189,7 @@ async def dashboard_geral(
 
     # Consignment product revenue is recognized as installments are received.
     consignment_payments = await fetch_consignment_payments(start_dt, end_dt, db)
-    consignment_paid_total = as_float(
-        money(sum((p.amount for p in consignment_payments), ZERO))
-    )
+    consignment_paid_total = money(sum((p.amount for p in consignment_payments), ZERO))
     consignment_product_total = as_float(
         money(sum((p.product_portion for p in consignment_payments), ZERO))
     )
@@ -205,9 +205,23 @@ async def dashboard_geral(
         )
         .options(
             selectinload(PaymentRefund.items).selectinload(PaymentRefundItem.product),
+            selectinload(PaymentRefund.order),
         )
     )
     refunds = refunds_result.scalars().all()
+    consignment_paid_total = money(
+        consignment_paid_total
+        - money(
+            sum(
+                (
+                    refund.gross_amount
+                    for refund in refunds
+                    if refund.consignment_payment_id is not None
+                ),
+                ZERO,
+            )
+        )
+    )
     refunded_product = as_float(
         money(
             sum(
@@ -215,6 +229,7 @@ async def dashboard_geral(
                     refund.product_amount
                     for refund in refunds
                     if refund.sale_was_recognized
+                    and not _refund_from_estornada_order(refund)
                 ),
                 ZERO,
             )
@@ -364,6 +379,7 @@ async def dashboard_geral(
         .join(Order, Order.id == OrderItem.order_id)
         .where(
             Order.status == "finalizada",
+            Order.is_estorno == False,
             Order.closed_at >= start_dt,
             Order.closed_at <= end_dt,
             or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
@@ -405,7 +421,7 @@ async def dashboard_geral(
             entry["total"] += float(item.unit_price or 0) * item.quantity
 
     for refund in refunds:
-        if not refund.sale_was_recognized:
+        if not refund.sale_was_recognized or _refund_from_estornada_order(refund):
             continue
         for item in refund.items:
             product = item.product
@@ -497,9 +513,7 @@ async def dashboard_vendas(
 
     # Consignment revenue follows the installment payment date.
     consignment_payments = await fetch_consignment_payments(start_dt, end_dt, db)
-    consignment_paid_total = as_float(
-        money(sum((payment.amount for payment in consignment_payments), ZERO))
-    )
+    consignment_paid_total = money(sum((payment.amount for payment in consignment_payments), ZERO))
     consignment_product_total = as_float(
         money(
             sum((payment.product_portion for payment in consignment_payments), ZERO)
@@ -527,6 +541,19 @@ async def dashboard_vendas(
         )
     )
     refunds = refunds_result.scalars().all()
+    consignment_paid_total = money(
+        consignment_paid_total
+        - money(
+            sum(
+                (
+                    refund.gross_amount
+                    for refund in refunds
+                    if refund.consignment_payment_id is not None
+                ),
+                ZERO,
+            )
+        )
+    )
     refunded_product_total = as_float(
         money(
             sum(
@@ -534,6 +561,7 @@ async def dashboard_vendas(
                     refund.product_amount
                     for refund in refunds
                     if refund.sale_was_recognized
+                    and not _refund_from_estornada_order(refund)
                 ),
                 ZERO,
             )
@@ -570,6 +598,7 @@ async def dashboard_vendas(
         select(Order.id, Order.closed_at)
         .where(
             Order.status == "finalizada",
+            Order.is_estorno == False,
             or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
         )
     )
@@ -655,6 +684,7 @@ async def dashboard_vendas(
             func.count(Order.id),
         ).where(
             Order.status == "finalizada",
+            Order.is_estorno == False,
             Order.closed_at >= start_dt,
             Order.closed_at <= end_dt,
             or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
@@ -682,7 +712,11 @@ async def dashboard_vendas(
         else:
             sales_by_day_map[day_key] = {"date": day_key, "total": round(amount, 2), "orders": 0}
     for refund in refunds:
-        if not refund.created_at or not refund.sale_was_recognized:
+        if (
+            not refund.created_at
+            or not refund.sale_was_recognized
+            or _refund_from_estornada_order(refund)
+        ):
             continue
         day_key = as_local(refund.created_at).date().isoformat()
         entry = sales_by_day_map.setdefault(
@@ -704,6 +738,7 @@ async def dashboard_vendas(
         .join(Order, Order.id == OrderItem.order_id)
         .where(
             Order.status == "finalizada",
+            Order.is_estorno == False,
             Order.closed_at >= start_dt,
             Order.closed_at <= end_dt,
             or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
@@ -727,6 +762,7 @@ async def dashboard_vendas(
         .join(Order, Order.id == OrderItem.order_id)
         .where(
             Order.status == "finalizada",
+            Order.is_estorno == False,
             Order.closed_at >= start_dt,
             Order.closed_at <= end_dt,
             or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
@@ -757,6 +793,7 @@ async def dashboard_vendas(
         .join(Order, Order.table_id == Table.id)
         .where(
             Order.status == "finalizada",
+            Order.is_estorno == False,
             Order.closed_at >= start_dt,
             Order.closed_at <= end_dt,
             or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
@@ -777,6 +814,7 @@ async def dashboard_vendas(
     for refund in refunds:
         if (
             not refund.sale_was_recognized
+            or _refund_from_estornada_order(refund)
             or refund.payment_id is None
             or not refund.order
             or not refund.order.table
@@ -822,7 +860,7 @@ async def dashboard_vendas(
             entry["total"] += float(item.unit_price or 0) * item.quantity
 
     for refund in refunds:
-        if not refund.sale_was_recognized:
+        if not refund.sale_was_recognized or _refund_from_estornada_order(refund):
             continue
         for item in refund.items:
             product = item.product
@@ -916,6 +954,7 @@ async def dashboard_vendas(
             func.count(Order.id),
         ).where(
             Order.status == "finalizada",
+            Order.is_estorno == False,
             Order.closed_at >= start_dt,
             Order.closed_at <= end_dt,
             or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
@@ -1105,6 +1144,7 @@ async def dashboard_clientes(
         .join(Order, Order.customer_id == Customer.id)
         .where(
             Order.status == "finalizada",
+            Order.is_estorno == False,
             or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
         )
         .group_by(Customer.id, Customer.name)

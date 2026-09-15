@@ -67,7 +67,7 @@ class ProductCreate(BaseModel):
     cost: Decimal = ZERO
     margin_pct: Decimal = ZERO
     price: Decimal | None = None
-    stock: int = 0
+    stock: int | None = None
     min_stock: int = 10
     printer: str | None = None
     active: bool = True
@@ -366,6 +366,13 @@ async def create_product(
     )
     _apply_pricing(product, req.cost, req.margin_pct, req.price)
 
+    if product.pack_unit_product_id is not None and cost(product.cost or ZERO) <= ZERO:
+        unit = await db.scalar(
+            select(Product).where(Product.id == product.pack_unit_product_id)
+        )
+        if unit and unit.cost and unit.cost > ZERO:
+            product.cost = cost(unit.cost * (product.pack_size or 1))
+
     if req.supplier_ids:
         supplier_result = await db.execute(select(Supplier).where(Supplier.id.in_(req.supplier_ids)))
         product.suppliers = supplier_result.scalars().all()
@@ -375,7 +382,7 @@ async def create_product(
     notification = None
     try:
         await db.flush()
-        if req.stock > 0:
+        if (req.stock or 0) > 0:
             changed_product, _, notification = await _apply_pack_stock_change(
                 product, req.stock, "entrada", "Estoque inicial", db
             )
@@ -436,6 +443,7 @@ async def update_product(
             product.printer = category.printer
     if req.printer is not None:
         product.printer = req.printer
+    previous_cost = cost(product.cost or ZERO)
     _apply_pricing(product, req.cost, req.margin_pct, req.price)
     if req.min_stock is not None:
         product.min_stock = req.min_stock
@@ -469,10 +477,23 @@ async def update_product(
             )
         }
 
+    if is_pack(product) and req.cost is None:
+        unit = await db.scalar(
+            select(Product).where(Product.id == product.pack_unit_product_id)
+        )
+        if unit and unit.cost and unit.cost > ZERO:
+            product.cost = cost(unit.cost * (product.pack_size or 1))
+
+    if not is_pack(product) and cost(product.cost or ZERO) != previous_cost:
+        linked_packs = await db.execute(
+            select(Product).where(Product.pack_unit_product_id == product.id)
+        )
+        for linked_pack in linked_packs.scalars().all():
+            if linked_pack.pack_size and linked_pack.pack_size >= 2:
+                linked_pack.cost = cost((product.cost or ZERO) * linked_pack.pack_size)
+
     stock_changed = False
-    if req.stock is not None and req.stock != product.stock:
-        if is_pack(product):
-            return {"error": "Não é permitido alterar o estoque de um engradado diretamente. Altere o estoque do produto unitário vinculado."}
+    if req.stock is not None and not is_pack(product) and req.stock != product.stock:
         product.stock = req.stock
         await _notify_stock_status(db, product)
         stock_changed = True

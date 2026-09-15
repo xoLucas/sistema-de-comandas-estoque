@@ -197,6 +197,31 @@ def serialize_order_sale(order: Order) -> dict:
     }
 
 
+def _refund_reverses_active_sale():
+    """Predicate for refunds that still reverse revenue/COGS in reports.
+
+    Fully refunded orders (``is_estorno``) are excluded from every sales
+    aggregate, so their refunds must not be subtracted again. Consignment
+    refunds keep reversing consignment revenue, and refunds of open orders are
+    filtered downstream by ``sale_was_recognized``.
+    """
+    return or_(
+        PaymentRefund.consignment_payment_id.is_not(None),
+        PaymentRefund.order_id.is_(None),
+        Order.is_estorno == False,
+    )
+
+
+def _refund_from_estornada_order(refund: PaymentRefund) -> bool:
+    """Whether a refund belongs to a fully refunded direct sale."""
+    return (
+        refund.order_id is not None
+        and refund.consignment_payment_id is None
+        and refund.order is not None
+        and bool(refund.order.is_estorno)
+    )
+
+
 async def _direct_service_in_period(
     start: datetime | None,
     end: datetime | None,
@@ -411,6 +436,7 @@ async def compute_period_profit(start: datetime, end: datetime, db: AsyncSession
         select(Order)
         .where(
             Order.status == "finalizada",
+            Order.is_estorno == False,
             Order.closed_at >= start,
             Order.closed_at <= end,
             or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
@@ -477,7 +503,10 @@ async def compute_period_profit(start: datetime, end: datetime, db: AsyncSession
                 func.sum(
                     case(
                         (
-                            PaymentRefund.sale_was_recognized == True,
+                            and_(
+                                PaymentRefund.sale_was_recognized == True,
+                                _refund_reverses_active_sale(),
+                            ),
                             PaymentRefund.product_amount,
                         ),
                         else_=0,
@@ -494,7 +523,9 @@ async def compute_period_profit(start: datetime, end: datetime, db: AsyncSession
                 ),
                 0,
             ),
-        ).where(
+        )
+        .join(Order, Order.id == PaymentRefund.order_id, isouter=True)
+        .where(
             PaymentRefund.created_at >= start,
             PaymentRefund.created_at <= end,
         )
@@ -507,10 +538,12 @@ async def compute_period_profit(start: datetime, end: datetime, db: AsyncSession
             )
         )
         .join(PaymentRefund, PaymentRefund.id == PaymentRefundItem.refund_id)
+        .join(Order, Order.id == PaymentRefund.order_id, isouter=True)
         .where(
             PaymentRefund.created_at >= start,
             PaymentRefund.created_at <= end,
             PaymentRefund.sale_was_recognized == True,
+            _refund_reverses_active_sale(),
         )
     )
     total_sales = money(total_sales - money(refunded_product))
@@ -920,9 +953,10 @@ async def _apply_refunds_to_report(
         gross = money(refund.gross_amount)
         product_amount = money(refund.product_amount)
         service_amount = money(refund.service_amount)
+        estornada_direct = _refund_from_estornada_order(refund)
         report["summary"]["total_refunds"] = money(report["summary"]["total_refunds"] + gross)
         report["summary"]["gross_total"] = money(report["summary"]["gross_total"] - gross)
-        if refund.sale_was_recognized:
+        if refund.sale_was_recognized and not estornada_direct:
             report["summary"]["total_sales"] = money(report["summary"]["total_sales"] - product_amount)
         if refund.service_already_repassed:
             report["summary"]["retained_service_loss"] = money(
@@ -954,7 +988,11 @@ async def _apply_refunds_to_report(
             waiter_totals[waiter_name]["service_charge"] = money(
                 waiter_totals[waiter_name]["service_charge"] - service_amount
             )
-        if refund.sale_was_recognized and refund.payment_id is not None:
+        if (
+            refund.sale_was_recognized
+            and not estornada_direct
+            and refund.payment_id is not None
+        ):
             order = refund.order
             if order:
                 table_label = order.table.label if order.table else "Balcão"
@@ -962,7 +1000,7 @@ async def _apply_refunds_to_report(
                     table_totals[table_label]["total"] - reversed_sale_product
                 )
 
-        if refund.sale_was_recognized:
+        if refund.sale_was_recognized and not estornada_direct:
             for item in refund.items:
                 item_cost = money(item.unit_cost * item.quantity)
                 report["summary"]["total_cogs"] = money(
@@ -1139,6 +1177,7 @@ async def _build_daily_report(
         select(Order)
         .where(
             Order.status == "finalizada",
+            Order.is_estorno == False,
             Order.closed_at >= day_start,
             Order.closed_at <= day_end,
             or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
@@ -1179,6 +1218,7 @@ async def _build_daily_report(
             "total_partial_payments": ZERO,
             "total_card_fees": ZERO,
             "total_expenses": total_expenses,
+            "cash_expenses": cash_expenses,
             "perdas_total": perdas_total,
             "operating_expenses": ZERO,
             "net_profit": ZERO,
@@ -1334,6 +1374,7 @@ async def _build_session_report(
         select(Order)
         .where(
             Order.status == "finalizada",
+            Order.is_estorno == False,
             Order.closed_at >= start,
             Order.closed_at <= end,
             or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
@@ -1402,6 +1443,7 @@ async def _build_session_report(
             "total_partial_payments": ZERO,
             "total_card_fees": ZERO,
             "total_expenses": total_expenses,
+            "cash_expenses": cash_expenses,
             "perdas_total": perdas_total,
             "operating_expenses": ZERO,
             "net_profit": ZERO,
@@ -1604,6 +1646,7 @@ async def list_sales(
 
     sales_total_query = select(func.coalesce(func.sum(Order.total), 0)).where(
         Order.status == "finalizada",
+        Order.is_estorno == False,
         or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
     )
     if day_start is not None and day_end is not None:
@@ -1613,13 +1656,27 @@ async def list_sales(
         )
     total_day = money(await db.scalar(sales_total_query))
 
-    consignment_paid_total = ZERO
+    consignment_product_total = ZERO
+    consignment_received_total = ZERO
+    consignment_refunded_total = ZERO
     if day_start is not None and day_end is not None:
         consignment_payments = await fetch_consignment_payments(day_start, day_end, db)
-        consignment_paid_total = money(
+        consignment_product_total = money(
             sum((payment.product_portion for payment in consignment_payments), ZERO)
         )
-        total_day = money(total_day + consignment_paid_total)
+        consignment_received_total = money(
+            sum((payment.amount for payment in consignment_payments), ZERO)
+        )
+        consignment_refunded_total = money(
+            await db.scalar(
+                select(func.coalesce(func.sum(PaymentRefund.gross_amount), 0)).where(
+                    PaymentRefund.created_at >= day_start,
+                    PaymentRefund.created_at <= day_end,
+                    PaymentRefund.consignment_payment_id.is_not(None),
+                )
+            )
+        )
+        total_day = money(total_day + consignment_product_total)
         total_service = money(
             total_service
             + money(
@@ -1630,34 +1687,40 @@ async def list_sales(
             )
         )
 
-    refund_query = select(
-        func.coalesce(
-            func.sum(
-                case(
-                    (
-                        PaymentRefund.sale_was_recognized == True,
-                        PaymentRefund.product_amount,
-                    ),
-                    else_=0,
-                )
-            ),
-            0,
-        ),
-        func.coalesce(
-            func.sum(
-                case(
-                    (
-                        and_(
-                            PaymentRefund.service_was_recognized == True,
-                            PaymentRefund.service_already_repassed == False,
+    refund_query = (
+        select(
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            and_(
+                                PaymentRefund.sale_was_recognized == True,
+                                _refund_reverses_active_sale(),
+                            ),
+                            PaymentRefund.product_amount,
                         ),
-                        PaymentRefund.service_amount,
-                    ),
-                    else_=0,
-                )
+                        else_=0,
+                    )
+                ),
+                0,
             ),
-            0,
-        ),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            and_(
+                                PaymentRefund.service_was_recognized == True,
+                                PaymentRefund.service_already_repassed == False,
+                            ),
+                            PaymentRefund.service_amount,
+                        ),
+                        else_=0,
+                    )
+                ),
+                0,
+            ),
+        )
+        .join(Order, Order.id == PaymentRefund.order_id, isouter=True)
     )
     if day_start is not None and day_end is not None:
         refund_query = refund_query.where(
@@ -1675,7 +1738,9 @@ async def list_sales(
             "total_service_charge": as_float(total_service),
             "billing_total": as_float(money(total_day + total_service)),
             "orders_count": counted_orders,
-            "consignment_paid": round(consignment_paid_total, 2),
+            "consignment_paid": round(
+                float(money(consignment_received_total - consignment_refunded_total)), 2
+            ),
         },
     }
 
@@ -1826,10 +1891,36 @@ async def list_consignment_payments(
 
     payments = await fetch_consignment_payments(day_start, day_end, db)
 
+    refunded_map: dict[int, Decimal] = {}
+    if payments:
+        refunds_result = await db.execute(
+            select(
+                PaymentRefund.consignment_payment_id,
+                func.coalesce(func.sum(PaymentRefund.gross_amount), 0),
+            )
+            .where(
+                PaymentRefund.consignment_payment_id.in_(
+                    [payment.id for payment in payments]
+                ),
+                PaymentRefund.created_at >= day_start,
+                PaymentRefund.created_at <= day_end,
+            )
+            .group_by(PaymentRefund.consignment_payment_id)
+        )
+        refunded_map = {
+            payment_id: money(total)
+            for payment_id, total in refunds_result.all()
+        }
+
     data = []
+    total_received = ZERO
+    total_refunded = ZERO
     for p in payments:
         consignment = p.consignment_order
         method = p.payment_method or "nao_informado"
+        refunded_amount = money(refunded_map.get(p.id, ZERO))
+        total_received = money(total_received + money(p.amount))
+        total_refunded = money(total_refunded + refunded_amount)
         data.append({
             "payment_id": p.id,
             "consignment_id": p.consignment_order_id,
@@ -1842,6 +1933,8 @@ async def list_consignment_payments(
                 consignment.credited_waiter_name if consignment else None
             ),
             "amount": round(float(p.amount), 2),
+            "refunded_amount": as_float(refunded_amount),
+            "net_amount": as_float(money(money(p.amount) - refunded_amount)),
             "payment_method": method,
             "payment_method_label": PAYMENT_LABELS.get(method, method),
             "card_machine": p.card_machine,
@@ -1850,7 +1943,14 @@ async def list_consignment_payments(
             "consignment_balance": round(float(consignment.balance), 2) if consignment else 0.0,
         })
 
-    return {"pagamentos": data}
+    return {
+        "pagamentos": data,
+        "summary": {
+            "total_received": as_float(total_received),
+            "total_refunded": as_float(total_refunded),
+            "total_net": as_float(money(total_received - total_refunded)),
+        },
+    }
 
 
 @router.get("/dashboard")
@@ -1890,6 +1990,7 @@ async def dashboard(
                 func.count(Order.id),
             ).where(
                 Order.status == "finalizada",
+                Order.is_estorno == False,
                 Order.closed_at >= start,
                 Order.closed_at <= end,
                 or_(Order.payment_method != "fiado", Order.payment_method.is_(None)),
@@ -1915,7 +2016,10 @@ async def dashboard(
                     func.sum(
                         case(
                             (
-                                PaymentRefund.sale_was_recognized == True,
+                                and_(
+                                    PaymentRefund.sale_was_recognized == True,
+                                    _refund_reverses_active_sale(),
+                                ),
                                 PaymentRefund.product_amount,
                             ),
                             else_=0,
@@ -1938,7 +2042,9 @@ async def dashboard(
                     ),
                     0,
                 ),
-            ).where(
+            )
+            .join(Order, Order.id == PaymentRefund.order_id, isouter=True)
+            .where(
                 PaymentRefund.created_at >= start,
                 PaymentRefund.created_at <= end,
             )

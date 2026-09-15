@@ -31,6 +31,7 @@ from app.services.settings_service import get_setting_as_float, get_setting
 from app.services.stock_service import (
     is_pack,
     pack_stock_for_product,
+    resolved_sale_unit_cost,
     stock_status,
     validate_pack_configuration,
 )
@@ -673,7 +674,7 @@ async def create_pedido(
             product_id=product.id,
             quantity=entry.quantity,
             unit_price=unit_price,
-            unit_cost=product.cost or ZERO,
+            unit_cost=resolved_sale_unit_cost(product, stock_product),
         )
         db.add(item)
 
@@ -801,8 +802,8 @@ async def add_order_item(
 
         if existing_item:
             existing_item.quantity += req.quantity
-            if existing_item.unit_cost is None:
-                existing_item.unit_cost = product.cost or ZERO
+            if existing_item.unit_cost is None or existing_item.unit_cost == ZERO:
+                existing_item.unit_cost = resolved_sale_unit_cost(product, stock_product)
         else:
             order_item = OrderItem(
                 order_id=order.id,
@@ -810,7 +811,7 @@ async def add_order_item(
                 product_id=product.id,
                 quantity=req.quantity,
                 unit_price=unit_price,
-                unit_cost=product.cost or ZERO,
+                unit_cost=resolved_sale_unit_cost(product, stock_product),
             )
             db.add(order_item)
     else:
@@ -1958,15 +1959,15 @@ async def add_pending_order_item(
 
         if existing_item:
             existing_item.quantity += req.quantity
-            if existing_item.unit_cost is None:
-                existing_item.unit_cost = product.cost or ZERO
+            if existing_item.unit_cost is None or existing_item.unit_cost == ZERO:
+                existing_item.unit_cost = resolved_sale_unit_cost(product, stock_product)
         else:
             order_item = OrderItem(
                 order_id=order.id,
                 product_id=product.id,
                 quantity=req.quantity,
                 unit_price=unit_price,
-                unit_cost=product.cost or ZERO,
+                unit_cost=resolved_sale_unit_cost(product, stock_product),
                 is_pending=True,
             )
             db.add(order_item)

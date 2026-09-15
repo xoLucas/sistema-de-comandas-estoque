@@ -6,6 +6,8 @@ inside the API routers, keeping validation close to the request payload.
 
 from __future__ import annotations
 
+import re
+
 from pydantic import field_validator
 
 from app.validators.brazilian import (
@@ -72,6 +74,22 @@ _CNPJ_SETTINGS = {"store_cnpj"}
 _PHONE_SETTINGS = {"store_phone"}
 _EMAIL_SETTINGS = {"auto_report_email", "smtp_user", "smtp_from"}
 _THEME_SETTINGS = {"theme_mode"}
+_TIME_SETTINGS = {"auto_open_time", "auto_close_time"}
+
+_TIME_PATTERN = re.compile(r"^(\d{1,2}):(\d{2})$")
+
+
+def normalize_hhmm(value: str | None) -> str | None:
+    """Normalize a clock value to zero-padded HH:MM, or None when invalid."""
+    if value is None:
+        return None
+    match = _TIME_PATTERN.match(value.strip())
+    if not match:
+        return None
+    hour, minute = int(match.group(1)), int(match.group(2))
+    if hour > 23 or minute > 59:
+        return None
+    return f"{hour:02d}:{minute:02d}"
 
 
 def validate_setting_value(key: str, value: str | None) -> str | None:
@@ -96,6 +114,12 @@ def validate_setting_value(key: str, value: str | None) -> str | None:
         normalized = value.lower().strip()
         if normalized not in {"light", "dark"}:
             raise ValueError("Tema deve ser 'light' ou 'dark'")
+        return normalized
+
+    if key in _TIME_SETTINGS:
+        normalized = normalize_hhmm(value)
+        if normalized is None:
+            raise ValueError("Horário inválido. Use o formato HH:MM")
         return normalized
 
     return value

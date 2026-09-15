@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import logging
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -34,6 +35,22 @@ from app.services.money_service import money
 
 SCHEDULER = AsyncIOScheduler(timezone=ZoneInfo("America/Sao_Paulo"))
 TIMEZONE = ZoneInfo("America/Sao_Paulo")
+logger = logging.getLogger("uvicorn.error")
+
+
+def _time_to_minutes(value: str | None) -> int | None:
+    """Parse a HH:MM setting into minutes of day, tolerating legacy H:MM values."""
+    normalized = (value or "").strip()
+    parts = normalized.split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        hour, minute = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return None
+    return hour * 60 + minute
 
 
 async def _ensure_system_user(db) -> User:
@@ -71,8 +88,15 @@ async def auto_open_cash_register() -> None:
             return
 
         configured_time = await get_setting(db, "auto_open_time", "18:00")
+        configured_minutes = _time_to_minutes(configured_time)
+        if configured_minutes is None:
+            logger.warning(
+                "auto_open_time inválido (%r); abertura automática ignorada",
+                configured_time,
+            )
+            return
         now = datetime.now(TIMEZONE)
-        if now.strftime("%H:%M") != configured_time:
+        if now.hour * 60 + now.minute != configured_minutes:
             return
 
         system_user = await _ensure_system_user(db)
@@ -163,8 +187,15 @@ async def auto_close_cash_register() -> None:
             return
 
         configured_time = await get_setting(db, "auto_close_time", "00:00")
+        configured_minutes = _time_to_minutes(configured_time)
+        if configured_minutes is None:
+            logger.warning(
+                "auto_close_time inválido (%r); fechamento automático ignorado",
+                configured_time,
+            )
+            return
         now = datetime.now(TIMEZONE)
-        if now.strftime("%H:%M") != configured_time:
+        if now.hour * 60 + now.minute != configured_minutes:
             return
 
         await db.execute(

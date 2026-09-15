@@ -2,11 +2,28 @@ from collections.abc import Iterable
 from decimal import Decimal
 
 from app.models.product import Product
-from app.services.money_service import ZERO, money
+from app.services.money_service import ZERO, cost, money
 
 
 def is_pack(product: Product) -> bool:
     return product.pack_unit_product_id is not None
+
+
+def resolved_sale_unit_cost(
+    product: Product, stock_product: Product | None = None
+) -> Decimal:
+    """Return the unit cost snapshot for a sold/consigned item.
+
+    Packs are sold in pack units, so their cost is the linked unit product cost
+    multiplied by the pack size. Falls back to the stored pack cost when the
+    linked unit is unavailable.
+    """
+    if is_pack(product):
+        unit = stock_product or product.pack_unit_product
+        if unit is not None and unit.cost is not None:
+            return cost((unit.cost or ZERO) * (product.pack_size or 1))
+        return cost(product.cost or ZERO)
+    return cost(product.cost or ZERO)
 
 
 def validate_pack_configuration(product: Product) -> None:

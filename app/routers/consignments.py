@@ -35,7 +35,12 @@ from app.routers.orders import (
 from app.routers.ws import broadcast_table_update, broadcast_stock_update
 from app.services.notification_service import broadcast_stock_notification
 from app.services.settings_service import get_setting_as_float
-from app.services.stock_service import is_pack, pack_stock_for_product, stock_status
+from app.services.stock_service import (
+    is_pack,
+    pack_stock_for_product,
+    resolved_sale_unit_cost,
+    stock_status,
+)
 from app.services.money_service import ZERO, as_float, money, percentage_amount, rate
 from app.services.payment_service import PAYMENT_METHODS, card_fee_snapshot, order_net_paid, resolve_credited_waiter_name
 from app.services.refund_service import refund_full_consignment, refund_full_order
@@ -163,7 +168,7 @@ async def _consume_stock_for_items(
             product_id=product.id,
             quantity=entry.quantity,
             unit_price=unit_price,
-            unit_cost=product.cost or ZERO,
+            unit_cost=resolved_sale_unit_cost(product, stock_product),
         ))
     return created_items, stock_notifications, products_to_broadcast
 

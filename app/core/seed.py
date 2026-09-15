@@ -218,7 +218,7 @@ SEED_USERS = [
 ]
 
 SEED_SETTINGS = [
-    {"key": "store_name", "value": "Lads Beer", "label": "Nome do Estabelecimento", "description": "Nome exibido no sistema e nos tickets", "type": "string"},
+    {"key": "store_name", "value": "Lads", "label": "Nome do Estabelecimento", "description": "Nome exibido no sistema e nos tickets", "type": "string"},
     {"key": "store_address", "value": "", "label": "Endereço", "description": "Endereço do estabelecimento", "type": "string"},
     {"key": "store_phone", "value": "", "label": "Telefone", "description": "Telefone de contato", "type": "string"},
     {"key": "store_cnpj", "value": "", "label": "CNPJ", "description": "CNPJ do estabelecimento", "type": "string"},
@@ -231,7 +231,7 @@ SEED_SETTINGS = [
     {"key": "card_machine_2_name", "value": "Maquininha 2", "label": "Nome Maquininha 2", "description": "Nome da segunda maquininha de cartão", "type": "string"},
     {"key": "card_machine_2_debit_fee", "value": "2.0", "label": "Taxa Débito Maquininha 2 (%)", "description": "Taxa de débito da maquininha 2", "type": "number"},
     {"key": "card_machine_2_credit_fee", "value": "4.0", "label": "Taxa Crédito Maquininha 2 (%)", "description": "Taxa de crédito da maquininha 2", "type": "number"},
-    {"key": "ticket_header", "value": "Lads Beer", "label": "Cabeçalho do Ticket", "description": "Texto do cabeçalho impresso nas comandas", "type": "string"},
+    {"key": "ticket_header", "value": "Lads", "label": "Cabeçalho do Ticket", "description": "Texto do cabeçalho impresso nas comandas", "type": "string"},
     {"key": "ticket_footer", "value": "Obrigado pela preferência!", "label": "Rodapé do Ticket", "description": "Texto do rodapé impresso nas comandas", "type": "string"},
     {"key": "auto_open_enabled", "value": "false", "label": "Abrir Caixa Automaticamente", "description": "Ativa abertura automática do caixa no horário configurado", "type": "boolean"},
     {"key": "auto_open_time", "value": "18:00", "label": "Horário de Abertura Automática", "description": "Horário para abrir o caixa automaticamente (HH:MM)", "type": "string"},

@@ -4,6 +4,7 @@ from app.models.category import Category
 from app.models.order import Order
 from app.models.order_item import OrderItem
 from app.models.order_round import OrderRound
+from app.models.order_transfer import OrderTransfer
 from app.models.user import User
 from app.models.employee import Employee
 from app.models.cash_position_movement import CashPositionMovement
@@ -21,6 +22,7 @@ __all__ = [
     "Order",
     "OrderItem",
     "OrderRound",
+    "OrderTransfer",
     "User",
     "Employee",
     "CashPositionMovement",

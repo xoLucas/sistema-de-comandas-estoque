@@ -406,7 +406,7 @@ def build_order_receipt(
         "nao_informado": "Não informado",
     }
 
-    write_line(store_info.get("name", "LADS BEER"), align="center", bold=True)
+    write_line(store_info.get("name", "LADS"), align="center", bold=True)
     separator()
     write_line("NOTA NAO FISCAL", bold=True)
     if receipt_type == "table_quote" and not status_text:

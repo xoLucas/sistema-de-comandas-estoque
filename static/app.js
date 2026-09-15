@@ -943,6 +943,28 @@ function updateTotalDisplay(order) {
     } else {
         partialInfo.style.display = 'none';
     }
+
+    const transferInfo = document.getElementById('order-transfer-info');
+    if (transferInfo) {
+        const transfers = order.transfers || [];
+        if (transfers.length > 0) {
+            const last = transfers[transfers.length - 1];
+            transferInfo.textContent = 'Movida de ' + (last.from_label || '—') + ' para ' + (last.to_label || '—')
+                + ' por ' + (last.moved_by_name || '—') + (last.created_at ? ' em ' + last.created_at : '');
+            transferInfo.style.display = 'block';
+        } else {
+            transferInfo.style.display = 'none';
+        }
+    }
+}
+
+function getRequestedOrderId() {
+    try {
+        const value = new URLSearchParams(window.location.search).get('order');
+        return value ? parseInt(value) : null;
+    } catch (err) {
+        return null;
+    }
 }
 
 async function loadTableDetail(user) {
@@ -955,6 +977,15 @@ async function loadTableDetail(user) {
             return;
         }
         currentTableData = data;
+        const requestedOrderId = getRequestedOrderId();
+        if (
+            requestedOrderId
+            && data.orders
+            && data.orders.some(o => String(o.id) === String(requestedOrderId))
+        ) {
+            currentOrderId = requestedOrderId;
+            try { history.replaceState(null, '', window.location.pathname); } catch (err) {}
+        }
         setCurrentOrderIdFromData();
 
         document.getElementById('table-title').textContent = data.label;
@@ -974,6 +1005,7 @@ async function loadTableDetail(user) {
             document.getElementById('order-selector-section').style.display = 'none';
             showNewOrderCreateActions(false);
             showNewOrderButton(false);
+            showMoveOrderButton(false);
         } else {
             openActions.style.display = 'none';
             activeActions.style.display = 'block';
@@ -981,6 +1013,7 @@ async function loadTableDetail(user) {
             renderOrderSelector();
             showNewOrderCreateActions(false);
             showNewOrderButton(true);
+            showMoveOrderButton(true);
             const order = getCurrentOrder();
             if (order) {
                 renderPedidos({ pedidos: order.pedidos });
@@ -1811,11 +1844,17 @@ function showNewOrderCreateActions(show) {
     if (actions) actions.style.display = show ? 'flex' : 'none';
 }
 
+function showMoveOrderButton(show) {
+    const btn = document.getElementById('btn-move-order');
+    if (btn) btn.style.display = show ? 'inline-block' : 'none';
+}
+
 function startNewOrder() {
     const customerSection = document.getElementById('customer-section');
     if (customerSection) customerSection.style.display = 'block';
     showNewOrderCreateActions(true);
     showNewOrderButton(false);
+    showMoveOrderButton(false);
     const input = document.getElementById('customer-name-input');
     if (input) setTimeout(() => input.focus(), 50);
 }
@@ -1827,6 +1866,7 @@ function cancelNewOrder() {
     clearSelectedCustomer();
     showNewOrderCreateActions(false);
     showNewOrderButton(true);
+    showMoveOrderButton(!isTableEmpty);
 }
 
 async function openOrder() {
@@ -1889,8 +1929,92 @@ async function createNewOrder() {
         currentOrderId = data.order_id || null;
         showNewOrderCreateActions(false);
         showNewOrderButton(true);
+        showMoveOrderButton(true);
         loadTableDetail();
     } catch (err) { alert('Erro ao criar nova comanda'); }
+}
+
+// ====== MOVE ORDER BETWEEN TABLES ======
+async function openMoveOrderModal() {
+    if (typeof TABLE_ID === 'undefined') return;
+    const order = getCurrentOrder();
+    if (!order) return;
+
+    const modal = document.getElementById('move-order-modal');
+    const select = document.getElementById('move-destination-select');
+    const label = document.getElementById('move-order-label');
+    const errorEl = document.getElementById('move-order-error');
+    if (!modal || !select) return;
+
+    if (label) {
+        label.textContent = '#' + order.id + ' - ' + formatCurrency(order.total || 0);
+    }
+    if (errorEl) errorEl.style.display = 'none';
+    select.innerHTML = '<option value="">Carregando mesas...</option>';
+    modal.style.display = 'flex';
+
+    try {
+        const res = await apiFetch(API_BASE + '/mesas');
+        const tables = await res.json();
+        const options = (tables || []).filter(t => !t.is_balcao && String(t.id) !== String(TABLE_ID));
+        if (options.length === 0) {
+            select.innerHTML = '<option value="">Nenhuma mesa disponível</option>';
+            return;
+        }
+        select.innerHTML = options.map(t => {
+            const count = t.open_orders_count || 0;
+            const status = count > 0
+                ? count + (count > 1 ? ' comandas abertas' : ' comanda aberta')
+                : 'vazia';
+            return `<option value="${t.id}">${t.label} — ${status}</option>`;
+        }).join('');
+    } catch (err) {
+        select.innerHTML = '<option value="">Erro ao carregar mesas</option>';
+    }
+}
+
+function closeMoveOrderModal() {
+    const modal = document.getElementById('move-order-modal');
+    if (modal) modal.style.display = 'none';
+}
+
+async function confirmMoveOrder() {
+    const order = getCurrentOrder();
+    if (!order) return;
+
+    const select = document.getElementById('move-destination-select');
+    const errorEl = document.getElementById('move-order-error');
+    const destinationId = select ? select.value : '';
+    if (!destinationId) {
+        if (errorEl) {
+            errorEl.textContent = 'Selecione uma mesa de destino';
+            errorEl.style.display = 'block';
+        }
+        return;
+    }
+
+    try {
+        const res = await apiFetch(API_BASE + '/comanda/' + order.id + '/mover', {
+            method: 'POST',
+            body: JSON.stringify({ destination_table_id: parseInt(destinationId) })
+        });
+        const rawText = await res.text();
+        let data = {};
+        try { data = JSON.parse(rawText); } catch (e) { throw new Error('Resposta inesperada do servidor'); }
+        if (data.error || data.detail) {
+            if (errorEl) {
+                errorEl.textContent = data.error || data.detail;
+                errorEl.style.display = 'block';
+            }
+            return;
+        }
+        window.location.href = '/mesa/' + data.to_table_id + '?order=' + data.order_id;
+    } catch (err) {
+        if (errorEl) {
+            errorEl.textContent = 'Erro ao mover comanda';
+            errorEl.style.display = 'block';
+        }
+    }
 }
 
 let closeWaiterCache = [];
@@ -7195,6 +7319,24 @@ document.addEventListener('click', (e) => {
         document.getElementById('balcao-customer-suggestions').style.display = 'none';
     }
 });
+
+function connectMesaWebSocket() {
+    connectTablesWebSocket();
+    if (tableSocket) {
+        const existingOnMessage = tableSocket.onmessage;
+        tableSocket.onmessage = (event) => {
+            if (existingOnMessage) existingOnMessage(event);
+            try {
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'table_update' && msg.data && String(msg.data.id) === String(TABLE_ID)) {
+                    const modal = document.getElementById('move-order-modal');
+                    if (modal && modal.style.display === 'flex') return;
+                    loadTableDetail();
+                }
+            } catch (err) {}
+        };
+    }
+}
 
 function connectBalcaoWebSocket() {
     if (tableSocket) {

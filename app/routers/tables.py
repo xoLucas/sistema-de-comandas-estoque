@@ -85,6 +85,7 @@ async def get_table_detail(
         .where(Order.table_id == table_id, Order.status == "aberta")
         .options(
             selectinload(Order.waiter),
+            selectinload(Order.transfers),
             selectinload(Order.items).selectinload(OrderItem.product).selectinload(Product.pack_unit_product),
             selectinload(Order.rounds)
             .selectinload(OrderRound.items)
@@ -182,6 +183,19 @@ async def get_table_detail(
             "service_charge_applied": order.service_charge_applied,
             "customer_name": order.customer_name,
             "waiter_name": order.waiter.name if order.waiter else None,
+            "transfers": [
+                {
+                    "from_label": transfer.from_table_label,
+                    "to_label": transfer.to_table_label,
+                    "moved_by_name": transfer.moved_by_name,
+                    "created_at": (
+                        as_local(transfer.created_at).strftime("%d/%m %H:%M")
+                        if transfer.created_at
+                        else ""
+                    ),
+                }
+                for transfer in order.transfers
+            ],
             "pedidos": pedidos,
         }
 

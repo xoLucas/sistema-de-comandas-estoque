@@ -17,6 +17,7 @@ from app.models.product import Product
 from app.models.order import Order
 from app.models.order_item import OrderItem
 from app.models.order_round import OrderRound
+from app.models.order_transfer import OrderTransfer
 from app.models.stock_history import StockHistory
 from app.models.notification import Notification
 from app.models.user import User
@@ -391,6 +392,10 @@ class RefundItemsRequest(BaseModel):
 class CancelOrderRequest(BaseModel):
     reason: str = Field(default="Cancelamento de comanda", min_length=3, max_length=500)
     idempotency_key: str | None = Field(default=None, max_length=64)
+
+
+class MoveOrderRequest(BaseModel):
+    destination_table_id: int = Field(..., gt=0)
 
 
 class PrintReceiptItem(BaseModel):
@@ -1577,6 +1582,82 @@ async def update_order_customer(
         "order_id": order.id,
         "customer_id": order.customer_id,
         "customer_name": order.customer_name,
+    }
+
+
+@router.post("/comanda/{order_id}/mover")
+async def move_order(
+    order_id: int,
+    req: MoveOrderRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Move an open order to another table, keeping items, payments and totals."""
+    order_result = await db.execute(
+        select(Order).where(Order.id == order_id).with_for_update()
+    )
+    order = order_result.scalars().first()
+
+    if not order:
+        return {"error": "Comanda não encontrada"}
+
+    if order.status != "aberta":
+        return {"error": "Apenas comandas abertas podem ser movidas"}
+
+    origin_result = await db.execute(
+        select(Table).where(Table.id == order.table_id).with_for_update()
+    )
+    origin = origin_result.scalars().first()
+
+    if not origin or origin.is_balcao:
+        return {"error": "Não é possível mover comanda do balcão"}
+
+    if req.destination_table_id == origin.id:
+        return {"error": "A comanda já está nesta mesa"}
+
+    destination_result = await db.execute(
+        select(Table).where(Table.id == req.destination_table_id).with_for_update()
+    )
+    destination = destination_result.scalars().first()
+
+    if not destination:
+        return {"error": "Mesa de destino não encontrada"}
+    if destination.is_balcao:
+        return {"error": "Não é possível mover comanda para o balcão"}
+    if not destination.active:
+        return {"error": "Mesa de destino arquivada"}
+
+    from_label = origin.label
+    to_label = destination.label
+
+    order.table_id = destination.id
+    destination.status = "ocupada"
+
+    db.add(OrderTransfer(
+        order_id=order.id,
+        from_table_id=origin.id,
+        to_table_id=destination.id,
+        moved_by_id=user.id,
+        moved_by_name=user.name,
+        from_table_label=from_label,
+        to_table_label=to_label,
+    ))
+
+    await db.flush()
+    if not await _has_open_orders(db, origin.id):
+        origin.status = "vazia"
+
+    await db.commit()
+    await broadcast_table_update(origin.id)
+    await broadcast_table_update(destination.id)
+
+    return {
+        "order_id": order.id,
+        "from_table_id": origin.id,
+        "from_table_label": from_label,
+        "to_table_id": destination.id,
+        "to_table_label": to_label,
+        "moved_by_name": user.name,
     }
 
 

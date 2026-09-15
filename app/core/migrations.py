@@ -184,6 +184,28 @@ async def _payment_credited_waiter_schema(conn: AsyncConnection) -> None:
     )
 
 
+async def _order_transfers_schema(conn: AsyncConnection) -> None:
+    statements = [
+        """
+        CREATE TABLE IF NOT EXISTS order_transfers (
+            id SERIAL PRIMARY KEY,
+            order_id INTEGER NOT NULL REFERENCES orders(id),
+            from_table_id INTEGER REFERENCES tables(id),
+            to_table_id INTEGER REFERENCES tables(id),
+            moved_by_id INTEGER REFERENCES users(id),
+            moved_by_name VARCHAR(100),
+            from_table_label VARCHAR(100),
+            to_table_label VARCHAR(100),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_order_transfers_order_id ON order_transfers (order_id)",
+        "CREATE INDEX IF NOT EXISTS ix_order_transfers_created_at ON order_transfers (created_at)",
+    ]
+    for statement in statements:
+        await conn.execute(text(statement))
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     ("20260905_01_financial_integrity_schema", _financial_integrity_schema),
     ("20260906_03_refund_service_recognition", _refund_service_recognition_schema),
@@ -192,6 +214,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     ("20260906_06_payment_refund_compatibility", _payment_refund_compatibility_schema),
     ("20260906_07_product_pack_validation", _product_pack_validation_schema),
     ("20260908_01_payment_credited_waiter", _payment_credited_waiter_schema),
+    ("20260914_01_order_transfers", _order_transfers_schema),
 )
 
 

@@ -43,6 +43,12 @@ class Order(Base):
     customer = relationship("Customer", back_populates="orders")
     items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
     rounds = relationship("OrderRound", back_populates="order", cascade="all, delete-orphan")
+    transfers = relationship(
+        "OrderTransfer",
+        back_populates="order",
+        cascade="all, delete-orphan",
+        order_by="OrderTransfer.id",
+    )
     consignment_order = relationship(
         "ConsignmentOrder", back_populates="source_order", uselist=False
     )

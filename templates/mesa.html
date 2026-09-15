@@ -36,7 +36,10 @@
             <select id="order-selector" class="select-field text-truncate" onchange="switchOrder(this.value)" style="margin-top:4px;">
             </select>
         </div>
-        <button id="btn-new-order" onclick="startNewOrder()" class="btn-small" style="margin-top:16px;white-space:nowrap;flex-shrink:0;">+ Nova</button>
+        <div style="display:flex;gap:8px;margin-top:16px;flex-shrink:0;">
+            <button id="btn-move-order" onclick="openMoveOrderModal()" class="btn-small" style="white-space:nowrap;">Mover</button>
+            <button id="btn-new-order" onclick="startNewOrder()" class="btn-small" style="white-space:nowrap;">+ Nova</button>
+        </div>
     </div>
 </div>
 
@@ -48,6 +51,7 @@
         <span id="partial-value">R$ 0,00</span>
         <span id="partial-detail" style="font-size:11px;color:var(--text-muted);display:block;margin-top:2px;"></span>
     </div>
+    <div id="order-transfer-info" style="display:none;font-size:11px;color:var(--text-muted);margin-top:4px;"></div>
 </div>
 
 <div id="open-actions" style="display:none;">
@@ -275,6 +279,24 @@
     </div>
 </div>
 
+<div id="move-order-modal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <h3>Mover Comanda</h3>
+        <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px;">
+            Selecione a mesa de destino para a comanda <strong id="move-order-label"></strong>. Itens, pagamentos e valores são mantidos.
+        </p>
+        <div style="margin-bottom:14px;">
+            <label class="input-label">Mesa de destino</label>
+            <select id="move-destination-select" class="select-field"></select>
+        </div>
+        <div style="display:flex;gap:8px;">
+            <button onclick="confirmMoveOrder()" class="btn-primary-full" style="flex:1;">Confirmar Mudança</button>
+            <button onclick="closeMoveOrderModal()" class="btn-secondary-full" style="flex:1;">Cancelar</button>
+        </div>
+        <p id="move-order-error" class="error-msg" style="display:none;"></p>
+    </div>
+</div>
+
 <div id="cash-register-closed-modal" class="modal" style="display:none;">
     <div class="modal-content">
         <h3>Caixa Fechado</h3>
@@ -301,7 +323,9 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('bottom-nav').style.display = 'flex';
         hideCreateCustomerButtonsIfNoPermission();
         loadTableDetail(user);
+        connectMesaWebSocket();
     });
 });
+window.addEventListener('beforeunload', closeTablesWebSocket);
 </script>
 {% endblock %}

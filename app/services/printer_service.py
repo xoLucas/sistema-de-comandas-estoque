@@ -3,7 +3,11 @@ import logging
 import socket
 from datetime import datetime
 from decimal import Decimal
+from functools import lru_cache
+from pathlib import Path
 from zoneinfo import ZoneInfo
+
+from PIL import Image, ImageOps
 
 from app.core.database import async_session
 from app.models.setting import Setting
@@ -127,6 +131,68 @@ def _print_terminal_preview(
     print()
 
 
+LOGO_WIDTH_PERCENT = 60
+DOTS_PER_COLUMN = 12
+LOGO_CANDIDATES = (
+    Path(__file__).resolve().parents[2] / "static" / "logo.png",
+    Path(__file__).resolve().parents[2] / "static" / "logo.jpeg",
+)
+
+
+def _logo_width_dots(printer_width: int) -> int:
+    """Return the logo width in dots (byte-aligned) for the configured column width."""
+    full_width = max(1, int(printer_width)) * DOTS_PER_COLUMN
+    width = full_width * LOGO_WIDTH_PERCENT // 100
+    return max(8, width - (width % 8))
+
+
+@lru_cache(maxsize=8)
+def _render_logo_raster(path: str, _mtime_ns: int, target_width: int) -> bytes:
+    """Render an image file as an ESC/POS ``GS v 0`` raster bitmap command."""
+    with Image.open(path) as source:
+        image = ImageOps.exif_transpose(source)
+        if image.mode in ("RGBA", "LA", "P"):
+            rgba = image.convert("RGBA")
+            background = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+            image = Image.alpha_composite(background, rgba)
+        image = image.convert("L")
+        target_height = max(1, round(image.height * target_width / image.width))
+        image = image.resize((target_width, target_height), Image.Resampling.LANCZOS)
+        # ESC/POS uses 1 for black dots; inverting PIL's "1" mode matches that.
+        image = ImageOps.invert(image.convert("1", dither=Image.Dither.NONE))
+        bitmap = image.tobytes()
+
+    width_bytes = target_width // 8
+    header = bytes(
+        [
+            0x1D,
+            0x76,
+            0x30,
+            0x00,
+            width_bytes & 0xFF,
+            (width_bytes >> 8) & 0xFF,
+            target_height & 0xFF,
+            (target_height >> 8) & 0xFF,
+        ]
+    )
+    return header + bitmap
+
+
+def load_logo_raster(printer_width: int = 32) -> bytes | None:
+    """Build the logo raster for a printer width, or None when no usable logo exists."""
+    target_width = _logo_width_dots(printer_width)
+    for path in LOGO_CANDIDATES:
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except OSError:
+            continue
+        try:
+            return _render_logo_raster(str(path), mtime_ns, target_width)
+        except Exception:
+            logger.warning("Failed to render logo %s", path, exc_info=True)
+    return None
+
+
 class EscPosBuilder:
     def __init__(self, width: int = 32):
         self.width = width
@@ -153,6 +219,12 @@ class EscPosBuilder:
 
     def line(self, text: str = ""):
         self.text(text + "\n")
+
+    def image(self, raster: bytes):
+        """Print a pre-built ESC/POS raster bitmap, centered, with a trailing gap."""
+        self.align_center()
+        self.data.extend(raster)
+        self.line("")
 
     def separator(self):
         self.line(_line("-", self.width))
@@ -406,6 +478,11 @@ def build_order_receipt(
         "nao_informado": "Não informado",
     }
 
+    logo = load_logo_raster(printer_width)
+    if logo:
+        b.image(logo)
+        preview_lines.append("[LOGO]")
+
     write_line(store_info.get("name", "LADS"), align="center", bold=True)
     separator()
     write_line("NOTA NAO FISCAL", bold=True)
@@ -514,6 +591,10 @@ def build_ficha_ticket(
     """Build a minimal "ficha" ticket: store name, date/time and product."""
     b = EscPosBuilder(width=printer_width)
 
+    logo = load_logo_raster(printer_width)
+    if logo:
+        b.image(logo)
+
     b.align_center()
     b.bold_on()
     b.line(store_name)
@@ -536,11 +617,14 @@ def build_ficha_ticket(
 
     b.cut()
 
-    preview_lines = [
-        store_name,
-        now.strftime("%d/%m/%Y %H:%M"),
-        f"** {product_name} **",
-    ]
+    preview_lines = ["[LOGO]"] if logo else []
+    preview_lines.extend(
+        [
+            store_name,
+            now.strftime("%d/%m/%Y %H:%M"),
+            f"** {product_name} **",
+        ]
+    )
     _print_terminal_preview("FICHA", preview_lines)
 
     return b.build()

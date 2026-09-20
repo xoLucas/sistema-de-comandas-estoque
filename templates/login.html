@@ -2,8 +2,12 @@
 {% block content %}
 <div class="login-container">
     <div class="login-card">
+        {% if login_show_logo and web_logo_url %}
+        <img class="brand-logo login-brand-logo" src="{{ web_logo_url }}" alt="{{ store_name|default('Lads Beer') }}">
+        {% else %}
         <span class="logo-icon"><i class="bi bi-shop-window"></i></span>
         <h1>{{ store_name|default('Lads Beer') }}</h1>
+        {% endif %}
         <p class="subtitle">Sistema de Comandas</p>
 
         <form id="login-form" onsubmit="doLogin(event)" autocomplete="on">

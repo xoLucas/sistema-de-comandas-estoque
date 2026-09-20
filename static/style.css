@@ -232,6 +232,24 @@ header h1 {
     line-height: 1.25;
 }
 
+.brand-logo {
+    display: block;
+    margin: 0 auto;
+}
+
+html[data-theme="dark"] .brand-logo {
+    filter: brightness(0) invert(1);
+}
+
+.login-card .brand-logo {
+    height: 82px;
+    margin-bottom: 10px;
+}
+
+header .brand-logo {
+    height: 64px;
+}
+
 header .subtitle {
     font-size: 13px;
     color: var(--text-muted);

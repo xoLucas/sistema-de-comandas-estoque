@@ -255,6 +255,8 @@ SEED_SETTINGS = [
     {"key": "printer_cozinha", "value": "1", "label": "Impressora para Cozinha", "description": "Qual impressora imprime pedidos da cozinha (1 ou 2)", "type": "string"},
     {"key": "printer_bar", "value": "2", "label": "Impressora para Bar", "description": "Qual impressora imprime pedidos do bar (1 ou 2)", "type": "string"},
     {"key": "theme_mode", "value": "dark", "label": "Tema da Interface", "description": "Modo de exibição do sistema: claro (light) ou escuro (dark)", "type": "string"},
+    {"key": "login_show_logo", "value": "true", "label": "Exibir logo na tela de login", "description": "Desativado mostra o nome do estabelecimento em texto", "type": "boolean"},
+    {"key": "mesas_show_logo", "value": "true", "label": "Exibir logo no topo das mesas", "description": "Desativado mostra o nome do estabelecimento em texto", "type": "boolean"},
 ]
 
 async def _ensure_columns() -> None:

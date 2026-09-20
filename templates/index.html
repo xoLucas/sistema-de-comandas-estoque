@@ -1,7 +1,11 @@
 {% extends "base.html" %}
 {% block content %}
 <header>
+    {% if mesas_show_logo and web_logo_url %}
+    <img class="brand-logo header-brand-logo" src="{{ web_logo_url }}" alt="{{ store_name|default('Lads Beer') }}">
+    {% else %}
     <h1>{{ store_name|default('Lads Beer') }}</h1>
+    {% endif %}
     <p class="subtitle" id="user-greeting"></p>
 </header>
 

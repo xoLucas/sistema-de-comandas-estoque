@@ -32,9 +32,10 @@ from app.routers.notifications import router as notifications_router
 from app.routers.dashboards import router as dashboards_router
 from app.routers.backup import router as backup_router
 from app.routers.auth_deps import get_current_user_optional
-from app.services.settings_service import get_store_name
+from app.services.settings_service import get_setting_as_bool, get_store_name
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+WEB_LOGO_FILES = ("logo.svg", "logo.png", "logo.jpeg")
 
 
 @asynccontextmanager
@@ -113,11 +114,24 @@ app.include_router(backup_router)
 app.include_router(ws_router)
 
 
+def _web_logo_url() -> str | None:
+    for filename in WEB_LOGO_FILES:
+        if (BASE_DIR / "static" / filename).exists():
+            return f"/static/{filename}"
+    return None
+
+
 async def page_context(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    return {"request": request, "store_name": await get_store_name(db)}
+    return {
+        "request": request,
+        "store_name": await get_store_name(db),
+        "web_logo_url": _web_logo_url(),
+        "login_show_logo": await get_setting_as_bool(db, "login_show_logo", True),
+        "mesas_show_logo": await get_setting_as_bool(db, "mesas_show_logo", True),
+    }
 
 
 @app.get("/")

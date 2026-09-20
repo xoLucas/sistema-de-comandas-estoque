@@ -4474,7 +4474,7 @@ const SETTINGS_GROUPS = [
         id: 'appearance',
         label: 'Aparência',
         icon: '<i class="bi bi-palette"></i>',
-        keys: ['theme_mode']
+        keys: ['theme_mode', 'login_show_logo', 'mesas_show_logo']
     },
     {
         id: 'store',

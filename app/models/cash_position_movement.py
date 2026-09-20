@@ -22,6 +22,9 @@ class CashPositionMovement(Base):
     refund_id: Mapped[int | None] = mapped_column(
         ForeignKey("payment_refunds.id"), nullable=True, unique=True
     )
+    daily_payment_id: Mapped[int | None] = mapped_column(
+        ForeignKey("daily_payments.id", ondelete="SET NULL"), nullable=True, unique=True
+    )
     created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

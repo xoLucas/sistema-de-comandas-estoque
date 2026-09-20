@@ -16,8 +16,11 @@ from app.core.timezone import (
 from app.models.employee import Employee
 from app.models.daily_payment import DailyPayment
 from app.models.expense import Expense
+from app.models.cash_position_movement import CashPositionMovement
+from app.models.cash_register_session import CashRegisterSession
 from app.models.user import User
 from app.routers.auth_deps import get_current_user, require_role, can_view_employees
+from app.services.money_service import money
 from app.validators.pydantic_mixins import EmployeeValidationMixin
 
 router = APIRouter(prefix="/api", tags=["employees"])
@@ -261,6 +264,26 @@ async def pay_daily(
         created_by_id=user.id,
     )
     db.add(expense)
+
+    open_session = (
+        await db.execute(
+            select(CashRegisterSession)
+            .where(CashRegisterSession.status == "open")
+            .order_by(CashRegisterSession.id.desc())
+        )
+    ).scalars().first()
+
+    movement = CashPositionMovement(
+        type="saida",
+        source="automatico",
+        title=f"Diária - {employee.name}",
+        amount=money(req.amount),
+        observation=req.notes,
+        session_id=open_session.id if open_session else None,
+        daily_payment_id=daily.id,
+        created_by_id=user.id,
+    )
+    db.add(movement)
 
     await db.commit()
     await db.refresh(daily)

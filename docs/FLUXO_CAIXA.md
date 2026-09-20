@@ -113,6 +113,7 @@ discrepancy      = final_cash - expected_cash
 
 > **Nota:** atualmente apenas pagamentos em dinheiro são considerados entradas de caixa físico. Pix e cartão não entram no cálculo de dinheiro esperado.
 > **Nota:** despesas (diárias, fornecedores, perdas etc.) **não** entram no cálculo de dinheiro esperado, pois não representam necessariamente saída de dinheiro físico do caixa. Elas são computadas apenas no relatório financeiro (Lucro Líquido).
+> **Nota:** a diária paga a um funcionário gera automaticamente uma saída na **Posição de Caixa** (dashboard de Gestão), vinculada à sessão aberta quando existir. Isso não altera o `expected_cash` do fechamento.
 
 ## Fuso Horário
 

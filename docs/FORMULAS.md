@@ -161,10 +161,23 @@ com 4 casas. O arredondamento canônico é `ROUND_HALF_UP`, centralizado em
 | `cash_inflows` = pagamentos em dinheiro da sessão (finais, parciais e consignados) − estornos em dinheiro registrados na sessão | `app/services/cash_service.py` → `compute_cash_inflows()` |
 | Movimento automático `Fechamento de caixa` = `gross_total` (todos os métodos) — **incidência única** do movimento, reutilizada pelo fechamento manual e automático | `app/routers/financial.py` → `finalize_cash_session()` (chamado por `app/routers/cash_register.py` e `app/core/scheduler.py`) |
 | Movimento `Taxa de cartão` = soma das taxas de cartão da sessão — mesma incidência única acima | idem |
+| Movimento `Diária - {funcionário}` = `DailyPayment.amount` como `saida` automática na Posição de Caixa, lançado no ato do registro da diária; recebe `session_id` se houver sessão aberta e `daily_payment_id` para rastreio. **Não** altera `expected_cash` (despesa não é necessariamente paga com o dinheiro do caixa) | `app/routers/employees.py` → `pay_daily()` |
 | Posição de caixa = `Σ entradas − Σ saídas`; cada estorno novo cria uma saída automática no valor bruto devolvido | `app/routers/cash_register.py` e `app/services/refund_service.py` |
 | Abrir caixa automático (scheduler): `initial_cash = final_cash` da última sessão fechada | `app/core/scheduler.py` → `auto_open_cash_register()` |
 | **Fechamento automático (scheduler):** no minuto configurado (`auto_close_time`, tentativa única), se NÃO houver comandas abertas (`Order.status == "aberta"`, incluindo balcão) fecha de verdade com `final_cash = expected_cash` (discrepância 0 assumida, sem conferência humana); se houver comandas abertas, NÃO fecha — cria notificação com a contagem e envia relatório **parcial**. O fechamento efetivo usa exatamente os mesmos movimentos do fechamento manual (via `finalize_cash_session`) | `app/core/scheduler.py` → `auto_close_cash_register()` / `app/services/notification_service.py` → `create_cash_register_close_notification()` / `create_cash_register_auto_closed_notification()` |
 | Relatório automático com caixa aberto: período = `session.opened_at` até o instante da geração, mesmo quando atravessa a meia-noite (parcial no bloqueio por comandas; final após fechar) | `app/core/scheduler.py` → `_send_auto_partial_report()` / `app/routers/financial.py` → `_build_session_report()` / `send_session_close_report_email()` |
+
+> **Diária na posição de caixa:** ao registrar `POST /api/funcionarios/diaria`, o sistema
+> grava `DailyPayment` + `Expense` (`category="diaria"`) + `CashPositionMovement`
+> (`type="saida"`, `source="automatico"`, título `Diária - {funcionário}`) no mesmo commit.
+> A diária reduz a Posição de Caixa (`entrada − saida`) e continua reduzindo o
+> `net_profit` via `total_expenses`, mas **nunca** entra em `expected_cash`/`cash_inflows`.
+> O movimento guarda `daily_payment_id`; se o funcionário for excluído (cascade das
+> diárias), a FK vira `NULL` e o movimento permanece no histórico da posição.
+> As diárias lançadas antes desta regra não são retroagidas (sem backfill).
+> Incidências: `app/routers/employees.py` → `pay_daily()`; consumidores automáticos
+> `app/routers/cash_register.py` → `get_cash_position()` e `app/routers/dashboards.py`
+> → `dashboard_gestao()` (ambos somam todos os `CashPositionMovement`).
 
 ---
 

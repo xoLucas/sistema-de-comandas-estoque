@@ -184,6 +184,15 @@ async def _payment_credited_waiter_schema(conn: AsyncConnection) -> None:
     )
 
 
+async def _daily_payment_cash_position_schema(conn: AsyncConnection) -> None:
+    statements = [
+        "ALTER TABLE cash_position_movements ADD COLUMN IF NOT EXISTS daily_payment_id INTEGER REFERENCES daily_payments(id) ON DELETE SET NULL",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_cash_position_daily_payment ON cash_position_movements (daily_payment_id) WHERE daily_payment_id IS NOT NULL",
+    ]
+    for statement in statements:
+        await conn.execute(text(statement))
+
+
 async def _order_transfers_schema(conn: AsyncConnection) -> None:
     statements = [
         """
@@ -215,6 +224,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     ("20260906_07_product_pack_validation", _product_pack_validation_schema),
     ("20260908_01_payment_credited_waiter", _payment_credited_waiter_schema),
     ("20260914_01_order_transfers", _order_transfers_schema),
+    ("20260920_01_daily_payment_cash_position", _daily_payment_cash_position_schema),
 )
 
 
